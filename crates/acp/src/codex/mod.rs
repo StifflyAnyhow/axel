@@ -147,7 +147,7 @@ struct Items {
 struct Session {
     id: String,
     codex: Arc<Codex>,
-    mode: Mutex<String>,
+    mode: Mutex<Mode>,
     model: Mutex<Option<String>>,
     turn: Mutex<Option<String>>,
     /// What each turn spent, from Codex's token reports.
@@ -189,23 +189,56 @@ pub fn serve_stdio() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Approval policy and sandbox for a mode id.
-fn policy(mode: &str) -> (&'static str, Value, &'static str) {
-    match mode {
-        // Never asks, no sandbox: Axel's autopilot (its guard still applies).
-        "bypassPermissions" | "full-access" => ("never", json!({ "type": "dangerFullAccess" }), "danger-full-access"),
-        // Edits inside the workspace go through; anything else asks.
-        "acceptEdits" | "auto" => ("on-request", json!({ "type": "workspaceWrite" }), "workspace-write"),
-        // Read-only: look and propose.
-        "plan" | "read-only" => ("on-request", json!({ "type": "readOnly" }), "read-only"),
-        // Ask before anything that isn't known to be safe.
-        _ => ("untrusted", json!({ "type": "workspaceWrite" }), "workspace-write"),
+/// The session modes, by the ids the host asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Default,
+    AcceptEdits,
+    Plan,
+    BypassPermissions,
+}
+
+impl Mode {
+    /// The ACP mode id.
+    fn as_str(self) -> &'static str {
+        match self {
+            Mode::Default => "default",
+            Mode::AcceptEdits => "acceptEdits",
+            Mode::Plan => "plan",
+            Mode::BypassPermissions => "bypassPermissions",
+        }
+    }
+
+    /// A mode id: ours, or one of codex-acp's preset ids.
+    fn parse(id: &str) -> Option<Mode> {
+        Some(match id {
+            "default" => Mode::Default,
+            "acceptEdits" | "auto" => Mode::AcceptEdits,
+            "plan" | "read-only" => Mode::Plan,
+            "bypassPermissions" | "full-access" => Mode::BypassPermissions,
+            _ => return None,
+        })
     }
 }
 
-fn modes(current: &str) -> Value {
+/// Approval policy and sandbox for a mode: the policy, the sandbox as a
+/// turn takes it, and as a thread takes it.
+fn policy(mode: Mode) -> (&'static str, Value, &'static str) {
+    match mode {
+        // Never asks, no sandbox: Axel's autopilot (its guard still applies).
+        Mode::BypassPermissions => ("never", json!({ "type": "dangerFullAccess" }), "danger-full-access"),
+        // Edits inside the workspace go through; anything else asks.
+        Mode::AcceptEdits => ("on-request", json!({ "type": "workspaceWrite" }), "workspace-write"),
+        // Read-only: look and propose.
+        Mode::Plan => ("on-request", json!({ "type": "readOnly" }), "read-only"),
+        // Ask before anything that isn't known to be safe.
+        Mode::Default => ("untrusted", json!({ "type": "workspaceWrite" }), "workspace-write"),
+    }
+}
+
+fn modes(current: Mode) -> Value {
     json!({
-        "currentModeId": current,
+        "currentModeId": current.as_str(),
         "availableModes": [
             { "id": "default", "name": "Default", "description": "Asks before anything that isn't known to be safe" },
             { "id": "acceptEdits", "name": "Accept Edits", "description": "Edits inside the workspace go through; anything else asks" },
@@ -268,15 +301,8 @@ impl Agent {
             }
             "session/set_mode" => {
                 let s = self.session(&params)?;
-                let mode = params.get("modeId").and_then(Value::as_str).unwrap_or("");
-                let mode = match mode {
-                    "default" | "acceptEdits" | "plan" | "bypassPermissions" => mode,
-                    "read-only" => "plan",
-                    "auto" => "acceptEdits",
-                    "full-access" => "bypassPermissions",
-                    _ => return Err(RpcError::invalid("Invalid Mode")),
-                };
-                *s.mode.lock().expect("mode lock") = mode.to_string();
+                let mode = params.get("modeId").and_then(Value::as_str).and_then(Mode::parse).ok_or_else(|| RpcError::invalid("Invalid Mode"))?;
+                *s.mode.lock().expect("mode lock") = mode;
                 Ok(json!({}))
             }
             "session/set_model" => {
@@ -303,7 +329,7 @@ impl Agent {
             .map_err(RpcError::internal)?;
         codex.stdin.send(&json!({ "method": "initialized" }));
 
-        let (approval, _, sandbox) = policy("default");
+        let (approval, _, sandbox) = policy(Mode::Default);
         let mut thread = json!({ "cwd": cwd, "approvalPolicy": approval, "sandbox": sandbox });
         if let Some(append) = params.pointer("/_meta/systemPrompt/append").and_then(Value::as_str) {
             thread["developerInstructions"] = json!(append);
@@ -333,7 +359,7 @@ impl Agent {
         let session = Arc::new(Session {
             id: thread_id.clone(),
             codex: codex.clone(),
-            mode: Mutex::new("default".into()),
+            mode: Mutex::new(Mode::Default),
             model: Mutex::new(None),
             turn: Mutex::new(None),
             meter: Mutex::new(CodexMeter::new(current_model.clone())),
@@ -392,7 +418,7 @@ impl Agent {
 
         Ok(json!({
             "sessionId": thread_id,
-            "modes": modes("default"),
+            "modes": modes(Mode::Default),
             "models": { "availableModels": models, "currentModelId": current },
         }))
     }
@@ -402,7 +428,7 @@ impl Agent {
         let s = self.session(params)?;
         let input = prompt_input(params);
         let text = input.first().and_then(|i| i.get("text")).and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let (approval, sandbox, _) = policy(&s.mode.lock().expect("mode lock").clone());
+        let (approval, sandbox, _) = policy(*s.mode.lock().expect("mode lock"));
 
         let started = if slash(&text, "compact").is_some() {
             s.codex.request("thread/compact/start", json!({ "threadId": s.id }), START_TIMEOUT).map_err(RpcError::internal)?;
@@ -876,11 +902,19 @@ mod tests {
 
     #[test]
     fn modes_map_to_policies() {
-        assert_eq!(policy("bypassPermissions").0, "never");
-        assert_eq!(policy("bypassPermissions").1, json!({ "type": "dangerFullAccess" }));
-        assert_eq!((policy("plan").0, policy("plan").2), ("on-request", "read-only"));
-        assert_eq!((policy("acceptEdits").0, policy("acceptEdits").2), ("on-request", "workspace-write"));
-        assert_eq!(policy("default").0, "untrusted");
+        assert_eq!(policy(Mode::BypassPermissions).0, "never");
+        assert_eq!(policy(Mode::BypassPermissions).1, json!({ "type": "dangerFullAccess" }));
+        assert_eq!((policy(Mode::Plan).0, policy(Mode::Plan).2), ("on-request", "read-only"));
+        assert_eq!((policy(Mode::AcceptEdits).0, policy(Mode::AcceptEdits).2), ("on-request", "workspace-write"));
+        assert_eq!(policy(Mode::Default).0, "untrusted");
+        // codex-acp's preset ids name the same modes.
+        assert_eq!(Mode::parse("full-access"), Some(Mode::BypassPermissions));
+        assert_eq!(Mode::parse("auto"), Some(Mode::AcceptEdits));
+        assert_eq!(Mode::parse("read-only"), Some(Mode::Plan));
+        assert_eq!(Mode::parse("yolo"), None);
+        for mode in [Mode::Default, Mode::AcceptEdits, Mode::Plan, Mode::BypassPermissions] {
+            assert_eq!(Mode::parse(mode.as_str()), Some(mode));
+        }
     }
 
     #[test]

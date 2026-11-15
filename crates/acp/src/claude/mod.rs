@@ -61,7 +61,7 @@ struct Session {
     next_control: AtomicU64,
     /// Control requests Claude withdrew (`control_cancel_request`).
     withdrawn: Mutex<HashSet<String>>,
-    permission_mode: Mutex<String>,
+    permission_mode: Mutex<PermissionMode>,
     cancelled: AtomicBool,
     /// `tool_use` blocks by id, for naming their results.
     tool_uses: Mutex<ToolUses>,
@@ -104,12 +104,47 @@ impl Session {
         }
     }
 
-    fn mode(&self) -> String {
-        self.permission_mode.lock().expect("mode lock").clone()
+    fn mode(&self) -> PermissionMode {
+        *self.permission_mode.lock().expect("mode lock")
     }
 
-    fn set_mode(&self, mode: &str) {
-        *self.permission_mode.lock().expect("mode lock") = mode.to_string();
+    fn set_mode(&self, mode: PermissionMode) {
+        *self.permission_mode.lock().expect("mode lock") = mode;
+    }
+}
+
+/// Claude Code's permission modes (`--permission-mode`, `set_permission_mode`),
+/// which are also this adapter's ACP session modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionMode {
+    Default,
+    AcceptEdits,
+    Plan,
+    DontAsk,
+    BypassPermissions,
+}
+
+impl PermissionMode {
+    /// Claude Code's name, and the ACP mode id.
+    fn as_str(self) -> &'static str {
+        match self {
+            PermissionMode::Default => "default",
+            PermissionMode::AcceptEdits => "acceptEdits",
+            PermissionMode::Plan => "plan",
+            PermissionMode::DontAsk => "dontAsk",
+            PermissionMode::BypassPermissions => "bypassPermissions",
+        }
+    }
+
+    fn parse(id: &str) -> Option<PermissionMode> {
+        Some(match id {
+            "default" => PermissionMode::Default,
+            "acceptEdits" => PermissionMode::AcceptEdits,
+            "plan" => PermissionMode::Plan,
+            "dontAsk" => PermissionMode::DontAsk,
+            "bypassPermissions" => PermissionMode::BypassPermissions,
+            _ => return None,
+        })
     }
 }
 
@@ -268,16 +303,11 @@ impl Agent {
             }
             "session/set_mode" => {
                 let s = self.session(&params)?;
-                let mode = params.get("modeId").and_then(Value::as_str).unwrap_or("");
-                match mode {
-                    "default" | "acceptEdits" | "bypassPermissions" | "dontAsk" | "plan" => {
-                        s.set_mode(mode);
-                        s.control(json!({ "subtype": "set_permission_mode", "mode": mode }), CONTROL_TIMEOUT)
-                            .map_err(|e| RpcError::invalid(if e.is_empty() { "Invalid Mode".into() } else { e }))?;
-                        Ok(json!({}))
-                    }
-                    _ => Err(RpcError::invalid("Invalid Mode")),
-                }
+                let mode = params.get("modeId").and_then(Value::as_str).and_then(PermissionMode::parse).ok_or_else(|| RpcError::invalid("Invalid Mode"))?;
+                s.set_mode(mode);
+                s.control(json!({ "subtype": "set_permission_mode", "mode": mode.as_str() }), CONTROL_TIMEOUT)
+                    .map_err(|e| RpcError::invalid(if e.is_empty() { "Invalid Mode".into() } else { e }))?;
+                Ok(json!({}))
             }
             other => Err(RpcError::not_found(other)),
         }
@@ -399,7 +429,7 @@ impl Agent {
             controls: Mutex::new(HashMap::new()),
             next_control: AtomicU64::new(0),
             withdrawn: Mutex::new(HashSet::new()),
-            permission_mode: Mutex::new("default".into()),
+            permission_mode: Mutex::new(PermissionMode::Default),
             cancelled: AtomicBool::new(false),
             tool_uses: Mutex::new(ToolUses::default()),
             hooked: Mutex::new(HashSet::new()),
@@ -550,22 +580,26 @@ impl Agent {
             if outcome.is_none() {
                 return Err("Tool use aborted".into());
             }
-            return Ok(match outcome.as_deref() {
-                Some(mode @ ("default" | "acceptEdits")) => {
+            return Ok(match outcome.as_deref().and_then(PermissionMode::parse) {
+                Some(mode @ (PermissionMode::Default | PermissionMode::AcceptEdits)) => {
                     session.set_mode(mode);
-                    self.client.update(&session.id, json!({ "sessionUpdate": "current_mode_update", "currentModeId": mode }));
+                    self.client.update(&session.id, json!({ "sessionUpdate": "current_mode_update", "currentModeId": mode.as_str() }));
                     json!({
                         "behavior": "allow",
                         "updatedInput": input,
-                        "updatedPermissions": suggestions.unwrap_or_else(|| json!([{ "type": "setMode", "mode": mode, "destination": "session" }])),
+                        "updatedPermissions": suggestions.unwrap_or_else(|| json!([{ "type": "setMode", "mode": mode.as_str(), "destination": "session" }])),
                     })
                 }
                 _ => json!({ "behavior": "deny", "message": "User rejected request to exit plan mode.", "interrupt": true }),
             });
         }
 
-        let mode = session.mode();
-        if mode == "bypassPermissions" || (mode == "acceptEdits" && is_edit_tool(tool)) {
+        let allowed_by_mode = match session.mode() {
+            PermissionMode::BypassPermissions => true,
+            PermissionMode::AcceptEdits => is_edit_tool(tool),
+            PermissionMode::Default | PermissionMode::Plan | PermissionMode::DontAsk => false,
+        };
+        if allowed_by_mode {
             return Ok(json!({
                 "behavior": "allow",
                 "updatedInput": input,
@@ -681,8 +715,8 @@ impl Agent {
             && input.get("hook_event_name").and_then(Value::as_str) == Some("PostToolUse")
         {
             if input.get("tool_name").and_then(Value::as_str) == Some("EnterPlanMode") {
-                session.set_mode("plan");
-                self.client.update(&session.id, json!({ "sessionUpdate": "current_mode_update", "currentModeId": "plan" }));
+                session.set_mode(PermissionMode::Plan);
+                self.client.update(&session.id, json!({ "sessionUpdate": "current_mode_update", "currentModeId": PermissionMode::Plan.as_str() }));
             }
             if let Some(id) = request.get("tool_use_id").and_then(Value::as_str)
                 && session.hooked.lock().expect("hooked lock").remove(id)
