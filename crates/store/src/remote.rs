@@ -244,6 +244,10 @@ impl Store {
     /// Envelopes on `threads` with `seq > cursor`, oldest first.  `None`
     /// means every envelope that is on a thread.
     pub fn thread_events_since(&self, cursor: i64, threads: Option<&[String]>, limit: usize) -> Result<Vec<(i64, Envelope)>, Error> {
+        // The loop checks the limit after a push, so it would return one.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut out = Vec::new();
         let mut st = self.conn.prepare(&format!(
             "SELECT seq, thread_id, {EVENT_COLS} FROM events WHERE seq > ?1 AND thread_id IS NOT NULL ORDER BY seq ASC"

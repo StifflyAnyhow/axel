@@ -2883,6 +2883,17 @@ fn each_harness_says_how_its_pane_takes_a_reasoning_effort() {
 }
 
 #[test]
+fn thread_events_since_honours_its_limit_at_the_boundaries() {
+    let s = store();
+    let owner = Keypair::generate();
+    let thread = s.create_thread(&owner, "t", "i", None).unwrap();
+    s.update_thread(&owner, &thread.id, Some("t2"), None).unwrap();
+    assert!(s.thread_events_since(0, None, 0).unwrap().is_empty());
+    assert_eq!(s.thread_events_since(0, None, 1).unwrap().len(), 1);
+    assert_eq!(s.thread_events_since(0, None, 10).unwrap().len(), 2);
+}
+
+#[test]
 fn an_envelope_dated_past_i64_is_refused_not_wrapped() {
     let s = store();
     let kp = Keypair::generate();
