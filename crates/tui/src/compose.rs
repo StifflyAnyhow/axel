@@ -72,32 +72,12 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
                 crate::util::log_key(&ev);
                 match ev {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
-                        match v.handle_compose_key(key) {
-                            ThreadAction::None => {}
-                            ThreadAction::OpenLog(session_id) => toggle_log(&session_id),
-                            ThreadAction::Quit | ThreadAction::Back => return Ok(()),
-                            ThreadAction::Send { session_id, cmd } => {
-                                let reply = (deps.send)(&session_id, cmd).map_err(|e| format!("{e:#}"));
-                                v.on_reply(reply);
-                                last = Instant::now() - REFRESH;
-                            }
-                            ThreadAction::Summon { thread_id, agent, text, attachments } => {
-                                let reply = (deps.summon)(&thread_id, &agent, &text, &attachments).map_err(|e| format!("{e:#}"));
-                                v.on_reply(reply.map(|_| crate::thread::SendReply::Ok));
-                                last = Instant::now() - REFRESH;
-                            }
-                            ThreadAction::Manage => {
-                                if let Some(open) = deps.open_controls {
-                                    open(thread_id);
-                                }
-                            }
-                            ThreadAction::OpenTerminal => {
-                                if let Some(open) = deps.open_terminal
-                                    && let Err(e) = open(thread_id)
-                                {
-                                    v.on_reply(Err(format!("could not open terminal: {e:#}")));
-                                }
-                            }
+                        let action = v.handle_compose_key(key);
+                        match carry_out(&deps, thread_id, &mut v, action, toggle_log) {
+                            Next::Wait => {}
+                            // What was sent shows sooner.
+                            Next::Refresh => last = Instant::now() - REFRESH,
+                            Next::Quit => return Ok(()),
                         }
                     }
                     Event::Paste(text) => v.handle_paste(&text),
@@ -105,9 +85,13 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
                 }
             }
             if last.elapsed() >= REFRESH {
-                if let Ok(d) = glue::load_thread(deps.store, &owner_pk, thread_id, now_secs()) {
-                    v.set_data(d);
-                    ask_new(&v);
+                match glue::load_thread(deps.store, &owner_pk, thread_id, now_secs()) {
+                    Ok(d) => {
+                        v.set_data(d);
+                        ask_new(&v);
+                    }
+                    // As the thread screen does: the next refresh tries again.
+                    Err(e) => v.set_status(format!("error: refresh failed: {e}")),
                 }
                 // Settled (or archived, deleted) elsewhere, e.g. from the
                 // dashboard: the thread's window goes, as when you leave it.
@@ -123,6 +107,47 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
     let _ = execute!(stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
+}
+
+/// What the composer's loop does after an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Next {
+    Wait,
+    /// Something was sent: read the thread again now.
+    Refresh,
+    Quit,
+}
+
+/// Carry out what a key asked for.
+fn carry_out(deps: &Deps, thread_id: &str, v: &mut ThreadView, action: ThreadAction, toggle_log: &dyn Fn(&str)) -> Next {
+    match action {
+        ThreadAction::None => {}
+        ThreadAction::OpenLog(session_id) => toggle_log(&session_id),
+        ThreadAction::Quit | ThreadAction::Back => return Next::Quit,
+        ThreadAction::Send { session_id, cmd } => {
+            let reply = (deps.send)(&session_id, cmd).map_err(|e| format!("{e:#}"));
+            v.on_reply(reply);
+            return Next::Refresh;
+        }
+        ThreadAction::Summon { thread_id, agent, text, attachments } => {
+            let reply = (deps.summon)(&thread_id, &agent, &text, &attachments).map_err(|e| format!("{e:#}"));
+            v.on_reply(reply.map(|_| crate::thread::SendReply::Ok));
+            return Next::Refresh;
+        }
+        ThreadAction::Manage => {
+            if let Some(open) = deps.open_controls {
+                open(thread_id);
+            }
+        }
+        ThreadAction::OpenTerminal => {
+            if let Some(open) = deps.open_terminal
+                && let Err(e) = open(thread_id)
+            {
+                v.on_reply(Err(format!("could not open terminal: {e:#}")));
+            }
+        }
+    }
+    Next::Wait
 }
 
 /// `None` when the thread is gone or can't be read; the next poll reads it again.
