@@ -44,7 +44,10 @@ impl<W: Write> Lines<W> {
     }
 
     pub fn send(&self, v: &Value) {
-        let mut w = self.0.lock().expect("pipe lock");
+        let mut w = self.0.lock().expect("pipe lock: no writer panics while holding it");
+        // A write fails only once the peer has exited; the thread reading its
+        // other pipe then sees EOF and ends the session, so there is nothing
+        // more to do with the error here.
         let _ = writeln!(w, "{v}");
         let _ = w.flush();
     }
@@ -80,7 +83,9 @@ impl Client {
         self.notify("session/update", json!({ "sessionId": session_id, "update": update }));
     }
 
-    /// A request to the client; blocks until it answers.
+    /// A request to the client; blocks until it answers.  Deliberately
+    /// without a timeout: permission requests wait for a human, and the wait
+    /// ends with the process when the client closes our stdin.
     pub fn request(&self, method: &str, params: Value) -> Result<Value, Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
@@ -96,6 +101,7 @@ impl Client {
                 Some(e) => Err(e.clone()),
                 None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
             };
+            // The requester stopped waiting (its thread ended): nobody to tell.
             let _ = tx.send(r);
         }
     }

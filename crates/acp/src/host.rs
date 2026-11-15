@@ -281,6 +281,8 @@ pub async fn run_host(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
+    // A socket left by a host that died; none is the usual case, and a real
+    // problem with the path shows in `bind` below.
     let _ = std::fs::remove_file(&cfg.socket_path);
     let listener = UnixListener::bind(&cfg.socket_path)
         .with_context(|| format!("binding {}", cfg.socket_path.display()))?;
@@ -290,8 +292,11 @@ pub async fn run_host(
     if std::io::stdin().is_terminal() {
         let tx = tx.clone();
         std::thread::spawn(move || {
-            let mut sink = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
+            // Nothing is typed into the host's pane: whatever is, is thrown
+            // away, so this holds no memory, and EOF and a read error both
+            // mean the pane is gone.
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            // The loop may have ended already; then there is nobody to stop.
             let _ = tx.send(Event::StdinClosed);
         });
     }
@@ -312,6 +317,7 @@ pub async fn run_host(
         .name("axel")
         .on_receive_notification(
             async move |n: acp::SessionNotification, _cx: ConnectionTo<Agent>| {
+                // The loop is gone only when the host is shutting down.
                 let _ = tx_notif.send(Event::Update(n));
                 Ok(())
             },
@@ -320,6 +326,7 @@ pub async fn run_host(
         .on_receive_notification(
             async move |n: agent_client_protocol::UntypedMessage, _cx: ConnectionTo<Agent>| {
                 if n.method().starts_with("_axel/") {
+                    // The loop is gone only when the host is shutting down.
                     let _ = tx_ext.send(Event::Ext { method: n.method().to_string(), params: n.params().clone() });
                 }
                 Ok(())
@@ -363,7 +370,7 @@ pub async fn run_host(
             async move |req: acp::WriteTextFileRequest,
                         responder: Responder<acp::WriteTextFileResponse>,
                         _cx: ConnectionTo<Agent>| {
-                let mode = *mode_cell.lock().expect("mode lock");
+                let mode = *mode_cell.lock().expect("mode lock: never held across a panic");
                 fs_write(&cwd2, mode, req, responder).await
             },
             agent_client_protocol::on_receive_request!(),
@@ -380,13 +387,18 @@ pub async fn run_host(
     };
     socket_task.abort();
     host.finish(&reason);
-    let _ = std::fs::remove_file(&socket_path);
+    if let Err(e) = std::fs::remove_file(&socket_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        host.line(RED, "✖", &format!("removing {}: {e}", socket_path.display()));
+    }
     // The adapter and everything it started (Claude, `npx` wrappers) share a
     // process group: end the group, so no harness outlives its session.
-    if let Some(pid) = child.id() {
+    if let Some(pid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
         // SAFETY: signalling a process group we created (`process_group(0)`).
+        // It may be gone already (ESRCH): then there is nothing left to end.
         unsafe {
-            libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+            libc::killpg(pid, libc::SIGTERM);
         }
     }
     drop(child); // kill_on_drop
@@ -480,6 +492,9 @@ const YELLOW: &str = "\x1b[33m";
 const BLUE: &str = "\x1b[34m";
 const MAGENTA: &str = "\x1b[35m";
 const CYAN: &str = "\x1b[36m";
+
+/// How long a stopping host waits for the socket's last reply to go out.
+const STOP_DRAIN: Duration = Duration::from_millis(50);
 
 /// A returned answer is cut to this many characters.
 const REPLY_MAX_CHARS: usize = 8000;
@@ -599,10 +614,17 @@ impl<W: Write> Host<W> {
 
     // --- output ---
 
+    /// Write to the host's pane.  The pane only shows what happens: a write
+    /// that fails (it was closed) must not stop the session, whose record is
+    /// the store, so the error is dropped here, once for every writer.
+    fn emit(&mut self, args: std::fmt::Arguments<'_>) {
+        let _ = self.out.write_fmt(args);
+        let _ = self.out.flush();
+    }
+
     fn line(&mut self, colour: &str, glyph: &str, text: &str) {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        let _ = writeln!(self.out, "{DIM}{ts}{RESET} {colour}{glyph}{RESET} {text}");
-        let _ = self.out.flush();
+        self.emit(format_args!("{DIM}{ts}{RESET} {colour}{glyph}{RESET} {text}\n"));
     }
 
     /// A desktop notification (OSC 9) for the terminal the host runs in, when
@@ -613,8 +635,7 @@ impl<W: Write> Host<W> {
             return;
         }
         let clean: String = text.chars().filter(|c| !c.is_control()).take(200).collect();
-        let _ = write!(self.out, "\x1b]9;{clean}\x07");
-        let _ = self.out.flush();
+        self.emit(format_args!("\x1b]9;{clean}\x07"));
     }
 
     /// Report this session's state to the terminal its pane runs in, as an
@@ -635,14 +656,13 @@ impl<W: Write> Host<W> {
             title: Some(&title),
             msg: (!msg.is_empty()).then_some(msg),
         };
-        let _ = write!(self.out, "{}", axel_rex::osc::encode(&report));
-        let _ = self.out.flush();
+        let encoded = axel_rex::osc::encode(&report);
+        self.emit(format_args!("{encoded}"));
     }
 
     fn dim(&mut self, text: &str) {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        let _ = writeln!(self.out, "{DIM}{ts}   {text}{RESET}");
-        let _ = self.out.flush();
+        self.emit(format_args!("{DIM}{ts}   {text}{RESET}\n"));
     }
 
     // --- the loop ---
@@ -674,65 +694,23 @@ impl<W: Write> Host<W> {
             tokio::select! {
                 ev = rx.recv() => {
                     let Some(ev) = ev else { return "host channel closed".into() };
-                    match self.handle_event(cx, ev, in_flight.is_some()) {
-                        Action::None => {}
-                        Action::StartPrompt(text, files, from) => in_flight = Some(self.start_turn(cx, text, files, from)),
-                        Action::SetMode(mode) => self.set_mode(cx, mode).await,
-                        Action::Steer(item_id) => self.send_steer(cx, &item_id).await,
-                        Action::Withdraw { item_id, edit, reply } => {
-                            let r = self.withdraw(cx, &item_id, edit).await;
-                            let _ = reply.send(r);
-                        }
-                        Action::Stop => {
-                            // Let the socket reply drain before the listener is torn down.
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                            return "stopped".into();
-                        }
+                    let action = self.handle_event(cx, ev, in_flight.is_some());
+                    if let Some(reason) = self.act(cx, action, &mut in_flight).await {
+                        return reason;
                     }
-                    // A prompt the turn couldn't take (it ended meanwhile) waits
-                    // in the queue: start it.
-                    if in_flight.is_none()
-                        && let Some((text, files, from)) = self.take_queued(None)
-                    {
-                        in_flight = Some(self.start_turn(cx, text, files, from));
-                    }
+                    self.start_queued(cx, &mut in_flight);
                 }
-                res = async { in_flight.as_mut().expect("guarded").await }, if in_flight.is_some() => {
+                res = async { in_flight.as_mut().expect("polled only while a prompt is in flight").await }, if in_flight.is_some() => {
                     in_flight = None;
-                    // The agent's last `session/update`s precede its response on the wire but
-                    // reach us through the channel: project them before closing the turn.
-                    tokio::task::yield_now().await;
-                    let mut deferred = Vec::new();
-                    while let Ok(ev) = rx.try_recv() {
-                        match ev {
-                            Event::Update(_) | Event::Permission { .. } | Event::Stderr(_) | Event::Ext { .. } => {
-                                let _ = self.handle_event(cx, ev, true);
-                            }
-                            other => deferred.push(other),
-                        }
-                    }
+                    let deferred = self.drain_turn_events(cx, &mut rx).await;
                     self.end_turn(res);
                     for ev in deferred {
-                        match self.handle_event(cx, ev, in_flight.is_some()) {
-                            Action::None => {}
-                            Action::StartPrompt(text, files, from) => in_flight = Some(self.start_turn(cx, text, files, from)),
-                            Action::SetMode(mode) => self.set_mode(cx, mode).await,
-                            Action::Steer(item_id) => self.send_steer(cx, &item_id).await,
-                            Action::Withdraw { item_id, edit, reply } => {
-                                let r = self.withdraw(cx, &item_id, edit).await;
-                                let _ = reply.send(r);
-                            }
-                            Action::Stop => {
-                                tokio::time::sleep(Duration::from_millis(50)).await;
-                                return "stopped".into();
-                            }
+                        let action = self.handle_event(cx, ev, in_flight.is_some());
+                        if let Some(reason) = self.act(cx, action, &mut in_flight).await {
+                            return reason;
                         }
                     }
-                    if in_flight.is_none()
-                        && let Some((text, files, from)) = self.take_queued(None)
-                    {
-                        in_flight = Some(self.start_turn(cx, text, files, from));
-                    }
+                    self.start_queued(cx, &mut in_flight);
                 }
                 _ = cx.incoming_closed() => {
                     if in_flight.is_some() {
@@ -742,6 +720,59 @@ impl<W: Write> Host<W> {
                 }
             }
         }
+    }
+
+    /// Carry out what handling an event asked for.  `Some` with the reason
+    /// when the host is to stop.
+    async fn act(&mut self, cx: &ConnectionTo<Agent>, action: Action, in_flight: &mut Option<PromptFuture>) -> Option<String> {
+        match action {
+            Action::None => {}
+            Action::StartPrompt(text, files, from) => {
+                assert!(in_flight.is_none(), "a prompt starts only between turns");
+                *in_flight = Some(self.start_turn(cx, text, files, from));
+            }
+            Action::SetMode(mode) => self.set_mode(cx, mode).await,
+            Action::Steer(item_id) => self.send_steer(cx, &item_id).await,
+            Action::Withdraw { item_id, edit, reply } => {
+                let r = self.withdraw(cx, &item_id, edit).await;
+                // The client may have given up waiting; the withdrawal stands.
+                let _ = reply.send(r);
+            }
+            Action::Stop => {
+                // Let the socket reply drain before the listener is torn down.
+                tokio::time::sleep(STOP_DRAIN).await;
+                return Some("stopped".into());
+            }
+        }
+        None
+    }
+
+    /// A prompt the turn couldn't take (it ended meanwhile) waits in the
+    /// queue: start it once no turn is running.
+    fn start_queued(&mut self, cx: &ConnectionTo<Agent>, in_flight: &mut Option<PromptFuture>) {
+        if in_flight.is_none()
+            && let Some((text, files, from)) = self.take_queued(None)
+        {
+            *in_flight = Some(self.start_turn(cx, text, files, from));
+        }
+    }
+
+    /// The agent's last `session/update`s precede its response on the wire
+    /// but reach us through the channel: project them before the turn is
+    /// closed.  Commands and the like wait for after; they are returned.
+    async fn drain_turn_events(&mut self, cx: &ConnectionTo<Agent>, rx: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+        tokio::task::yield_now().await;
+        let mut deferred = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                Event::Update(_) | Event::Permission { .. } | Event::Stderr(_) | Event::Ext { .. } => {
+                    let action = self.handle_event(cx, ev, true);
+                    debug_assert!(matches!(action, Action::None), "only commands ask for an action");
+                }
+                other => deferred.push(other),
+            }
+        }
+        deferred
     }
 
     /// initialize → session/new (or session/load); returns the initial prompt to send.
@@ -1048,6 +1079,7 @@ impl<W: Write> Host<W> {
             }
             Event::Command { cmd, reply } => {
                 let (r, action) = self.on_command(cx, cmd, in_turn);
+                // The client may have hung up; what the command did stands.
                 let _ = reply.send(r);
                 action
             }
@@ -1533,7 +1565,7 @@ impl<W: Write> Host<W> {
         if let Err(e) = self.set_state(SessionState::Running) {
             self.line(RED, "✖", &format!("store: {e}"));
         }
-        let _ = self.store.record_status(
+        if let Err(e) = self.store.record_status(
             &self.signer,
             &self.cfg.session_id,
             &StatusReport {
@@ -1542,7 +1574,9 @@ impl<W: Write> Host<W> {
                 msg: Some(head(&text, 120)),
                 ..Default::default()
             },
-        );
+        ) {
+            self.line(RED, "✖", &format!("status: {e}"));
+        }
         self.program_status(axel_rex::osc::State::Working, None, &head(&text, 200));
         // Still before session/prompt, so the agent's first edit cannot enter
         // the before snapshot. Only message visibility moves ahead of this I/O.
@@ -1614,7 +1648,7 @@ impl<W: Write> Host<W> {
         for id in unread.iter().rev() {
             self.unsteer_to_queue(id, true);
         }
-        let duration_ms = self.turn_started.elapsed().as_millis() as i64;
+        let duration_ms = i64::try_from(self.turn_started.elapsed().as_millis()).unwrap_or(i64::MAX);
         let (stop_reason, status) = match &res {
             Ok(resp) => {
                 let s = enum_str(&resp.stop_reason);
@@ -1691,7 +1725,7 @@ impl<W: Write> Host<W> {
             "cancelled" => StatusState::Idle,
             _ => StatusState::Done,
         };
-        let _ = self.store.record_status(
+        if let Err(e) = self.store.record_status(
             &self.signer,
             &self.cfg.session_id,
             &StatusReport {
@@ -1700,7 +1734,9 @@ impl<W: Write> Host<W> {
                 msg: (turn_state == StatusState::Done && !head.is_empty()).then(|| head.clone()),
                 ..Default::default()
             },
-        );
+        ) {
+            self.line(RED, "✖", &format!("status: {e}"));
+        }
         // Another agent's message started this turn: its answer goes back.
         if stop_reason == "end_turn" {
             self.return_answer();
@@ -2051,8 +2087,9 @@ impl<W: Write> Host<W> {
         let question = !req.options.is_empty() && req.options.iter().all(|o| o.option_id.to_string().starts_with(crate::claude::ANSWER_PREFIX));
         let multiple = if question && raw_input.get("multiSelect").and_then(Value::as_bool)==Some(true) {
             let count=options.iter().filter(|(_,k)|k.starts_with("allow")).count();
-            let min=raw_input.get("minSelections").and_then(Value::as_u64).unwrap_or(1) as usize;
-            let max=raw_input.get("maxSelections").and_then(Value::as_u64).map(|n|n as usize).unwrap_or(count);
+            // Saturating: an absurd bound fails the check below rather than wrapping.
+            let min=raw_input.get("minSelections").and_then(Value::as_u64).map_or(1, |n| usize::try_from(n).unwrap_or(usize::MAX));
+            let max=raw_input.get("maxSelections").and_then(Value::as_u64).map_or(count, |n| usize::try_from(n).unwrap_or(usize::MAX));
             anyhow::ensure!(min<=max && max<=count,"invalid question selection bounds");
             Some((min,max))
         } else {None};
@@ -2073,6 +2110,7 @@ impl<W: Write> Host<W> {
                         acp::RequestPermissionOutcome::Cancelled,
                     ),
                 };
+                // The adapter may have withdrawn the request; nothing to undo.
                 let _ = reply.send(resp);
                 self.line(GREEN, "✓", &format!("allow: {label}"));
             }
@@ -2087,6 +2125,7 @@ impl<W: Write> Host<W> {
                         acp::RequestPermissionOutcome::Cancelled,
                     ),
                 };
+                // The adapter may have withdrawn the request; nothing to undo.
                 let _ = reply.send(resp);
                 self.push(
                     ItemKind::Permission,
@@ -2161,6 +2200,7 @@ impl<W: Write> Host<W> {
         };
         let allowed = validate_answer(&p.options,p.multiple,option_id)?;
         let p = self.pending.remove(item_id).expect("checked above");
+        // The adapter may have withdrawn the request; the item still records the answer.
         let _ = p.reply.send(acp::RequestPermissionResponse::new(
             acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
                 acp::PermissionOptionId::new(option_id.to_string()),
@@ -2223,6 +2263,7 @@ impl<W: Write> Host<W> {
         }
         let pending = std::mem::take(&mut self.pending);
         for (item_id, p) in pending {
+            // The adapter may have withdrawn the request already.
             let _ = p.reply.send(acp::RequestPermissionResponse::new(
                 acp::RequestPermissionOutcome::Cancelled,
             ));
@@ -2378,10 +2419,15 @@ impl<W: Write> Host<W> {
 
 // --- socket server -------------------------------------------------------------
 
+/// After a failed `accept` (out of file descriptors, say), wait this long
+/// before the next: the retries go on until the host aborts the task, at a
+/// rate that can't spin a core.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+
 async fn serve_socket(listener: UnixListener, tx: mpsc::UnboundedSender<Event>) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
             continue;
         };
         let tx = tx.clone();
@@ -2409,8 +2455,7 @@ async fn serve_socket(listener: UnixListener, tx: mpsc::UnboundedSender<Event>) 
                         }
                     }
                 };
-                let mut s =
-                    serde_json::to_string(&reply).unwrap_or_else(|_| r#"{"reply":"ok"}"#.into());
+                let mut s = serde_json::to_string(&reply).expect("a Reply has only strings and numbers: it always serializes");
                 s.push('\n');
                 if w.write_all(s.as_bytes()).await.is_err() {
                     break;
@@ -2482,8 +2527,9 @@ fn slice_lines(text: &str, line: Option<u32>, limit: Option<u32>) -> String {
     if line.is_none() && limit.is_none() {
         return text.to_string();
     }
-    let skip = line.map(|l| l.saturating_sub(1) as usize).unwrap_or(0);
-    let take = limit.map(|l| l as usize).unwrap_or(usize::MAX);
+    let as_count = |n: u32| usize::try_from(n).unwrap_or(usize::MAX);
+    let skip = line.map_or(0, |l| as_count(l.saturating_sub(1)));
+    let take = limit.map_or(usize::MAX, as_count);
     let mut out: String = text
         .lines()
         .skip(skip)

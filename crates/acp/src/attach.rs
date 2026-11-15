@@ -86,7 +86,8 @@ pub fn build_prompt_blocks(
             link = link.mime_type(m.to_string());
         }
         if let Some(len) = size {
-            link = link.size(len as i64);
+            // Saturating: no file is 2^63 bytes, and the size is only a hint.
+            link = link.size(i64::try_from(len).unwrap_or(i64::MAX));
         }
         blocks.push(acp::ContentBlock::ResourceLink(link));
     }

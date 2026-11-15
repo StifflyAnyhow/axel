@@ -54,7 +54,13 @@ pub struct TurnUsage {
 
 impl TurnUsage {
     pub fn is_empty(&self) -> bool {
-        self.input + self.output + self.cache_read + self.cache_write == 0 && self.cost_usd.is_none_or(|c| c == 0.0)
+        self.total_tokens() == 0 && self.cost_usd.is_none_or(|c| c == 0.0)
+    }
+
+    /// Every token counted, saturating: the counts come from the harness,
+    /// and a bogus one must not wrap.
+    fn total_tokens(&self) -> u64 {
+        self.input.saturating_add(self.output).saturating_add(self.cache_read).saturating_add(self.cache_write)
     }
 
     /// `self` less `other`'s token counts, each floored at zero; the cost
@@ -69,11 +75,11 @@ impl TurnUsage {
     }
 
     fn add(&mut self, other: TurnUsage) {
-        self.input += other.input;
-        self.output += other.output;
-        self.cache_read += other.cache_read;
-        self.cache_write += other.cache_write;
-        self.reasoning += other.reasoning;
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
         self.cost_usd = match (self.cost_usd, other.cost_usd) {
             (None, None) => None,
             (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
@@ -89,7 +95,7 @@ impl TurnUsage {
             return reply;
         }
         reply["usage"] = json!({
-            "totalTokens": self.input + self.output + self.cache_read + self.cache_write,
+            "totalTokens": self.total_tokens(),
             "inputTokens": self.input,
             "outputTokens": self.output,
             "thoughtTokens": self.reasoning,
@@ -188,7 +194,10 @@ impl ClaudeMeter {
         if message.get("parent_tool_use_id").is_some_and(|p| !p.is_null()) {
             return;
         }
-        let used = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens") + n("output_tokens");
+        let used = n("input_tokens")
+            .saturating_add(n("cache_read_input_tokens"))
+            .saturating_add(n("cache_creation_input_tokens"))
+            .saturating_add(n("output_tokens"));
         if used > 0 {
             self.context_used = Some(used);
         }
@@ -233,9 +242,10 @@ impl ClaudeMeter {
         if resumed {
             // Seed the cumulative baseline, but price only calls observed here.
             // A result replayed on resume with no new usage therefore costs zero.
-            let estimate = |u: &TurnUsage| axel_store::pricing::estimate_call(u.model.as_deref(), u.input as i64, u.output as i64, u.cache_read as i64, u.cache_write as i64, 0);
+            let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+            let estimate = |u: &TurnUsage| axel_store::pricing::estimate_call(u.model.as_deref(), count(u.input), count(u.output), count(u.cache_read), count(u.cache_write), 0);
             turn.cost_usd = Some(if self.calls.is_empty() { estimate(&turn) } else { self.calls.values().map(estimate).sum() });
-            if let Some(call) = self.calls.values().max_by_key(|u| u.input + u.output + u.cache_read + u.cache_write) { turn.model.clone_from(&call.model); }
+            if let Some(call) = self.calls.values().max_by_key(|u| u.total_tokens()) { turn.model.clone_from(&call.model); }
         }
         self.pending.add(turn);
     }
@@ -303,13 +313,14 @@ impl Breakdown {
         })
     }
 
+    /// Saturating: the counts come from Codex, and a bogus one must not wrap.
     fn plus(self, o: Breakdown) -> Breakdown {
         Breakdown {
-            input: self.input + o.input,
-            cached: self.cached + o.cached,
-            cache_write: self.cache_write + o.cache_write,
-            output: self.output + o.output,
-            reasoning: self.reasoning + o.reasoning,
+            input: self.input.saturating_add(o.input),
+            cached: self.cached.saturating_add(o.cached),
+            cache_write: self.cache_write.saturating_add(o.cache_write),
+            output: self.output.saturating_add(o.output),
+            reasoning: self.reasoning.saturating_add(o.reasoning),
         }
     }
 }
@@ -367,7 +378,7 @@ impl CodexMeter {
 
     fn usage(&self, b: Breakdown) -> TurnUsage {
         TurnUsage {
-            input: b.input.saturating_sub(b.cached + b.cache_write),
+            input: b.input.saturating_sub(b.cached.saturating_add(b.cache_write)),
             output: b.output,
             cache_read: b.cached,
             cache_write: b.cache_write,

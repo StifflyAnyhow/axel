@@ -46,6 +46,18 @@ use crate::usage::{CodexMeter, codex_limits, limits_params};
 /// codex-acp's `/init` prompt.
 const INIT_PROMPT: &str = include_str!("init_prompt.md");
 
+/// How long Codex has to answer an ordinary request (a steer, an
+/// interrupt): it answers at once unless it is stuck.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long Codex has to start something: `initialize`, a turn, a review,
+/// a compaction, the model list.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long Codex has to open a thread: resuming one reads its history.
+const THREAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// The slash commands go out this long after the session reply, so the
+/// client knows the session before it hears about it.
+const COMMANDS_DELAY: Duration = Duration::from_millis(20);
+
 /// `codex app-server` and the conversation it holds.
 struct Codex {
     stdin: Lines<ChildStdin>,
@@ -79,6 +91,8 @@ impl Codex {
 
 impl Drop for Codex {
     fn drop(&mut self) {
+        // Codex may have exited already (kill then fails, and wait returns
+        // its status): either way it is gone, which is all that is wanted.
         if let Ok(mut c) = self.child.lock() {
             let _ = c.kill();
             let _ = c.wait();
@@ -201,7 +215,7 @@ impl Agent {
                 };
                 let message_id = params.get("messageId").and_then(Value::as_str).unwrap_or("").to_string();
                 let steer = json!({ "threadId": s.id, "expectedTurnId": turn, "input": prompt_input(&params), "clientUserMessageId": message_id });
-                match s.codex.request("turn/steer", steer, Duration::from_secs(30)) {
+                match s.codex.request("turn/steer", steer, REQUEST_TIMEOUT) {
                     Ok(_) => {
                         self.client.notify("_axel/steered", json!({ "sessionId": s.id, "messageId": message_id }));
                         Ok(json!({ "accepted": true }))
@@ -216,7 +230,7 @@ impl Agent {
                 let s = self.session(&params)?;
                 let turn = s.turn.lock().expect("turn lock").clone();
                 if let Some(turn) = turn {
-                    s.codex.request("turn/interrupt", json!({ "threadId": s.id, "turnId": turn }), Duration::from_secs(30)).map_err(RpcError::invalid)?;
+                    s.codex.request("turn/interrupt", json!({ "threadId": s.id, "turnId": turn }), REQUEST_TIMEOUT).map_err(RpcError::invalid)?;
                 }
                 Ok(Value::Null)
             }
@@ -253,7 +267,7 @@ impl Agent {
         let cwd = PathBuf::from(params.get("cwd").and_then(Value::as_str).unwrap_or("."));
         let codex = spawn_codex(&cwd)?;
         codex
-            .request("initialize", json!({ "clientInfo": { "name": "axel", "title": "Axel", "version": env!("CARGO_PKG_VERSION") } }), Duration::from_secs(60))
+            .request("initialize", json!({ "clientInfo": { "name": "axel", "title": "Axel", "version": env!("CARGO_PKG_VERSION") } }), START_TIMEOUT)
             .map_err(RpcError::internal)?;
         codex.stdin.send(&json!({ "method": "initialized" }));
 
@@ -276,9 +290,9 @@ impl Agent {
         let started = match &resume {
             Some(id) => {
                 thread["threadId"] = json!(id);
-                codex.request("thread/resume", thread, Duration::from_secs(120))
+                codex.request("thread/resume", thread, THREAD_TIMEOUT)
             }
-            None => codex.request("thread/start", thread, Duration::from_secs(120)),
+            None => codex.request("thread/start", thread, THREAD_TIMEOUT),
         }
         .map_err(|e| if resume.is_some() { RpcError::invalid(format!("Session not found: {e}")) } else { RpcError::internal(e) })?;
         let thread_id = started.pointer("/thread/id").and_then(Value::as_str).unwrap_or("").to_string();
@@ -297,11 +311,15 @@ impl Agent {
         {
             let (codex, client) = (codex.clone(), self.client.clone());
             std::thread::spawn(move || {
-                if let Ok(reply) = codex.request("account/rateLimits/read", Value::Null, Duration::from_secs(30)) {
-                    let limits = codex_limits(&reply);
-                    if !limits.is_empty() {
-                        client.notify("_axel/limits", limits_params(&limits));
+                match codex.request("account/rateLimits/read", Value::Null, REQUEST_TIMEOUT) {
+                    Ok(reply) => {
+                        let limits = codex_limits(&reply);
+                        if !limits.is_empty() {
+                            client.notify("_axel/limits", limits_params(&limits));
+                        }
                     }
+                    // The limits show once Codex reports them on its own.
+                    Err(e) => eprintln!("[axel codex-acp] account/rateLimits/read: {e}"),
                 }
             });
         }
@@ -315,7 +333,11 @@ impl Agent {
             }
         }
 
-        let listed = codex.request("model/list", json!({}), Duration::from_secs(60)).unwrap_or(Value::Null);
+        // Without the list the session still runs, on Codex's default model.
+        let listed = codex.request("model/list", json!({}), START_TIMEOUT).unwrap_or_else(|e| {
+            eprintln!("[axel codex-acp] model/list: {e}");
+            Value::Null
+        });
         let models: Vec<Value> = listed
             .get("data")
             .and_then(Value::as_array)
@@ -332,7 +354,7 @@ impl Agent {
         let client = self.client.clone();
         let sid = thread_id.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(COMMANDS_DELAY);
             client.update(&sid, json!({ "sessionUpdate": "available_commands_update", "availableCommands": commands() }));
         });
 
@@ -350,19 +372,18 @@ impl Agent {
         let text = input.first().and_then(|i| i.get("text")).and_then(Value::as_str).unwrap_or("").trim().to_string();
         let (approval, sandbox, _) = policy(&s.mode.lock().expect("mode lock").clone());
 
-        let started = if let Some(rest) = slash(&text, "compact") {
-            let _ = rest;
-            s.codex.request("thread/compact/start", json!({ "threadId": s.id }), Duration::from_secs(60)).map_err(RpcError::internal)?;
+        let started = if slash(&text, "compact").is_some() {
+            s.codex.request("thread/compact/start", json!({ "threadId": s.id }), START_TIMEOUT).map_err(RpcError::internal)?;
             None
         } else if let Some(target) = review_target(&text) {
-            Some(s.codex.request("review/start", json!({ "threadId": s.id, "target": target }), Duration::from_secs(60)).map_err(RpcError::internal)?)
+            Some(s.codex.request("review/start", json!({ "threadId": s.id, "target": target }), START_TIMEOUT).map_err(RpcError::internal)?)
         } else {
             let input = if slash(&text, "init").is_some() { vec![json!({ "type": "text", "text": INIT_PROMPT, "text_elements": [] })] } else { input };
             let mut turn = json!({ "threadId": s.id, "input": input, "approvalPolicy": approval, "sandboxPolicy": sandbox });
             if let Some(m) = s.model.lock().expect("model lock").clone() {
                 turn["model"] = json!(m);
             }
-            Some(s.codex.request("turn/start", turn, Duration::from_secs(60)).map_err(RpcError::internal)?)
+            Some(s.codex.request("turn/start", turn, START_TIMEOUT).map_err(RpcError::internal)?)
         };
         let turn_id = started.as_ref().and_then(|r| r.pointer("/turn/id")).and_then(Value::as_str).map(String::from);
         *s.turn.lock().expect("turn lock") = turn_id.clone();
@@ -680,6 +701,8 @@ impl Agent {
 
     /// `session/request_permission`: the option picked, or `None` if cancelled.
     fn ask(&self, s: &Session, tool_call: &Value, options: Vec<Value>) -> Option<String> {
+        // A failed request (the client went away) is a cancelled one: Codex
+        // is told no, which is the safe answer.
         let reply = self.client.request("session/request_permission", json!({ "sessionId": s.id, "toolCall": tool_call, "options": options })).ok()?;
         let outcome = reply.get("outcome")?;
         (outcome.get("outcome").and_then(Value::as_str) == Some("selected")).then(|| outcome.get("optionId").and_then(Value::as_str).map(String::from)).flatten()
@@ -697,8 +720,8 @@ fn spawn_codex(cwd: &PathBuf) -> Result<Arc<Codex>, RpcError> {
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| RpcError::internal(format!("starting {exe} app-server: {e}")))?;
-    let stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
+    let stdin = child.stdin.take().expect("stdin was set to piped above");
+    let stdout = child.stdout.take().expect("stdout was set to piped above");
     let (tx, rx) = mpsc::channel();
     let codex = Arc::new(Codex { stdin: Lines::new(stdin), child: Mutex::new(child), next_id: AtomicU64::new(1), pending: Mutex::new(HashMap::new()), events: Mutex::new(rx) });
     let reader = codex.clone();
@@ -708,6 +731,7 @@ fn spawn_codex(cwd: &PathBuf) -> Result<Arc<Codex>, RpcError> {
             if msg.get("method").is_none() {
                 let Some(id) = msg.get("id").and_then(Value::as_u64) else { continue };
                 if let Some(waiter) = reader.pending.lock().expect("pending lock").remove(&id) {
+                    // The requester timed out meanwhile: nobody to tell.
                     let _ = waiter.send(match msg.get("error") {
                         Some(e) => Err(e.clone()),
                         None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),

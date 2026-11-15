@@ -30,6 +30,14 @@ pub const BUDGET: Duration = Duration::from_secs(10);
 /// Past this, a checkpoint is slow enough to tell the owner about.
 pub const SLOW: Duration = Duration::from_secs(2);
 
+/// The budget of a snapshot taken outside a turn ([`snapshot_commit`]):
+/// nothing waits on it the way a turn does, so it may take long on a huge
+/// tree, but it still never hangs.
+const SNAPSHOT_BUDGET: Duration = Duration::from_secs(600);
+
+/// How often [`git`] checks whether its child has exited.
+const GIT_POLL_INTERVAL: Duration = Duration::from_millis(15);
+
 /// A snapshot of the working tree: its commit, and the tree it points at (two
 /// snapshots with one tree have the same content, whatever their parents).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,7 +102,7 @@ fn is_repo_with_head(dir: &Path, deadline: Instant) -> bool {
 /// files, not ignored ones), or HEAD itself when nothing changed.  The
 /// user's index and branches are untouched.
 pub fn snapshot_commit(dir: &Path, message: &str) -> Result<String> {
-    snapshot_commit_until(dir, message, Instant::now() + Duration::from_secs(600))
+    snapshot_commit_until(dir, message, Instant::now() + SNAPSHOT_BUDGET)
 }
 
 fn snapshot_commit_until(dir: &Path, message: &str, deadline: Instant) -> Result<String> {
@@ -111,6 +119,8 @@ fn snapshot_commit_until(dir: &Path, message: &str, deadline: Instant) -> Result
         // Never signed: a snapshot must not wait on a signing agent's prompt.
         git(dir, &["commit-tree", "--no-gpg-sign", &tree, "-p", &head, "-m", message], &env, deadline)
     })();
+    // Either file may not exist (git failed before writing it); a leftover
+    // in the temp directory is harmless, so the snapshot's own result wins.
     let _ = std::fs::remove_file(&index);
     let _ = std::fs::remove_file(index.with_extension("lock"));
     result
@@ -212,11 +222,13 @@ pub fn git(dir: &Path, args: &[&str], env: &[(&str, &OsStr)], deadline: Instant)
             break s;
         }
         if Instant::now() >= deadline {
+            // It may have exited just now; either way the budget is spent
+            // and the error below is what the caller needs to know.
             let _ = child.kill();
             let _ = child.wait();
             bail!("git {} took longer than its time budget", args.first().copied().unwrap_or(""));
         }
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(GIT_POLL_INTERVAL);
     };
     let stdout = out.join().unwrap_or_default();
     let stderr = err.join().unwrap_or_default();

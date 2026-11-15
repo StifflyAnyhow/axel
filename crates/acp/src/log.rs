@@ -55,6 +55,8 @@ impl FrameLog {
             dir.as_str(),
             payload
         );
+        // A poisoned lock or a failed write (full disk) loses this frame only:
+        // the log is for debugging, and the session must go on without it.
         if let Ok(mut f) = self.file.lock() {
             let _ = f.write_all(line.as_bytes());
         }

@@ -118,6 +118,8 @@ impl Session {
     /// relay threads hold the session until Claude's stdout closes, so a
     /// `Drop` alone would wait on the very process it is meant to end.
     fn kill_child(&self) {
+        // Claude may have exited already (kill then fails, and wait returns
+        // its status): either way it is gone, which is all that is wanted.
         if let Ok(mut c) = self.child.lock() {
             let _ = c.kill();
             let _ = c.wait();
@@ -139,6 +141,20 @@ struct Agent {
 
 /// The `PostToolUse` hook callback id we register with Claude.
 const POST_TOOL_USE_HOOK: &str = "hook_0";
+
+/// How long Claude has to answer a control request (a mode or model
+/// switch, an interrupt): it answers at once unless it is stuck.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long Claude has to start up and answer `initialize`: it loads its
+/// settings, plugins and MCP servers first.
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long withdrawing a steered message may hold up the owner's edit.
+const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often the idle relay looks for messages Claude sent on its own.
+const IDLE_RELAY_POLL: Duration = Duration::from_millis(50);
+/// The slash commands go out this long after the session reply, so the
+/// client knows the session before it hears about it.
+const COMMANDS_DELAY: Duration = Duration::from_millis(20);
 
 /// Run the agent on stdin/stdout until the client closes stdin.
 pub fn serve_stdio() -> anyhow::Result<()> {
@@ -235,7 +251,7 @@ impl Agent {
                 if !withdrawn.is_empty() {
                     self.client.notify("_axel/unsteered", json!({ "sessionId": s.id, "messageIds": withdrawn }));
                 }
-                s.control(json!({ "subtype": "interrupt" }), Duration::from_secs(30)).map_err(RpcError::invalid)?;
+                s.control(json!({ "subtype": "interrupt" }), CONTROL_TIMEOUT).map_err(RpcError::invalid)?;
                 Ok(Value::Null)
             }
             "_axel/steer" => self.steer(&params),
@@ -247,7 +263,7 @@ impl Agent {
             "session/set_model" => {
                 let s = self.session(&params)?;
                 let model = params.get("modelId").and_then(Value::as_str).unwrap_or("");
-                s.control(json!({ "subtype": "set_model", "model": model }), Duration::from_secs(30)).map_err(RpcError::invalid)?;
+                s.control(json!({ "subtype": "set_model", "model": model }), CONTROL_TIMEOUT).map_err(RpcError::invalid)?;
                 Ok(json!({}))
             }
             "session/set_mode" => {
@@ -256,7 +272,7 @@ impl Agent {
                 match mode {
                     "default" | "acceptEdits" | "bypassPermissions" | "dontAsk" | "plan" => {
                         s.set_mode(mode);
-                        s.control(json!({ "subtype": "set_permission_mode", "mode": mode }), Duration::from_secs(30))
+                        s.control(json!({ "subtype": "set_permission_mode", "mode": mode }), CONTROL_TIMEOUT)
                             .map_err(|e| RpcError::invalid(if e.is_empty() { "Invalid Mode".into() } else { e }))?;
                         Ok(json!({}))
                     }
@@ -276,7 +292,7 @@ impl Agent {
     fn send_commands_later(&self, session: String, commands: Value) {
         let client = self.client.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(COMMANDS_DELAY);
             client.update(&session, json!({ "sessionUpdate": "available_commands_update", "availableCommands": available_commands(&commands) }));
         });
     }
@@ -284,7 +300,7 @@ impl Agent {
     /// Start Claude Code for a session: `createSession` in the adapter.
     fn create_session(self: &Arc<Self>, params: &Value, resume: Option<String>) -> Result<(String, Value, Value), RpcError> {
         let cwd = PathBuf::from(params.get("cwd").and_then(Value::as_str).unwrap_or("."));
-        let session_id = resume.clone().unwrap_or_else(uuid_v4);
+        let session_id = resume.clone().unwrap_or_else(new_uuid);
         let meta = params.get("_meta").cloned().unwrap_or(Value::Null);
         let user_options = meta.pointer("/claudeCode/options").cloned().unwrap_or(Value::Null);
 
@@ -372,8 +388,8 @@ impl Agent {
             cmd.env_remove("DEBUG");
         }
         let mut child = cmd.spawn().map_err(|e| RpcError::internal(format!("starting {exe}: {e}")))?;
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
+        let stdin = child.stdin.take().expect("stdin was set to piped above");
+        let stdout = child.stdout.take().expect("stdout was set to piped above");
         let (tx, rx) = mpsc::channel();
         let session = Arc::new(Session {
             id: session_id.clone(),
@@ -404,7 +420,7 @@ impl Agent {
         if let Some(a) = append {
             init["appendSystemPrompt"] = Value::String(a);
         }
-        let init = session.control(init, Duration::from_secs(120)).map_err(RpcError::internal)?;
+        let init = session.control(init, INITIALIZE_TIMEOUT).map_err(RpcError::internal)?;
 
         // The model: the settings' `model` when it names one Claude offers, else the first.
         let models = init.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -414,8 +430,11 @@ impl Agent {
             .and_then(|want| models.iter().find(|m| model_matches(m, want)))
             .or_else(|| models.first())
             .cloned();
-        if let Some(value) = current.as_ref().and_then(|m| m.get("value")).and_then(Value::as_str) {
-            let _ = session.control(json!({ "subtype": "set_model", "model": value }), Duration::from_secs(30));
+        if let Some(value) = current.as_ref().and_then(|m| m.get("value")).and_then(Value::as_str)
+            && let Err(e) = session.control(json!({ "subtype": "set_model", "model": value }), CONTROL_TIMEOUT)
+        {
+            // Claude keeps its own default; the session still works.
+            eprintln!("[axel claude-acp] set_model {value}: {e}");
         }
         let models_reply = json!({
             "availableModels": models.iter().map(|m| json!({ "modelId": m.get("value"), "name": m.get("displayName"), "description": m.get("description") })).collect::<Vec<_>>(),
@@ -453,6 +472,7 @@ impl Agent {
                         let resp = msg.get("response").cloned().unwrap_or(Value::Null);
                         let id = resp.get("request_id").and_then(Value::as_str).unwrap_or("").to_string();
                         if let Some(waiter) = session.controls.lock().expect("controls lock").remove(&id) {
+                            // The requester timed out meanwhile: nobody to tell.
                             let _ = waiter.send(resp);
                         }
                     }
@@ -707,7 +727,7 @@ impl Agent {
         let uuid = s.steering.lock().expect("steering lock").pending.iter().find(|(_, m)| *m == message_id).map(|(u, _)| u.clone());
         let Some(uuid) = uuid else { return false };
         let cancelled = s
-            .control(json!({ "subtype": "cancel_async_message", "message_uuid": uuid }), Duration::from_secs(10))
+            .control(json!({ "subtype": "cancel_async_message", "message_uuid": uuid }), WITHDRAW_TIMEOUT)
             .ok()
             .and_then(|r| r.get("cancelled").and_then(Value::as_bool))
             .unwrap_or(false);
@@ -750,6 +770,7 @@ impl Agent {
         // hasn't shown yet: relayed now, so a stale `result` can't end this
         // prompt before Claude has read it.
         while let Ok(message) = rx.try_recv() {
+            // Not this prompt's: a `result` among them ended Claude's own turn.
             let _ = self.relay_message(session, &message);
         }
         // Only now may messages be sent into the turn: one accepted before the
@@ -934,6 +955,7 @@ impl Agent {
                     loop {
                         match rx.try_recv() {
                             Ok(message) => {
+                                // No prompt is running for a `result` to end.
                                 let _ = agent.relay_message(&session, &message);
                             }
                             Err(mpsc::TryRecvError::Empty) => break,
@@ -941,7 +963,7 @@ impl Agent {
                         }
                     }
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(IDLE_RELAY_POLL);
             }
         });
     }
@@ -991,8 +1013,10 @@ fn elicitation_choice(schema: &Value) -> Option<ElicitationChoice> {
     };
     if choices.is_empty() {return None}
     let multiple=if multi {
-        let min=property.get("minItems").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let max=property.get("maxItems").and_then(Value::as_u64).map(|n|n as usize).unwrap_or(choices.len()).min(choices.len());
+        // Saturating: an absurd bound is refused below rather than wrapped.
+        let count = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+        let min=property.get("minItems").and_then(Value::as_u64).map_or(0, count);
+        let max=property.get("maxItems").and_then(Value::as_u64).map_or(choices.len(), count).min(choices.len());
         if min>max {return None}
         Some((min,max))
     } else {None};
@@ -1141,8 +1165,8 @@ fn to_acp(content: &Value, role: &str, cache: &mut HashMap<String, Value>, hooks
     out
 }
 
-/// A Claude user message for an ACP prompt: `promptToClaude`.
-/// A random (v4) UUID, the id Claude takes for a user message.
+/// A random (version 4) UUID: the id of a new Claude session, or of a user
+/// message sent into a turn.
 fn new_uuid() -> String {
     use std::io::Read;
     let mut b = [0u8; 16];
@@ -1150,7 +1174,8 @@ fn new_uuid() -> String {
         // No randomness to be had: a clock and a counter are unique enough here.
         static N: AtomicU64 = AtomicU64::new(0);
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        b[..8].copy_from_slice(&(t as u64).to_le_bytes());
+        // The clock's low 64 bits: they are the ones that change.
+        b[..8].copy_from_slice(&t.to_le_bytes()[..8]);
         b[8..].copy_from_slice(&N.fetch_add(1, Ordering::SeqCst).to_le_bytes());
     }
     b[6] = (b[6] & 0x0f) | 0x40;
@@ -1159,6 +1184,7 @@ fn new_uuid() -> String {
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
+/// A Claude user message for an ACP prompt: `promptToClaude`.
 fn prompt_to_claude(params: &Value) -> Value {
     let mut content = Vec::new();
     let mut context = Vec::new();
@@ -1341,18 +1367,6 @@ fn strip_nulls(v: Value) -> Value {
     }
 }
 
-/// A random (version 4) UUID, for new Claude sessions.
-fn uuid_v4() -> String {
-    let mut b = [0u8; 16];
-    if std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b)).is_err() {
-        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        b = t.to_le_bytes();
-    }
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
-}
 
 #[cfg(test)]
 mod tests {
@@ -1487,7 +1501,7 @@ mod tests {
 
     #[test]
     fn session_ids_are_uuids() {
-        let id = uuid_v4();
+        let id = new_uuid();
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "4");
     }
