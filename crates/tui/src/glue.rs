@@ -3,7 +3,7 @@
 //! and performs the few writes the TUI makes (new agent, permission reply,
 //! read frontier).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow};
 use axel_identity::{Keypair, Keystore, attest};
@@ -602,21 +602,47 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
     sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
     let by_id: HashMap<String, &Session> = sessions.iter().map(|s| (s.id.clone(), s)).collect();
 
-    // Agents on the thread with their live state.
-    let mut agents: Vec<(String, Option<axel_store::AgentColor>, axel_store::StatusState)> = Vec::new();
     let agent_pks: Vec<String> = match &summary {
         Some(s) => s.agents.clone(),
-        _ => {
-            let mut v: Vec<String> = Vec::new();
-            for s in &sessions {
-                if !v.contains(&s.agent_pubkey) {
-                    v.push(s.agent_pubkey.clone());
-                }
-            }
-            v
-        }
+        None => session_agents(&sessions),
     };
-    for pk in &agent_pks {
+    let agents = agent_states(&mut names, &agent_pks, &sessions, &statuses);
+    let mut live_sessions = live_sessions(store, &mut names, &sessions, &agent_pks)?;
+    let last_agent_name = sessions.iter().find(|s| agent_pks.contains(&s.agent_pubkey)).map(|s| names.name(&s.agent_pubkey));
+
+    let (mut items, sessions_with_items) = local_items(store, &mut names, thread_id, &by_id)?;
+    turn_items(store, &mut names, thread_id, &by_id, sessions_with_items, &mut items)?;
+    items.sort_by_key(|i| (i.at_ms, i.seq));
+    // Who spoke last decides where a message without a mention goes.
+    for live in &mut live_sessions {
+        live.last_reply_at = items.iter().filter(|i| i.session_id == live.id && i.kind == ItemKind::AssistantMessage).map(|i| i.at_ms).max();
+    }
+
+    let known_agents = store.list_agents().map_err(se)?.into_iter().map(|a| (a.name, a.color)).collect();
+    Ok(ThreadData { thread_id: thread_id.to_string(), title, agents, environments, tokens, cost_usd, items, live_sessions, last_agent_name, known_agents })
+}
+
+/// The agents of `sessions` (newest first), each once.
+fn session_agents(sessions: &[Session]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in sessions {
+        if !out.contains(&s.agent_pubkey) {
+            out.push(s.agent_pubkey.clone());
+        }
+    }
+    out
+}
+
+/// Agents on the thread with their live state: the most urgent of their
+/// live sessions' (a paused one counts as blocked).
+fn agent_states(
+    names: &mut Names,
+    agent_pks: &[String],
+    sessions: &[Session],
+    statuses: &HashMap<String, axel_store::Status>,
+) -> Vec<(String, Option<axel_store::AgentColor>, axel_store::StatusState)> {
+    let mut agents = Vec::with_capacity(agent_pks.len());
+    for pk in agent_pks {
         let (name, color) = names.lookup(pk);
         let live: Vec<&Session> = sessions.iter().filter(|s| &s.agent_pubkey == pk && s.ended_at.is_none()).collect();
         let state = live
@@ -626,9 +652,13 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             .unwrap_or_else(|| live.first().map(|s| session_live_state(s)).unwrap_or(axel_store::StatusState::Idle));
         agents.push((name, color, state));
     }
+    agents
+}
 
+/// The thread's live sessions of its agents, with the host each runs on when it isn't this machine.
+fn live_sessions(store: &Store, names: &mut Names, sessions: &[Session], agent_pks: &[String]) -> Result<Vec<LiveSession>> {
     let local_env = store.local_environment().map_err(se)?.id;
-    let live_sessions: Vec<LiveSession> = sessions
+    Ok(sessions
         .iter()
         .filter(|s| s.ended_at.is_none() && agent_pks.contains(&s.agent_pubkey))
         .map(|s| LiveSession {
@@ -643,13 +673,13 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             }),
             last_reply_at: None,
         })
-        .collect();
-    let mut live_sessions = live_sessions;
-    let last_agent_name = sessions.iter().find(|s| agent_pks.contains(&s.agent_pubkey)).map(|s| names.name(&s.agent_pubkey));
+        .collect())
+}
 
-    // Local items.
+/// The thread's newest local items, and the sessions they came from.
+fn local_items(store: &Store, names: &mut Names, thread_id: &str, by_id: &HashMap<String, &Session>) -> Result<(Vec<ThreadItem>, HashSet<String>)> {
     let mut items: Vec<ThreadItem> = Vec::new();
-    let mut sessions_with_items: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut sessions_with_items: HashSet<String> = HashSet::new();
     for it in store.thread_items(thread_id, THREAD_ITEMS_MAX).map_err(se)? {
         sessions_with_items.insert(it.session_id.clone());
         let kind = map_kind(it.kind);
@@ -680,12 +710,22 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             steering: it.content.get("steering").and_then(|v| v.as_bool()).unwrap_or(false),
         });
     }
+    Ok((items, sessions_with_items))
+}
 
+/// Turn summaries, as items, for the sessions with no local items at all.
+fn turn_items(
+    store: &Store,
+    names: &mut Names,
+    thread_id: &str,
+    by_id: &HashMap<String, &Session>,
+    sessions_with_items: HashSet<String>,
+    items: &mut Vec<ThreadItem>,
+) -> Result<()> {
     // The visible window is bounded. Falling outside it does not make a local
     // session remote: otherwise its summary gains a new row identity and the
     // append-only stream prints old conversation beneath today's messages.
-    let mut has_local_items: std::collections::HashMap<String, bool> = sessions_with_items.into_iter().map(|id| (id, true)).collect();
-    // Turn summaries stand in only when the session has no local items at all.
+    let mut has_local_items: HashMap<String, bool> = sessions_with_items.into_iter().map(|id| (id, true)).collect();
     for t in store.turns(thread_id).map_err(se)? {
         let local = match has_local_items.get(&t.session_id) {
             Some(found) => *found,
@@ -699,78 +739,53 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             continue;
         }
         let agent = by_id.get(&t.session_id).map(|s| names.lookup(&s.agent_pubkey)).or_else(|| Some(names.lookup(&t.from_pubkey)));
-        let at_ms = t.created_at as i64 * 1000;
         // A label only: an unreadable name shows the message as unattributed.
-        let author = if t.from_pubkey == owner_pk { None } else { store.known_identity_name(&t.from_pubkey).ok().flatten() };
-        items.push(ThreadItem {
-            id: format!("{}:u", t.id),
-            session_id: t.session_id.clone(),
-            agent: None,
-            author,
-            seq: t.summary.ordinal * 3,
-            turn: t.summary.ordinal,
-            at_ms,
-            kind: ItemKind::UserMessage,
-            status: Some(ItemStatus::Completed),
-            body: ItemBody::Text(t.summary.user_text.clone()),
-            attachments: Vec::new(),
-            relay_to: None,
-            steering: false,
-        });
-        let mut text = t.summary.assistant_text.clone();
-        if t.summary.tool_calls > 0 {
-            text.push_str(&format!(
-                "\n· {} tool call{} · {} file{} edited · {:.1}s · {}",
-                t.summary.tool_calls,
-                if t.summary.tool_calls == 1 { "" } else { "s" },
-                t.summary.files_edited,
-                if t.summary.files_edited == 1 { "" } else { "s" },
-                t.summary.duration_ms as f64 / 1000.0,
-                t.summary.stop_reason
-            ));
-        }
-        let changes = t.summary.changes.as_ref().map(changes_body).filter(|b| *b != ItemBody::Empty);
-        items.push(ThreadItem {
-            id: format!("{}:a", t.id),
-            session_id: t.session_id.clone(),
-            agent: agent.clone(),
-            author: None,
-            seq: t.summary.ordinal * 3 + 1,
-            turn: t.summary.ordinal,
-            at_ms: at_ms + 1,
-            kind: ItemKind::AssistantMessage,
-            status: Some(ItemStatus::Completed),
-            body: ItemBody::Text(text),
-            attachments: Vec::new(),
-            relay_to: None,
-            steering: false,
-        });
-        if let Some(body) = changes {
-            items.push(ThreadItem {
-                id: format!("{}:c", t.id),
-                session_id: t.session_id,
-                agent,
-                author: None,
-                seq: t.summary.ordinal * 3 + 2,
-                turn: t.summary.ordinal,
-                at_ms: at_ms + 2,
-                kind: ItemKind::TurnEnd,
-                status: Some(ItemStatus::Completed),
-                body,
-                attachments: Vec::new(),
-                relay_to: None,
-                steering: false,
-            });
-        }
+        let author = if t.from_pubkey == names.owner_pk { None } else { store.known_identity_name(&t.from_pubkey).ok().flatten() };
+        items.extend(turn_summary_items(t, agent, author));
     }
-    items.sort_by_key(|i| (i.at_ms, i.seq));
-    // Who spoke last decides where a message without a mention goes.
-    for live in &mut live_sessions {
-        live.last_reply_at = items.iter().filter(|i| i.session_id == live.id && i.kind == ItemKind::AssistantMessage).map(|i| i.at_ms).max();
-    }
+    Ok(())
+}
 
-    let known_agents = store.list_agents().map_err(se)?.into_iter().map(|a| (a.name, a.color)).collect();
-    Ok(ThreadData { thread_id: thread_id.to_string(), title, agents, environments, tokens, cost_usd, items, live_sessions, last_agent_name, known_agents })
+/// One turn's summary as items: your message, the agent's answer with what
+/// it did, and the files it changed (when it changed any).
+fn turn_summary_items(t: axel_store::Turn, agent: Option<(String, Option<AgentColor>)>, author: Option<String>) -> Vec<ThreadItem> {
+    let at_ms = t.created_at as i64 * 1000;
+    let summary = &t.summary;
+    let item = |suffix: &str, offset: i64, kind: ItemKind, agent: Option<(String, Option<AgentColor>)>, author: Option<String>, body: ItemBody| ThreadItem {
+        id: format!("{}:{suffix}", t.id),
+        session_id: t.session_id.clone(),
+        agent,
+        author,
+        seq: summary.ordinal * 3 + offset,
+        turn: summary.ordinal,
+        at_ms: at_ms + offset,
+        kind,
+        status: Some(ItemStatus::Completed),
+        body,
+        attachments: Vec::new(),
+        relay_to: None,
+        steering: false,
+    };
+    let mut text = summary.assistant_text.clone();
+    if summary.tool_calls > 0 {
+        text.push_str(&format!(
+            "\n· {} tool call{} · {} file{} edited · {:.1}s · {}",
+            summary.tool_calls,
+            if summary.tool_calls == 1 { "" } else { "s" },
+            summary.files_edited,
+            if summary.files_edited == 1 { "" } else { "s" },
+            summary.duration_ms as f64 / 1000.0,
+            summary.stop_reason
+        ));
+    }
+    let mut out = vec![
+        item("u", 0, ItemKind::UserMessage, None, author, ItemBody::Text(summary.user_text.clone())),
+        item("a", 1, ItemKind::AssistantMessage, agent.clone(), None, ItemBody::Text(text)),
+    ];
+    if let Some(body) = summary.changes.as_ref().map(changes_body).filter(|b| *b != ItemBody::Empty) {
+        out.push(item("c", 2, ItemKind::TurnEnd, agent, None, body));
+    }
+    out
 }
 
 fn status_urgency(s: axel_store::StatusState) -> u8 {
