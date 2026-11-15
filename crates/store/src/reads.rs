@@ -14,7 +14,7 @@ use crate::{TurnMark,
     SECONDS_PER_DAY, SECONDS_PER_HOUR, get_integer, sql_integer, sql_limit,
 };
 
-fn conv<E: std::error::Error + Send + Sync + 'static>(e: E) -> rusqlite::Error {
+fn conversion_error<E: std::error::Error + Send + Sync + 'static>(e: E) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
 }
 
@@ -29,7 +29,7 @@ fn row_thread(r: &Row<'_>) -> rusqlite::Result<Thread> {
         id: r.get("id")?,
         title: r.get("title")?,
         intent: r.get("intent")?,
-        state: r.get::<_, String>("state")?.parse().map_err(conv)?,
+        state: r.get::<_, String>("state")?.parse().map_err(conversion_error)?,
         created_by: r.get("created_by")?,
         parent_thread_id: r.get("parent_thread_id")?,
         // Text this build does not know reads as "no relationship".
@@ -63,12 +63,12 @@ impl Store {
             if states.is_empty() {
                 return Ok(Vec::new());
             }
-            let mut ph = Vec::new();
+            let mut placeholders = Vec::new();
             for s in states {
                 args.push(Box::new(s.as_str()));
-                ph.push(format!("?{}", args.len()));
+                placeholders.push(format!("?{}", args.len()));
             }
-            sql.push_str(&format!(" AND t.state IN ({})", ph.join(", ")));
+            sql.push_str(&format!(" AND t.state IN ({})", placeholders.join(", ")));
         }
         if let Some(a) = f.agent_pubkey {
             args.push(Box::new(a));
@@ -230,7 +230,7 @@ impl Store {
                     kind: r
                         .get::<_, String>("workspace_kind")?
                         .parse()
-                        .map_err(conv)?,
+                        .map_err(conversion_error)?,
                     branch: r.get("branch")?,
                     worktree_path: r
                         .get::<_, Option<String>>("worktree_path")?
@@ -277,7 +277,7 @@ impl Store {
             Ok(Participant {
                 thread_id: r.get("thread_id")?,
                 pubkey: r.get("pubkey")?,
-                role: r.get::<_, String>("role")?.parse().map_err(conv)?,
+                role: r.get::<_, String>("role")?.parse().map_err(conversion_error)?,
                 added_by: r.get("added_by")?,
                 added_at: r.get("added_at")?,
             })
@@ -318,7 +318,7 @@ fn row_session(r: &Row<'_>) -> rusqlite::Result<Session> {
         rex_session_id: r.get("rex_session_id")?,
         rex_window_id: r.get("rex_window_id")?,
         rex_block_id: r.get("rex_block_id")?,
-        state: r.get::<_, String>("state")?.parse().map_err(conv)?,
+        state: r.get::<_, String>("state")?.parse().map_err(conversion_error)?,
         started_at: r.get("started_at")?,
         ended_at: r.get("ended_at")?,
         ended_reason: r.get("ended_reason")?,
@@ -356,12 +356,12 @@ impl Store {
             if states.is_empty() {
                 return Ok(Vec::new());
             }
-            let mut ph = Vec::new();
+            let mut placeholders = Vec::new();
             for s in states {
                 args.push(Box::new(s.as_str()));
-                ph.push(format!("?{}", args.len()));
+                placeholders.push(format!("?{}", args.len()));
             }
-            sql.push_str(&format!(" AND s.state IN ({})", ph.join(", ")));
+            sql.push_str(&format!(" AND s.state IN ({})", placeholders.join(", ")));
         }
         sql.push_str(" ORDER BY s.started_at DESC, s.id DESC");
         if let Some(limit) = f.limit {
