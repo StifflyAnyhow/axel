@@ -17,6 +17,7 @@ pub fn run(cmd: SessionCommand) -> Result<()> {
             let ctx = Ctx::open()?;
             let s = ctx.store.get_session(&session)?.with_context(|| format!("no session {session}"))?;
             if s.state == SessionState::Paused { super::process_control::resume(&ctx, &s)?; }
+            // A host that doesn't answer has already gone; ending the row is what counts.
             if let Some(sock) = &s.socket_path {
                 let _ = axel_acp::socket::send(sock, &axel_acp::socket::Command::Stop);
             }
@@ -38,7 +39,7 @@ pub fn run(cmd: SessionCommand) -> Result<()> {
             let ctx = Ctx::open()?;
             let states = if all { None } else { Some(vec![SessionState::Starting, SessionState::Running, SessionState::Blocked, SessionState::Idle, SessionState::Paused]) };
             let agents = ctx.store.list_agents()?;
-            for s in ctx.store.list_sessions(SessionFilter { states, limit: Some(200), ..Default::default() })? {
+            for s in ctx.store.list_sessions(SessionFilter { states, limit: Some(LIST_SESSIONS_MAX), ..Default::default() })? {
                 let agent = agents.iter().find(|a| a.pubkey == s.agent_pubkey).map(|a| a.name.as_str()).unwrap_or("?");
                 let thread = ctx.store.get_thread(&s.thread_id)?.map(|t| t.title).unwrap_or_default();
                 println!("{}  {:<8} {:<7} {:<12} {:<10} {}", s.id, s.state, s.runtime, agent, s.environment_label, thread);
@@ -48,6 +49,12 @@ pub fn run(cmd: SessionCommand) -> Result<()> {
     }
 }
 
+/// Most sessions `axel session ls` lists, newest first.
+const LIST_SESSIONS_MAX: usize = 200;
+/// How many of the newest sessions an id prefix is matched against: an old
+/// session is still reachable by its full id.
+const RESOLVE_SESSIONS_MAX: usize = 2000;
+
 /// A full session id or a unique prefix.
 fn resolve_session(ctx: &Ctx, id: &str) -> Result<String> {
     if ctx.store.get_session(id)?.is_some() {
@@ -55,7 +62,7 @@ fn resolve_session(ctx: &Ctx, id: &str) -> Result<String> {
     }
     let hits: Vec<_> = ctx
         .store
-        .list_sessions(SessionFilter { limit: Some(2000), ..Default::default() })?
+        .list_sessions(SessionFilter { limit: Some(RESOLVE_SESSIONS_MAX), ..Default::default() })?
         .into_iter()
         .filter(|s| s.id.starts_with(id))
         .collect();
@@ -152,25 +159,10 @@ fn host(session_id: &str) -> Result<()> {
         .unwrap_or_default();
     let disallowed: Vec<String> = Vec::new();
 
-    // The adapter and the harness under it must not look like they run inside
-    // Rex: user-level hooks (e.g. the Rex skill's SessionStart hook) would fire
-    // and the agent would start renaming the user's Rex session. The host pane
-    // keeps its own REX_* for Axel; the children lose them.
-    for k in ["REX_SESSION", "REX_BLOCK", "REX_SERVER", "REX_CLIENT", "REX_BIN_DIR", "REX_HOME", "REX_RUNTIME_DIR"] {
-        // SAFETY: single-threaded here, before the tokio runtime starts.
-        unsafe { std::env::remove_var(k) };
-    }
     if let Some(profile) = ClaudeProfile::load(&agent.pubkey)? {
         profile.configure_host()?;
     }
-    let mut env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k == "PATH" || k == "HOME" || k.starts_with("ANTHROPIC_") || k.starts_with("OPENAI_") || k.starts_with("CODEX_") || k.starts_with("AXEL_")).collect();
-    env.push(("AXEL_THREAD".into(), thread.id.clone()));
-    env.push(("AXEL_SESSION".into(), session.id.clone()));
-    env.push(("AXEL_AGENT".into(), agent.pubkey.clone()));
-    env.push(("AXEL_AGENT_NAME".into(), agent.name.clone()));
-    if agent.harness == axel_store::Harness::Claude {
-        env.extend(claude_executable_env());
-    }
+    let env = harness_env(&thread.id, &session.id, &agent);
 
     let meta = session_meta(&agent, &cwd);
     let mcp_servers = vec![super::launch::axel_mcp_server(&env)];
@@ -188,10 +180,7 @@ fn host(session_id: &str) -> Result<()> {
         env,
         initial_prompt,
         initial_attachments,
-        initial_from: std::env::var("AXEL_PROMPT_FROM").ok().filter(|pk| !pk.is_empty()).and_then(|pk| {
-            let name = ctx.store.agent_by_pubkey(&pk).ok().flatten()?.name;
-            Some(axel_acp::socket::Sender::new(pk, name))
-        }),
+        initial_from: prompt_sender(&ctx),
         reply_with: std::env::current_exe().ok(),
         resume_native_id: session.harness_session_id.clone(),
         session_meta: meta,
@@ -203,13 +192,43 @@ fn host(session_id: &str) -> Result<()> {
         // warns where it cannot.
         effort: agent.effort,
     };
-    std::fs::create_dir_all(cfg.socket_path.parent().unwrap())?;
-    std::fs::create_dir_all(cfg.log_path.parent().unwrap())?;
+    std::fs::create_dir_all(cfg.socket_path.parent().expect("socket_path joins onto the run directory"))?;
+    std::fs::create_dir_all(cfg.log_path.parent().expect("log_path joins onto the logs directory"))?;
 
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let local = tokio::task::LocalSet::new();
     let store = ctx.store;
     local.block_on(&rt, axel_acp::run_host(cfg, store, signer, std::io::stdout()))
+}
+
+/// The environment the adapter and harness run with: credentials, PATH and
+/// Axel's own variables from ours, plus the session's identity.
+fn harness_env(thread_id: &str, session_id: &str, agent: &axel_store::Agent) -> Vec<(String, String)> {
+    // The adapter and the harness under it must not look like they run inside
+    // Rex: user-level hooks (e.g. the Rex skill's SessionStart hook) would fire
+    // and the agent would start renaming the user's Rex session. The host pane
+    // keeps its own REX_* for Axel; the children lose them.
+    for k in ["REX_SESSION", "REX_BLOCK", "REX_SERVER", "REX_CLIENT", "REX_BIN_DIR", "REX_HOME", "REX_RUNTIME_DIR"] {
+        // SAFETY: single-threaded here, before the tokio runtime starts.
+        unsafe { std::env::remove_var(k) };
+    }
+    let mut env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k == "PATH" || k == "HOME" || k.starts_with("ANTHROPIC_") || k.starts_with("OPENAI_") || k.starts_with("CODEX_") || k.starts_with("AXEL_")).collect();
+    env.push(("AXEL_THREAD".into(), thread_id.to_string()));
+    env.push(("AXEL_SESSION".into(), session_id.to_string()));
+    env.push(("AXEL_AGENT".into(), agent.pubkey.clone()));
+    env.push(("AXEL_AGENT_NAME".into(), agent.name.clone()));
+    if agent.harness == axel_store::Harness::Claude {
+        env.extend(claude_executable_env());
+    }
+    env
+}
+
+/// The agent that summoned this session, whose first message it is.  One
+/// this machine doesn't know (or can't look up) sends as the owner.
+fn prompt_sender(ctx: &Ctx) -> Option<axel_acp::socket::Sender> {
+    let pk = std::env::var("AXEL_PROMPT_FROM").ok().filter(|pk| !pk.is_empty())?;
+    let name = ctx.store.agent_by_pubkey(&pk).ok().flatten()?.name;
+    Some(axel_acp::socket::Sender::new(pk, name))
 }
 
 #[cfg(test)]
