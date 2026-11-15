@@ -239,12 +239,11 @@ pub fn native_mode(mode: RuntimeMode) -> &'static str {
     }
 }
 
-/// Raw input / output stored on tool-call items is cut at this many bytes.
 /// Stored tool input and output stop at this many bytes (a read file, a
 /// command's output): enough to see it, not the store's whole size.
-const RAW_LIMIT: usize = 16 * 1024;
+const RAW_LIMIT_BYTES: usize = 16 * 1024;
 /// `TurnSummary.assistant_text` keeps this many chars.
-const ASSISTANT_HEAD: usize = 2000;
+const ASSISTANT_HEAD_CHARS: usize = 2000;
 
 /// Host one managed session until it is stopped, the adapter exits, or the
 /// host's stdin (the pane) closes.  See the crate docs for what it does.
@@ -443,6 +442,46 @@ enum Action {
     Stop,
 }
 
+/// How a turn ended: what the thread, the status and the pane say about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnOutcome {
+    /// The agent finished (`end_turn`).
+    Finished,
+    /// The agent stopped short of finishing (`max_tokens`,
+    /// `max_turn_requests`, `refusal`): the turn is done, and says why.
+    StoppedShort,
+    /// The owner cancelled it (`cancelled`).
+    Cancelled,
+    /// The prompt request failed: no stop reason at all.
+    Failed,
+}
+
+impl TurnOutcome {
+    fn of(stop_reason: acp::StopReason) -> TurnOutcome {
+        match stop_reason {
+            acp::StopReason::EndTurn => TurnOutcome::Finished,
+            acp::StopReason::Cancelled => TurnOutcome::Cancelled,
+            _ => TurnOutcome::StoppedShort,
+        }
+    }
+
+    /// The status of the turn's `TurnEnd` item.
+    fn item_status(self) -> ItemStatus {
+        match self {
+            TurnOutcome::Finished | TurnOutcome::StoppedShort => ItemStatus::Completed,
+            TurnOutcome::Cancelled => ItemStatus::Cancelled,
+            TurnOutcome::Failed => ItemStatus::Failed,
+        }
+    }
+}
+
+/// ` · 3 files +10 −2` for a turn's line in the pane, when it changed files.
+fn changes_note(changes: Option<&TurnChanges>) -> String {
+    let Some(c) = changes.filter(|c| !c.files.is_empty()) else { return String::new() };
+    let (added, removed) = c.totals();
+    format!(" · {} file{} +{added} −{removed}", c.files.len(), if c.files.len() == 1 { "" } else { "s" })
+}
+
 struct TextItem {
     id: String,
     kind: ItemKind,
@@ -461,14 +500,83 @@ struct Queued {
 struct PendingPermission {
     reply: oneshot::Sender<acp::RequestPermissionResponse>,
     title: String,
-    /// `(option_id, kind)` with kind as the protocol string.
-    options: Vec<(String, String)>,
+    /// `(option_id, kind)` of each option offered.
+    options: Vec<(String, acp::PermissionOptionKind)>,
     multiple: Option<(usize,usize)>,
+}
+
+/// The tool call a permission request is about.
+struct PermissionCall {
+    /// The ACP `toolCallId`.
+    ref_id: String,
+    title: String,
+    kind: ToolKind,
+    raw_input: Value,
+}
+
+impl PermissionCall {
+    /// The `ref_id` of its `Permission` item: never the tool call's own, so
+    /// tool call updates never touch it.
+    fn permission_ref(&self) -> String {
+        format!("permission:{}", self.ref_id)
+    }
+
+    /// The title, with the gist of the input, for the pane.
+    fn label(&self) -> String {
+        let summary = input_summary(&self.raw_input);
+        if summary.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{}  {DIM}{summary}{RESET}", self.title)
+        }
+    }
+}
+
+fn is_allow(kind: acp::PermissionOptionKind) -> bool {
+    matches!(kind, acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways)
+}
+
+fn is_reject(kind: acp::PermissionOptionKind) -> bool {
+    matches!(kind, acp::PermissionOptionKind::RejectOnce | acp::PermissionOptionKind::RejectAlways)
+}
+
+/// The option of kind `prefer`, else the first of its family.
+fn pick_option(options: &[(String, acp::PermissionOptionKind)], prefer: acp::PermissionOptionKind, family: fn(acp::PermissionOptionKind) -> bool) -> Option<String> {
+    debug_assert!(family(prefer), "the preferred kind belongs to its family");
+    options
+        .iter()
+        .find(|(_, kind)| *kind == prefer)
+        .or_else(|| options.iter().find(|(_, kind)| family(*kind)))
+        .map(|(id, _)| id.clone())
+}
+
+/// The answer that picks `option_id`, or cancels when there is none to pick.
+fn selected_or_cancelled(option_id: Option<String>) -> acp::RequestPermissionResponse {
+    let outcome = match option_id {
+        Some(id) => acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(id))),
+        None => acp::RequestPermissionOutcome::Cancelled,
+    };
+    acp::RequestPermissionResponse::new(outcome)
+}
+
+/// How many choices a multi-select question takes, `(min, max)`; `None`
+/// for a question with one answer.  Bounds the choices can't meet are an error.
+fn selection_bounds(raw_input: &Value, options: &[(String, acp::PermissionOptionKind)]) -> Result<Option<(usize, usize)>> {
+    if raw_input.get("multiSelect").and_then(Value::as_bool) != Some(true) {
+        return Ok(None);
+    }
+    let count = options.iter().filter(|(_, kind)| is_allow(*kind)).count();
+    // Saturating: an absurd bound fails the check below rather than wrapping.
+    let bound = |key: &str| raw_input.get(key).and_then(Value::as_u64).map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    let min = bound("minSelections").unwrap_or(1);
+    let max = bound("maxSelections").unwrap_or(count);
+    anyhow::ensure!(min <= max && max <= count, "invalid question selection bounds");
+    Ok(Some((min, max)))
 }
 
 /// Composite answers are an Axel extension for explicit multi-select questions,
 /// never a way to select unoffered options or combine permission grants.
-fn validate_answer(options: &[(String,String)], multiple: Option<(usize,usize)>, answer: &str) -> Result<bool> {
+fn validate_answer(options: &[(String, acp::PermissionOptionKind)], multiple: Option<(usize,usize)>, answer: &str) -> Result<bool> {
     if let Some(encoded)=answer.strip_prefix(crate::claude::MULTI_ANSWER_PREFIX) {
         let Some((min,max))=multiple else { anyhow::bail!("this question does not allow multiple selections") };
         let ids:Vec<String>=serde_json::from_str(encoded)?;
@@ -476,12 +584,12 @@ fn validate_answer(options: &[(String,String)], multiple: Option<(usize,usize)>,
         let unique:std::collections::HashSet<_>=ids.iter().collect();
         anyhow::ensure!(unique.len()==ids.len(),"duplicate selections");
         for id in ids {
-            anyhow::ensure!(options.iter().any(|(offered,kind)|offered==&id && kind.starts_with("allow")),"option {id} is not an offered selection");
+            anyhow::ensure!(options.iter().any(|(offered,kind)|offered==&id && is_allow(*kind)),"option {id} is not an offered selection");
         }
         return Ok(true)
     }
     let Some((_,kind))=options.iter().find(|(id,_)|id==answer) else { anyhow::bail!("option {answer} is not offered") };
-    let allowed=kind.starts_with("allow");
+    let allowed=is_allow(*kind);
     if allowed && let Some((min,max))=multiple {anyhow::ensure!(min<=1 && max>=1,"select {min}–{max} options");}
     Ok(allowed)
 }
@@ -698,9 +806,7 @@ impl<W: Write> Host<W> {
                 self.line(RED, "✖", &format!("setup failed: {e:#}"));
                 // On the thread too: otherwise the agent just shows as done.
                 let msg = setup_failure_message(&self.cfg.harness, &format!("{e:#}"));
-                if let Err(err) = self.push(ItemKind::Error, Some(ItemStatus::Failed), None, json!({ "message": msg })) {
-                    self.line(RED, "✖", &format!("store: {err}"));
-                }
+                self.record_error(&msg);
                 return format!("setup failed: {e:#}");
             }
         }
@@ -953,6 +1059,11 @@ impl<W: Write> Host<W> {
     /// the host's log and as an item on the thread.
     fn warn(&mut self, msg: &str) {
         self.line(YELLOW, "!", msg);
+        self.record_error(msg);
+    }
+
+    /// An `Error` item on the thread, so viewers see what went wrong.
+    fn record_error(&mut self, msg: &str) {
         if let Err(e) = self.push(ItemKind::Error, Some(ItemStatus::Failed), None, json!({ "message": msg })) {
             self.line(RED, "✖", &format!("store: {e}"));
         }
@@ -1039,10 +1150,7 @@ impl<W: Write> Host<W> {
                     "could not switch the agent to {want} for {} ({e}); it stays in {}, so background sub-agents may be refused",
                     self.cfg.runtime_mode, modes.current_mode_id
                 );
-                self.line(YELLOW, "!", &msg);
-                if let Err(e) = self.push(ItemKind::Error, Some(ItemStatus::Failed), None, json!({ "message": msg })) {
-                    self.line(RED, "✖", &format!("store: {e}"));
-                }
+                self.warn(&msg);
             }
         }
     }
@@ -1663,41 +1771,69 @@ impl<W: Write> Host<W> {
     }
 
     fn end_turn(&mut self, res: Result<acp::PromptResponse, acp::Error>) {
-        self.finalize_text();
-        self.cancel_pending("turn ended");
-        self.close_open_tool_calls();
-        // Sent into the turn and never taken in: they wait for the next one.
-        let unread: Vec<String> = self.steering.iter().map(|q| q.item_id.clone()).collect();
-        for id in unread.iter().rev() {
-            self.unsteer_to_queue(id, true);
-        }
+        self.close_turn_items();
         let duration_ms = i64::try_from(self.turn_started.elapsed().as_millis()).unwrap_or(i64::MAX);
-        let (stop_reason, status) = match &res {
-            Ok(resp) => {
-                let s = enum_str(&resp.stop_reason);
-                let st = if s == "cancelled" {
-                    ItemStatus::Cancelled
-                } else {
-                    ItemStatus::Completed
-                };
-                (s, st)
-            }
+        let (outcome, stop_reason) = match &res {
+            Ok(resp) => (TurnOutcome::of(resp.stop_reason), enum_str(&resp.stop_reason)),
             Err(e) => {
-                if let Err(err) = self.push(
-                    ItemKind::Error,
-                    Some(ItemStatus::Failed),
-                    None,
-                    json!({ "message": e.to_string() }),
-                ) {
-                    self.line(RED, "✖", &format!("store: {err}"));
-                }
-                ("error".to_string(), ItemStatus::Failed)
+                self.record_error(&e.to_string());
+                (TurnOutcome::Failed, "error".to_string())
             }
         };
         if let Ok(resp) = &res {
             self.record_usage(resp);
         }
         let changes = self.turn_changes();
+        let changed = changes_note(changes.as_ref());
+        self.record_turn_end(outcome, &stop_reason, duration_ms, changes);
+        if let Err(e) = self.set_state(SessionState::Idle) {
+            self.line(RED, "✖", &format!("store: {e}"));
+        }
+        let head: String = self.turn_assistant_text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(120).collect();
+        self.announce_turn_end(outcome, &stop_reason, &head);
+        // Another agent's message started this turn: its answer goes back.
+        if outcome == TurnOutcome::Finished {
+            self.return_answer();
+        }
+        // A finished turn is a result to look at (done); a cancelled one is at
+        // rest (idle); a failed one stopped (error).
+        let (osc_state, osc_msg) = match outcome {
+            TurnOutcome::Failed => (axel_rex::osc::State::Error, "the turn failed".to_string()),
+            TurnOutcome::Cancelled => (axel_rex::osc::State::Idle, String::new()),
+            TurnOutcome::Finished | TurnOutcome::StoppedShort => (axel_rex::osc::State::Done, head),
+        };
+        self.program_status(osc_state, None, &osc_msg);
+        let secs = duration_ms as f64 / 1000.0;
+        let (tools, turn) = (self.turn_tool_calls, self.turn);
+        match (outcome, &res) {
+            (_, Err(e)) => self.line(RED, "✖", &format!("turn {turn} failed: {e}")),
+            (TurnOutcome::Cancelled, Ok(_)) => {
+                self.line(YELLOW, "■", &format!("turn {turn} cancelled · {tools} tools · {secs:.1}s{changed}"));
+            }
+            (TurnOutcome::StoppedShort, Ok(_)) => {
+                self.line(GREEN, "✓", &format!("turn {turn} done · {tools} tools · {secs:.1}s{changed} · {stop_reason}"));
+            }
+            (TurnOutcome::Finished, Ok(_)) => self.line(GREEN, "✓", &format!("turn {turn} done · {tools} tools · {secs:.1}s{changed}")),
+            (TurnOutcome::Failed, Ok(_)) => unreachable!("a turn fails only when its prompt request does"),
+        }
+    }
+
+    /// What a turn leaves open when it ends: its streamed text, pending
+    /// permissions, tool calls without a result, and prompts sent into it
+    /// and never taken in (they wait for the next turn).
+    fn close_turn_items(&mut self) {
+        self.finalize_text();
+        self.cancel_pending("turn ended");
+        self.close_open_tool_calls();
+        let unread: Vec<String> = self.steering.iter().map(|q| q.item_id.clone()).collect();
+        for id in unread.iter().rev() {
+            self.unsteer_to_queue(id, true);
+        }
+        debug_assert!(self.steering.is_empty() && self.pending.is_empty() && self.cur_text.is_none());
+    }
+
+    /// The turn's `TurnEnd` item on the thread and its signed `turn` record.
+    fn record_turn_end(&mut self, outcome: TurnOutcome, stop_reason: &str, duration_ms: i64, changes: Option<TurnChanges>) {
         let mut turn_end = json!({
             "stop_reason": stop_reason,
             "tool_calls": self.turn_tool_calls,
@@ -1707,46 +1843,40 @@ impl<W: Write> Host<W> {
         if let Some(c) = &changes {
             turn_end["changes"] = serde_json::to_value(c).unwrap_or(Value::Null);
         }
-        if let Err(e) = self.push(ItemKind::TurnEnd, Some(status), None, turn_end) {
+        if let Err(e) = self.push(ItemKind::TurnEnd, Some(outcome.item_status()), None, turn_end) {
             self.line(RED, "✖", &format!("store: {e}"));
         }
         let summary = TurnSummary {
             ordinal: self.turn,
             user_text: self.turn_user_text.clone(),
-            assistant_text: self
-                .turn_assistant_text
-                .chars()
-                .take(ASSISTANT_HEAD)
-                .collect(),
+            assistant_text: self.turn_assistant_text.chars().take(ASSISTANT_HEAD_CHARS).collect(),
             tool_calls: self.turn_tool_calls,
             files_edited: self.turn_files_edited,
             duration_ms,
-            stop_reason: stop_reason.clone(),
+            stop_reason: stop_reason.to_string(),
             changes,
         };
-        if let Err(e) = self
-            .store
-            .record_turn(&self.signer, &self.cfg.session_id, &summary)
-        {
+        if let Err(e) = self.store.record_turn(&self.signer, &self.cfg.session_id, &summary) {
             self.line(RED, "✖", &format!("record_turn: {e}"));
         }
-        if let Err(e) = self.set_state(SessionState::Idle) {
-            self.line(RED, "✖", &format!("store: {e}"));
-        }
+    }
+
+    /// Tell the owner the turn ended: a desktop notification, and the
+    /// session's status.  `head` is the first line of the agent's answer.
+    fn announce_turn_end(&mut self, outcome: TurnOutcome, stop_reason: &str, head: &str) {
         let who = std::env::var("AXEL_AGENT_NAME").unwrap_or_else(|_| "agent".into());
-        let head: String = self.turn_assistant_text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(120).collect();
-        self.notify(&match stop_reason.as_str() {
-            "error" => format!("{who} hit an error"),
-            "cancelled" => format!("{who} stopped"),
-            _ if head.is_empty() => format!("{who} finished"),
-            _ => format!("{who} finished: {head}"),
+        self.notify(&match outcome {
+            TurnOutcome::Failed => format!("{who} hit an error"),
+            TurnOutcome::Cancelled => format!("{who} stopped"),
+            TurnOutcome::Finished | TurnOutcome::StoppedShort if head.is_empty() => format!("{who} finished"),
+            TurnOutcome::Finished | TurnOutcome::StoppedShort => format!("{who} finished: {head}"),
         });
         // Finished: a result the owner hasn't seen (done, which Rex marks until
         // they look); stopped by them: at rest (idle); failed: error.
-        let turn_state = match stop_reason.as_str() {
-            "error" => StatusState::Error,
-            "cancelled" => StatusState::Idle,
-            _ => StatusState::Done,
+        let turn_state = match outcome {
+            TurnOutcome::Failed => StatusState::Error,
+            TurnOutcome::Cancelled => StatusState::Idle,
+            TurnOutcome::Finished | TurnOutcome::StoppedShort => StatusState::Done,
         };
         if let Err(e) = self.store.record_status(
             &self.signer,
@@ -1754,53 +1884,11 @@ impl<W: Write> Host<W> {
             &StatusReport {
                 state: turn_state,
                 title: Some(format!("turn {} {}", self.turn, stop_reason)),
-                msg: (turn_state == StatusState::Done && !head.is_empty()).then(|| head.clone()),
+                msg: (turn_state == StatusState::Done && !head.is_empty()).then(|| head.to_string()),
                 ..Default::default()
             },
         ) {
             self.line(RED, "✖", &format!("status: {e}"));
-        }
-        // Another agent's message started this turn: its answer goes back.
-        if stop_reason == "end_turn" {
-            self.return_answer();
-        }
-        // A finished turn is a result to look at (done); a cancelled one is at
-        // rest (idle); a failed one stopped (error).
-        let (osc_state, osc_msg) = match stop_reason.as_str() {
-            "error" => (axel_rex::osc::State::Error, "the turn failed".to_string()),
-            "cancelled" => (axel_rex::osc::State::Idle, String::new()),
-            _ => (axel_rex::osc::State::Done, head.clone()),
-        };
-        self.program_status(osc_state, None, &osc_msg);
-        let secs = duration_ms as f64 / 1000.0;
-        let tools = self.turn_tool_calls;
-        let turn = self.turn;
-        let changed = match summary.changes.as_ref().filter(|c| !c.files.is_empty()) {
-            Some(c) => {
-                let (a, r) = c.totals();
-                format!(" · {} file{} +{a} −{r}", c.files.len(), if c.files.len() == 1 { "" } else { "s" })
-            }
-            None => String::new(),
-        };
-        match (&res, status) {
-            (Ok(_), ItemStatus::Cancelled) => self.line(
-                YELLOW,
-                "■",
-                &format!("turn {turn} cancelled · {tools} tools · {secs:.1}s{changed}"),
-            ),
-            (Ok(_), _) => self.line(
-                GREEN,
-                "✓",
-                &format!(
-                    "turn {turn} done · {tools} tools · {secs:.1}s{changed}{}",
-                    if stop_reason == "end_turn" {
-                        String::new()
-                    } else {
-                        format!(" · {stop_reason}")
-                    }
-                ),
-            ),
-            (Err(e), _) => self.line(RED, "✖", &format!("turn {turn} failed: {e}")),
         }
     }
 
@@ -1815,168 +1903,14 @@ impl<W: Write> Host<W> {
                 self.append_text(ItemKind::Thought, &block_text(&chunk.content))
             }
             acp::SessionUpdate::UserMessageChunk(_) => Ok(()), // we pushed the UserMessage ourselves
-            acp::SessionUpdate::ToolCall(tc) => {
-                self.finalize_text();
-                let kind = ToolKind::parse(&enum_str(&tc.kind));
-                let status = tool_status(&enum_str(&tc.status));
-                let raw_input = tc.raw_input.clone().unwrap_or(Value::Null);
-                let summary = input_summary(&raw_input);
-                self.turn_tool_calls += 1;
-                if matches!(kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) {
-                    self.turn_files_edited += 1;
-                    self.note_authored(&tc.locations, &raw_input);
-                }
-                let content = json!({
-                    "title": tc.title,
-                    "kind": kind.as_str(),
-                    "raw_input": truncate_json(&raw_input, RAW_LIMIT),
-                    "locations": locations_json(&tc.locations),
-                });
-                let ref_id = tc.tool_call_id.to_string();
-                if let Some(existing) = self.store.item_by_ref(&self.cfg.session_id, &ref_id)?
-                    && existing.turn == self.turn
-                {
-                    // A permission request may have created it first.
-                    self.store
-                        .update_item(&existing.id, Some(status), Some(content))?;
-                } else {
-                    self.push(ItemKind::ToolCall, Some(status), Some(ref_id), content)?;
-                }
-                self.line(
-                    YELLOW,
-                    "⚙",
-                    &format!(
-                        "{}{}",
-                        tc.title,
-                        if summary.is_empty() {
-                            String::new()
-                        } else {
-                            format!("  {DIM}{summary}{RESET}")
-                        }
-                    ),
-                );
-                Ok(())
-            }
-            acp::SessionUpdate::ToolCallUpdate(upd) => {
-                let ref_id = upd.tool_call_id.to_string();
-                let f = &upd.fields;
-                let status = f.status.map(|s| tool_status(&enum_str(&s)));
-                let mut patch = serde_json::Map::new();
-                if let Some(t) = &f.title {
-                    patch.insert("title".into(), json!(t));
-                }
-                if let Some(k) = &f.kind {
-                    patch.insert("kind".into(), json!(ToolKind::parse(&enum_str(k)).as_str()));
-                }
-                if let Some(v) = &f.raw_input {
-                    patch.insert("raw_input".into(), truncate_json(v, RAW_LIMIT));
-                }
-                if let Some(v) = &f.raw_output {
-                    patch.insert("raw_output".into(), truncate_json(v, RAW_LIMIT));
-                }
-                if let Some(l) = &f.locations {
-                    patch.insert("locations".into(), locations_json(l));
-                    let edits = match &f.kind {
-                        Some(k) => matches!(ToolKind::parse(&enum_str(k)), ToolKind::Edit | ToolKind::Delete | ToolKind::Move),
-                        None => self
-                            .store
-                            .item_by_ref(&self.cfg.session_id, &ref_id)?
-                            .and_then(|it| it.content.get("kind").and_then(Value::as_str).map(|k| matches!(k, "edit" | "delete" | "move")))
-                            .unwrap_or(false),
-                    };
-                    if edits {
-                        self.note_authored(l, f.raw_input.as_ref().unwrap_or(&Value::Null));
-                    }
-                }
-                if let Some(c) = &f.content {
-                    let v = serde_json::to_value(c).unwrap_or(Value::Null);
-                    patch.insert("content".into(), truncate_json(&v, RAW_LIMIT));
-                }
-                let title = match self.store.item_by_ref(&self.cfg.session_id, &ref_id)? {
-                    Some(item) => {
-                        self.store
-                            .update_item(&item.id, status, Some(Value::Object(patch)))?;
-                        f.title
-                            .clone()
-                            .or_else(|| item_title(&item))
-                            .unwrap_or(ref_id)
-                    }
-                    None => {
-                        // An update for a call we never saw: materialise it.
-                        self.finalize_text();
-                        self.turn_tool_calls += 1;
-                        let title = f.title.clone().unwrap_or_else(|| ref_id.clone());
-                        patch.entry("title").or_insert(json!(title));
-                        patch
-                            .entry("kind")
-                            .or_insert(json!(ToolKind::Other.as_str()));
-                        self.push(
-                            ItemKind::ToolCall,
-                            Some(status.unwrap_or(ItemStatus::Running)),
-                            Some(ref_id),
-                            Value::Object(patch),
-                        )?;
-                        title
-                    }
-                };
-                match status {
-                    Some(ItemStatus::Completed) => self.line(GREEN, "✓", &title),
-                    Some(ItemStatus::Failed) => self.line(RED, "✗", &title),
-                    _ => {}
-                }
-                Ok(())
-            }
+            acp::SessionUpdate::ToolCall(tc) => self.on_tool_call(&tc),
+            acp::SessionUpdate::ToolCallUpdate(upd) => self.on_tool_call_update(&upd),
             acp::SessionUpdate::CurrentModeUpdate(m) => {
                 self.dim(&format!("· agent mode is now {}", m.current_mode_id));
                 Ok(())
             }
-            acp::SessionUpdate::Plan(plan) => {
-                self.finalize_text();
-                let mut lines = Vec::new();
-                for e in &plan.entries {
-                    let glyph = match enum_str(&e.status).as_str() {
-                        "completed" => "✓",
-                        "in_progress" => "▸",
-                        _ => "·",
-                    };
-                    lines.push(format!("{glyph} {}", e.content));
-                }
-                let text = lines.join("\n");
-                let content = json!({ "text": text, "plan": serde_json::to_value(&plan.entries).unwrap_or(Value::Null) });
-                match self.store.item_by_ref(&self.cfg.session_id, "plan")? {
-                    Some(item) => self.store.update_item(&item.id, None, Some(content))?,
-                    None => {
-                        self.push(
-                            ItemKind::Thought,
-                            Some(ItemStatus::Completed),
-                            Some("plan".into()),
-                            content,
-                        )?;
-                    }
-                }
-                self.line(BLUE, "☰", &format!("plan · {} steps", plan.entries.len()));
-                Ok(())
-            }
-            acp::SessionUpdate::UsageUpdate(u) => {
-                if u.size > 0 {
-                    self.store.set_session_context(&self.cfg.session_id, u.used, u.size)?;
-                }
-                if let Some(cost) = u.cost.filter(|c| c.currency.eq_ignore_ascii_case("USD") && c.amount.is_finite() && c.amount >= 0.0) {
-                    let amount = (cost.amount - self.session_cost).max(0.0);
-                    if amount > 0.0 {
-                        self.store.add_usage(&self.signer, &self.cfg.session_id, &axel_store::UsageDelta {
-                            cost_usd_est: amount,
-                            model: self.cfg.model.clone(),
-                            ..Default::default()
-                        }, None)?;
-                        self.session_cost += amount;
-                        self.turn_progress_cost += amount;
-                    }
-                    self.standard_cost_seen = true;
-                    self.turn_progress = true;
-                }
-                Ok(())
-            }
+            acp::SessionUpdate::Plan(plan) => self.on_plan(&plan),
+            acp::SessionUpdate::UsageUpdate(u) => self.on_usage_update(&u),
             other => {
                 let name = serde_json::to_value(&other)
                     .ok()
@@ -1990,6 +1924,175 @@ impl<W: Write> Host<W> {
                 Ok(())
             }
         }
+    }
+
+    /// A new tool call: a `ToolCall` item (or the one a permission request
+    /// made for it first), counted in the turn, and a line in the pane.
+    fn on_tool_call(&mut self, tc: &acp::ToolCall) -> Result<()> {
+        self.finalize_text();
+        let kind = ToolKind::parse(&enum_str(&tc.kind));
+        let status = tool_status(tc.status);
+        let raw_input = tc.raw_input.clone().unwrap_or(Value::Null);
+        let summary = input_summary(&raw_input);
+        self.turn_tool_calls += 1;
+        if edits_files(kind) {
+            self.turn_files_edited += 1;
+            self.note_authored(&tc.locations, &raw_input);
+        }
+        let content = json!({
+            "title": tc.title,
+            "kind": kind.as_str(),
+            "raw_input": truncate_json(&raw_input, RAW_LIMIT_BYTES),
+            "locations": locations_json(&tc.locations),
+        });
+        let ref_id = tc.tool_call_id.to_string();
+        if let Some(existing) = self.store.item_by_ref(&self.cfg.session_id, &ref_id)?
+            && existing.turn == self.turn
+        {
+            // A permission request may have created it first.
+            self.store
+                .update_item(&existing.id, Some(status), Some(content))?;
+        } else {
+            self.push(ItemKind::ToolCall, Some(status), Some(ref_id), content)?;
+        }
+        let shown_summary = if summary.is_empty() { String::new() } else { format!("  {DIM}{summary}{RESET}") };
+        self.line(YELLOW, "⚙", &format!("{}{shown_summary}", tc.title));
+        Ok(())
+    }
+
+    /// An update to a tool call: merged into its item (made now if the call
+    /// was never seen), and its result shown when it has one.
+    fn on_tool_call_update(&mut self, upd: &acp::ToolCallUpdate) -> Result<()> {
+        let ref_id = upd.tool_call_id.to_string();
+        let f = &upd.fields;
+        let status = f.status.map(tool_status);
+        let mut patch = self.tool_call_patch(&ref_id, f)?;
+        let title = match self.store.item_by_ref(&self.cfg.session_id, &ref_id)? {
+            Some(item) => {
+                self.store
+                    .update_item(&item.id, status, Some(Value::Object(patch)))?;
+                f.title
+                    .clone()
+                    .or_else(|| item_title(&item))
+                    .unwrap_or(ref_id)
+            }
+            None => {
+                // An update for a call we never saw: materialise it.
+                self.finalize_text();
+                self.turn_tool_calls += 1;
+                let title = f.title.clone().unwrap_or_else(|| ref_id.clone());
+                patch.entry("title").or_insert(json!(title));
+                patch
+                    .entry("kind")
+                    .or_insert(json!(ToolKind::Other.as_str()));
+                self.push(
+                    ItemKind::ToolCall,
+                    Some(status.unwrap_or(ItemStatus::Running)),
+                    Some(ref_id),
+                    Value::Object(patch),
+                )?;
+                title
+            }
+        };
+        match status {
+            Some(ItemStatus::Completed) => self.line(GREEN, "✓", &title),
+            Some(ItemStatus::Failed) => self.line(RED, "✗", &title),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The fields a tool call update changes, as an item content patch.
+    /// Locations an edit names count as authored by the turn.
+    fn tool_call_patch(&mut self, ref_id: &str, f: &acp::ToolCallUpdateFields) -> Result<serde_json::Map<String, Value>> {
+        let mut patch = serde_json::Map::new();
+        if let Some(t) = &f.title {
+            patch.insert("title".into(), json!(t));
+        }
+        if let Some(k) = &f.kind {
+            patch.insert("kind".into(), json!(ToolKind::parse(&enum_str(k)).as_str()));
+        }
+        if let Some(v) = &f.raw_input {
+            patch.insert("raw_input".into(), truncate_json(v, RAW_LIMIT_BYTES));
+        }
+        if let Some(v) = &f.raw_output {
+            patch.insert("raw_output".into(), truncate_json(v, RAW_LIMIT_BYTES));
+        }
+        if let Some(l) = &f.locations {
+            patch.insert("locations".into(), locations_json(l));
+            let edits = match &f.kind {
+                Some(k) => edits_files(ToolKind::parse(&enum_str(k))),
+                None => self
+                    .store
+                    .item_by_ref(&self.cfg.session_id, ref_id)?
+                    .and_then(|it| it.content.get("kind").and_then(Value::as_str).map(|k| edits_files(ToolKind::parse(k))))
+                    .unwrap_or(false),
+            };
+            if edits {
+                self.note_authored(l, f.raw_input.as_ref().unwrap_or(&Value::Null));
+            }
+        }
+        if let Some(c) = &f.content {
+            let v = serde_json::to_value(c).unwrap_or(Value::Null);
+            patch.insert("content".into(), truncate_json(&v, RAW_LIMIT_BYTES));
+        }
+        Ok(patch)
+    }
+
+    /// The agent's plan: one `Thought` item, kept up to date.
+    fn on_plan(&mut self, plan: &acp::Plan) -> Result<()> {
+        self.finalize_text();
+        let text = plan
+            .entries
+            .iter()
+            .map(|e| {
+                let glyph = match e.status {
+                    acp::PlanEntryStatus::Completed => "✓",
+                    acp::PlanEntryStatus::InProgress => "▸",
+                    _ => "·",
+                };
+                format!("{glyph} {}", e.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = json!({ "text": text, "plan": serde_json::to_value(&plan.entries).unwrap_or(Value::Null) });
+        match self.store.item_by_ref(&self.cfg.session_id, "plan")? {
+            Some(item) => self.store.update_item(&item.id, None, Some(content))?,
+            None => {
+                self.push(
+                    ItemKind::Thought,
+                    Some(ItemStatus::Completed),
+                    Some("plan".into()),
+                    content,
+                )?;
+            }
+        }
+        self.line(BLUE, "☰", &format!("plan · {} steps", plan.entries.len()));
+        Ok(())
+    }
+
+    /// How full the context is, and the session's running cost in USD,
+    /// when the harness reports them in ACP's own terms.
+    fn on_usage_update(&mut self, u: &acp::UsageUpdate) -> Result<()> {
+        if u.size > 0 {
+            self.store.set_session_context(&self.cfg.session_id, u.used, u.size)?;
+        }
+        if let Some(cost) = u.cost.as_ref().filter(|c| c.currency.eq_ignore_ascii_case("USD") && c.amount.is_finite() && c.amount >= 0.0) {
+            // A running total: only what it grew by is new.
+            let amount = (cost.amount - self.session_cost).max(0.0);
+            if amount > 0.0 {
+                self.store.add_usage(&self.signer, &self.cfg.session_id, &axel_store::UsageDelta {
+                    cost_usd_est: amount,
+                    model: self.cfg.model.clone(),
+                    ..Default::default()
+                }, None)?;
+                self.session_cost += amount;
+                self.turn_progress_cost += amount;
+            }
+            self.standard_cost_seen = true;
+            self.turn_progress = true;
+        }
+        Ok(())
     }
 
     /// Append streamed text to the open AssistantMessage/Thought item, opening one if needed.
@@ -2056,9 +2159,48 @@ impl<W: Write> Host<W> {
         reply: oneshot::Sender<acp::RequestPermissionResponse>,
     ) -> Result<()> {
         self.finalize_text();
-        let ref_id = req.tool_call.tool_call_id.to_string();
-        let perm_ref = format!("permission:{ref_id}");
-        let f = &req.tool_call.fields;
+        let call = self.permission_call(&req.tool_call)?;
+        let options: Vec<(String, acp::PermissionOptionKind)> = req
+            .options
+            .iter()
+            .map(|o| (o.option_id.to_string(), o.kind))
+            .collect();
+        // A question for the owner (its choices are `answer:` options) is never
+        // a permission: no policy may pick an answer, whatever the mode.
+        let question = !req.options.is_empty() && req.options.iter().all(|o| o.option_id.to_string().starts_with(crate::claude::ANSWER_PREFIX));
+        if question {
+            let multiple = selection_bounds(&call.raw_input, &options)?;
+            return self.ask_owner(call, &req.options, options, multiple, true, reply);
+        }
+        match policy::decide(self.cfg.runtime_mode, call.kind, &call.title, &call.raw_input, &self.cfg.disallowed_tools) {
+            Decision::Allow => {
+                let picked = pick_option(&options, acp::PermissionOptionKind::AllowOnce, is_allow);
+                // The adapter may have withdrawn the request; nothing to undo.
+                let _ = reply.send(selected_or_cancelled(picked));
+                self.line(GREEN, "✓", &format!("allow: {}", call.label()));
+            }
+            Decision::Deny { reason } => {
+                let picked = pick_option(&options, acp::PermissionOptionKind::RejectOnce, is_reject);
+                // The adapter may have withdrawn the request; nothing to undo.
+                let _ = reply.send(selected_or_cancelled(picked));
+                self.push(
+                    ItemKind::Permission,
+                    Some(ItemStatus::Denied),
+                    Some(call.permission_ref()),
+                    json!({ "title": call.title, "kind": call.kind.as_str(), "raw_input": truncate_json(&call.raw_input, RAW_LIMIT_BYTES), "reason": reason, "decided_by": "policy" }),
+                )?;
+                self.line(RED, "✗", &format!("deny: {} {DIM}({reason}){RESET}", call.label()));
+            }
+            Decision::Ask => self.ask_owner(call, &req.options, options, None, false, reply)?,
+        }
+        Ok(())
+    }
+
+    /// What a permission request is about: its tool call's title, kind and
+    /// input, from the request, else from the tool call item already stored.
+    fn permission_call(&self, tool_call: &acp::ToolCallUpdate) -> Result<PermissionCall> {
+        let ref_id = tool_call.tool_call_id.to_string();
+        let f = &tool_call.fields;
         let existing = self.store.item_by_ref(&self.cfg.session_id, &ref_id)?;
         let title = f
             .title
@@ -2068,152 +2210,63 @@ impl<W: Write> Host<W> {
         let kind = f
             .kind
             .map(|k| ToolKind::parse(&enum_str(&k)))
-            .or_else(|| {
-                existing.as_ref().and_then(|i| {
-                    i.content
-                        .get("kind")
-                        .and_then(Value::as_str)
-                        .map(ToolKind::parse)
-                })
-            })
+            .or_else(|| existing.as_ref().and_then(|i| i.content.get("kind").and_then(Value::as_str).map(ToolKind::parse)))
             .unwrap_or_default();
         let raw_input = f
             .raw_input
             .clone()
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|i| i.content.get("raw_input").cloned())
-            })
+            .or_else(|| existing.as_ref().and_then(|i| i.content.get("raw_input").cloned()))
             .unwrap_or(Value::Null);
-        let options: Vec<(String, String)> = req
-            .options
-            .iter()
-            .map(|o| (o.option_id.to_string(), enum_str(&o.kind)))
-            .collect();
-        let pick = |prefix: &str, prefer: &str| -> Option<String> {
-            options
-                .iter()
-                .find(|(_, k)| k == prefer)
-                .or_else(|| options.iter().find(|(_, k)| k.starts_with(prefix)))
-                .map(|(id, _)| id.clone())
-        };
-        let summary = input_summary(&raw_input);
-        let label = if summary.is_empty() {
-            title.clone()
-        } else {
-            format!("{title}  {DIM}{summary}{RESET}")
-        };
+        Ok(PermissionCall { ref_id, title, kind, raw_input })
+    }
 
-        // A question for the owner (its choices are `answer:` options) is never
-        // a permission: no policy may pick an answer, whatever the mode.
-        let question = !req.options.is_empty() && req.options.iter().all(|o| o.option_id.to_string().starts_with(crate::claude::ANSWER_PREFIX));
-        let multiple = if question && raw_input.get("multiSelect").and_then(Value::as_bool)==Some(true) {
-            let count=options.iter().filter(|(_,k)|k.starts_with("allow")).count();
-            // Saturating: an absurd bound fails the check below rather than wrapping.
-            let min=raw_input.get("minSelections").and_then(Value::as_u64).map_or(1, |n| usize::try_from(n).unwrap_or(usize::MAX));
-            let max=raw_input.get("maxSelections").and_then(Value::as_u64).map_or(count, |n| usize::try_from(n).unwrap_or(usize::MAX));
-            anyhow::ensure!(min<=max && max<=count,"invalid question selection bounds");
-            Some((min,max))
-        } else {None};
-        let decision = if question {
-            Decision::Ask
+    /// Park a permission request (or a question) for the owner: a pending
+    /// item on the thread, the session blocked, and a notification.
+    fn ask_owner(
+        &mut self,
+        call: PermissionCall,
+        offered: &[acp::PermissionOption],
+        options: Vec<(String, acp::PermissionOptionKind)>,
+        multiple: Option<(usize, usize)>,
+        question: bool,
+        reply: oneshot::Sender<acp::RequestPermissionResponse>,
+    ) -> Result<()> {
+        debug_assert!(question || multiple.is_none(), "only a question has several selections");
+        let opts: Vec<Value> = offered
+            .iter()
+            .map(|o| json!({ "option_id": o.option_id.to_string(), "name": o.name, "kind": enum_str(&o.kind) }))
+            .collect();
+        let item = self.push(
+            if question { ItemKind::Question } else { ItemKind::Permission },
+            Some(ItemStatus::Pending),
+            Some(call.permission_ref()),
+            json!({ "title": call.title, "kind": call.kind.as_str(), "raw_input": truncate_json(&call.raw_input, RAW_LIMIT_BYTES), "options": opts, "multi_select": multiple.map(|(min,max)|json!({"min":min,"max":max})) }),
+        )?;
+        let who = std::env::var("AXEL_AGENT_NAME").unwrap_or_else(|_| "agent".into());
+        let title = &call.title;
+        self.notify(&if question { format!("{who} asks: {title}") } else { format!("{who} needs permission: {title}") });
+        self.set_state(SessionState::Blocked)?;
+        let (osc_kind, blocked_kind) = if question {
+            (axel_rex::osc::Kind::Question, BlockedKind::Question)
         } else {
-            policy::decide(self.cfg.runtime_mode, kind, &title, &raw_input, &self.cfg.disallowed_tools)
+            (axel_rex::osc::Kind::Permission, BlockedKind::Permission)
         };
-        match decision {
-            Decision::Allow => {
-                let resp = match pick("allow", "allow_once") {
-                    Some(id) => acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Selected(
-                            acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(id)),
-                        ),
-                    ),
-                    None => acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Cancelled,
-                    ),
-                };
-                // The adapter may have withdrawn the request; nothing to undo.
-                let _ = reply.send(resp);
-                self.line(GREEN, "✓", &format!("allow: {label}"));
-            }
-            Decision::Deny { reason } => {
-                let resp = match pick("reject", "reject_once") {
-                    Some(id) => acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Selected(
-                            acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(id)),
-                        ),
-                    ),
-                    None => acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Cancelled,
-                    ),
-                };
-                // The adapter may have withdrawn the request; nothing to undo.
-                let _ = reply.send(resp);
-                self.push(
-                    ItemKind::Permission,
-                    Some(ItemStatus::Denied),
-                    Some(perm_ref),
-                    json!({ "title": title, "kind": kind.as_str(), "raw_input": truncate_json(&raw_input, RAW_LIMIT), "reason": reason, "decided_by": "policy" }),
-                )?;
-                self.line(RED, "✗", &format!("deny: {label} {DIM}({reason}){RESET}"));
-            }
-            Decision::Ask => {
-                let opts: Vec<Value> = req
-                    .options
-                    .iter()
-                    .map(|o| json!({ "option_id": o.option_id.to_string(), "name": o.name, "kind": enum_str(&o.kind) }))
-                    .collect();
-                let item = self.push(
-                    if question { ItemKind::Question } else { ItemKind::Permission },
-                    Some(ItemStatus::Pending),
-                    Some(perm_ref),
-                    json!({ "title": title, "kind": kind.as_str(), "raw_input": truncate_json(&raw_input, RAW_LIMIT), "options": opts, "multi_select": multiple.map(|(min,max)|json!({"min":min,"max":max})) }),
-                )?;
-                let who = std::env::var("AXEL_AGENT_NAME").unwrap_or_else(|_| "agent".into());
-                self.notify(&if question { format!("{who} asks: {title}") } else { format!("{who} needs permission: {title}") });
-                                self.state = SessionState::Blocked;
-                self.store.update_session(
-                    &self.signer,
-                    &self.cfg.session_id,
-                    &SessionUpdate {
-                        state: Some(SessionState::Blocked),
-                        ..Default::default()
-                    },
-                )?;
-                let (osc_kind, blocked_kind) = if question {
-                    (axel_rex::osc::Kind::Question, BlockedKind::Question)
-                } else {
-                    (axel_rex::osc::Kind::Permission, BlockedKind::Permission)
-                };
-                self.program_status(axel_rex::osc::State::Blocked, Some(osc_kind), &title);
-                self.store.record_status(
-                    &self.signer,
-                    &self.cfg.session_id,
-                    &StatusReport {
-                        state: StatusState::Blocked,
-                        kind: Some(blocked_kind),
-                        title: Some(title.clone()),
-                        msg: if summary.is_empty() {
-                            None
-                        } else {
-                            Some(summary.clone())
-                        },
-                        progress: None,
-                    },
-                )?;
-                self.pending.insert(
-                    item.id,
-                    PendingPermission {
-                        reply,
-                        title,
-                        options,
-                        multiple,
-                    },
-                );
-                self.line(MAGENTA, "?", &format!("permission: {label}"));
-            }
-        }
+        self.program_status(axel_rex::osc::State::Blocked, Some(osc_kind), title);
+        let summary = input_summary(&call.raw_input);
+        self.store.record_status(
+            &self.signer,
+            &self.cfg.session_id,
+            &StatusReport {
+                state: StatusState::Blocked,
+                kind: Some(blocked_kind),
+                title: Some(title.clone()),
+                msg: (!summary.is_empty()).then_some(summary),
+                progress: None,
+            },
+        )?;
+        let label = call.label();
+        self.pending.insert(item.id, PendingPermission { reply, title: call.title, options, multiple });
+        self.line(MAGENTA, "?", &format!("permission: {label}"));
         Ok(())
     }
 
@@ -2613,12 +2666,18 @@ fn enum_str<T: serde::Serialize>(v: &T) -> String {
     }
 }
 
-fn tool_status(s: &str) -> ItemStatus {
-    match s {
-        "completed" => ItemStatus::Completed,
-        "failed" => ItemStatus::Failed,
+fn tool_status(status: acp::ToolCallStatus) -> ItemStatus {
+    match status {
+        acp::ToolCallStatus::Completed => ItemStatus::Completed,
+        acp::ToolCallStatus::Failed => ItemStatus::Failed,
+        // Pending, in progress, and kinds a newer protocol adds.
         _ => ItemStatus::Running,
     }
+}
+
+/// Kinds of tool that change files: their calls count as the turn's edits.
+fn edits_files(kind: ToolKind) -> bool {
+    matches!(kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
 }
 
 fn block_text(b: &acp::ContentBlock) -> String {
@@ -2742,7 +2801,7 @@ mod tests {
 
     #[test]
     fn composite_answers_are_bounded_unique_and_never_permission_grants() {
-        let options=vec![("answer:0".into(),"allow_once".into()),("answer:1".into(),"allow_once".into()),("answer:none".into(),"reject_once".into())];
+        let options=vec![("answer:0".into(),acp::PermissionOptionKind::AllowOnce),("answer:1".into(),acp::PermissionOptionKind::AllowOnce),("answer:none".into(),acp::PermissionOptionKind::RejectOnce)];
         let both=r#"answer:multi:["answer:0","answer:1"]"#;
         assert!(validate_answer(&options,Some((1,2)),both).unwrap());
         assert!(validate_answer(&options,None,both).is_err());
