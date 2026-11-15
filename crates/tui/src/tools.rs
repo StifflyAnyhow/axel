@@ -297,187 +297,242 @@ struct Cmd {
 /// whole; `$(…)` and backticks stay inside theirs; a heredoc's body goes to
 /// the command that reads it; `#` starts a comment.
 fn split(cmd: &str) -> Vec<Cmd> {
-    let chars: Vec<char> = cmd.chars().collect();
-    let mut out: Vec<Cmd> = Vec::new();
-    let mut cur = Cmd::default();
-    let mut word = String::new();
-    let mut in_word = false;
-    let mut redirect = false;
-    let mut pending_heredoc: Vec<String> = Vec::new();
-    let mut heredoc_for: Vec<usize> = Vec::new();
-    let mut i = 0;
-    let push_word = |cur: &mut Cmd, word: &mut String, in_word: &mut bool, redirect: &mut bool| {
-        if *in_word {
-            if *redirect {
-                cur.out = Some(std::mem::take(word));
-                *redirect = false;
-            } else {
-                cur.words.push(std::mem::take(word));
-            }
-            *in_word = false;
-        }
-    };
-    let end_cmd = |out: &mut Vec<Cmd>, cur: &mut Cmd, piped_next: bool| {
-        let done = std::mem::take(cur);
-        if !done.words.is_empty() || done.out.is_some() {
-            out.push(done);
-        }
-        cur.piped = piped_next;
-    };
-    while i < chars.len() {
-        let c = chars[i];
-        match c {
-            '\'' => {
-                in_word = true;
-                i += 1;
-                while i < chars.len() && chars[i] != '\'' {
-                    word.push(chars[i]);
-                    i += 1;
-                }
-            }
-            '"' => {
-                in_word = true;
-                i += 1;
-                while i < chars.len() && chars[i] != '"' {
-                    if chars[i] == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '"' | '\\' | '$' | '`') {
-                        i += 1;
-                    }
-                    word.push(chars[i]);
-                    i += 1;
-                }
-            }
-            '\\' if i + 1 < chars.len() => {
-                in_word = true;
-                if chars[i + 1] != '\n' {
-                    word.push(chars[i + 1]);
-                }
-                i += 1;
-            }
-            '$' if chars.get(i + 1) == Some(&'(') => {
-                // $(…): kept whole inside the word.
-                in_word = true;
-                let mut depth = 0;
-                while i < chars.len() {
-                    word.push(chars[i]);
-                    if chars[i] == '(' {
-                        depth += 1;
-                    } else if chars[i] == ')' {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    i += 1;
-                }
-            }
-            '`' => {
-                in_word = true;
-                word.push(c);
-                i += 1;
-                while i < chars.len() && chars[i] != '`' {
-                    word.push(chars[i]);
-                    i += 1;
-                }
-                word.push('`');
-            }
-            '#' if !in_word => {
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
-                continue;
-            }
-            ' ' | '\t' => push_word(&mut cur, &mut word, &mut in_word, &mut redirect),
-            '\n' => {
-                push_word(&mut cur, &mut word, &mut in_word, &mut redirect);
-                end_cmd(&mut out, &mut cur, false);
-                // Heredoc bodies follow the line that opened them.
-                for (delim, at) in pending_heredoc.drain(..).zip(heredoc_for.drain(..)) {
-                    let mut body = String::new();
-                    i += 1;
-                    loop {
-                        let start = i;
-                        while i < chars.len() && chars[i] != '\n' {
-                            i += 1;
-                        }
-                        let line: String = chars[start..i].iter().collect();
-                        if line.trim() == delim || i >= chars.len() {
-                            if line.trim() != delim {
-                                body.push_str(&line);
-                            }
-                            break;
-                        }
-                        body.push_str(&line);
-                        body.push('\n');
-                        i += 1;
-                    }
-                    if let Some(cmd) = out.get_mut(at) {
-                        cmd.heredoc = Some(body);
-                    }
-                }
-            }
-            ';' | '&' | '|' => {
-                push_word(&mut cur, &mut word, &mut in_word, &mut redirect);
-                let pipe = c == '|' && chars.get(i + 1) != Some(&'|');
-                if c == '&' && chars.get(i + 1) == Some(&'>') {
-                    // &> file
-                    redirect = true;
-                    i += 2;
-                    continue;
-                }
-                end_cmd(&mut out, &mut cur, pipe);
-                if matches!(chars.get(i + 1), Some('&' | '|')) {
-                    i += 1;
-                }
-            }
-            '>' => {
-                push_word(&mut cur, &mut word, &mut in_word, &mut redirect);
-                if word_is_fd(&cur) {
-                    cur.words.pop();
-                }
-                // 2>&1, >&2: not a file.
-                if chars.get(i + 1) == Some(&'&') {
-                    i += 2;
-                    while i < chars.len() && chars[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                    continue;
-                }
-                if chars.get(i + 1) == Some(&'>') {
-                    i += 1;
-                }
-                redirect = true;
-            }
-            '<' if chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') => {
-                push_word(&mut cur, &mut word, &mut in_word, &mut redirect);
-                i += 2;
-                if chars.get(i) == Some(&'-') {
-                    i += 1;
-                }
-                while chars.get(i) == Some(&' ') {
-                    i += 1;
-                }
-                let mut delim = String::new();
-                while i < chars.len() && !chars[i].is_whitespace() && !matches!(chars[i], ';' | '|' | '&' | ')') {
-                    if !matches!(chars[i], '\'' | '"') {
-                        delim.push(chars[i]);
-                    }
-                    i += 1;
-                }
-                pending_heredoc.push(delim);
-                heredoc_for.push(out.len());
-                continue;
-            }
-            '(' | ')' | '{' | '}' if !in_word => {}
+    let mut s = Splitter { chars: cmd.chars().collect(), ..Default::default() };
+    while s.i < s.chars.len() {
+        let c = s.chars[s.i];
+        let advance = match c {
+            '\'' => s.single_quoted(),
+            '"' => s.double_quoted(),
+            '\\' if s.i + 1 < s.chars.len() => s.escaped(),
+            '$' if s.chars.get(s.i + 1) == Some(&'(') => s.substitution(),
+            '`' => s.backticks(),
+            '#' if !s.in_word => s.comment(),
+            ' ' | '\t' => s.push_word(),
+            '\n' => s.newline(),
+            ';' | '&' | '|' => s.separator(c),
+            '>' => s.redirect_out(),
+            '<' if s.chars.get(s.i + 1) == Some(&'<') && s.chars.get(s.i + 2) != Some(&'<') => s.heredoc_start(),
+            '(' | ')' | '{' | '}' if !s.in_word => true,
             _ => {
-                in_word = true;
-                word.push(c);
+                s.in_word = true;
+                s.word.push(c);
+                true
+            }
+        };
+        if advance {
+            s.i += 1;
+        }
+    }
+    s.push_word();
+    s.end_cmd(false);
+    s.out
+}
+
+/// [`split`]'s state as it walks the line. Each handler starts on the
+/// character it handles and returns whether the walk should step past where
+/// it left `i`.
+#[derive(Default)]
+struct Splitter {
+    chars: Vec<char>,
+    i: usize,
+    out: Vec<Cmd>,
+    cur: Cmd,
+    word: String,
+    in_word: bool,
+    /// The next word is where `>` sends the output.
+    redirect: bool,
+    /// Heredoc delimiters opened on this line and the command each feeds.
+    pending_heredoc: Vec<(String, usize)>,
+}
+
+impl Splitter {
+    fn push_word(&mut self) -> bool {
+        if self.in_word {
+            if self.redirect {
+                self.cur.out = Some(std::mem::take(&mut self.word));
+                self.redirect = false;
+            } else {
+                self.cur.words.push(std::mem::take(&mut self.word));
+            }
+            self.in_word = false;
+        }
+        true
+    }
+
+    fn end_cmd(&mut self, piped_next: bool) {
+        let done = std::mem::take(&mut self.cur);
+        if !done.words.is_empty() || done.out.is_some() {
+            self.out.push(done);
+        }
+        self.cur.piped = piped_next;
+    }
+
+    fn single_quoted(&mut self) -> bool {
+        self.in_word = true;
+        self.i += 1;
+        while self.i < self.chars.len() && self.chars[self.i] != '\'' {
+            self.word.push(self.chars[self.i]);
+            self.i += 1;
+        }
+        true
+    }
+
+    fn double_quoted(&mut self) -> bool {
+        let chars = &self.chars;
+        self.in_word = true;
+        self.i += 1;
+        while self.i < chars.len() && chars[self.i] != '"' {
+            if chars[self.i] == '\\' && self.i + 1 < chars.len() && matches!(chars[self.i + 1], '"' | '\\' | '$' | '`') {
+                self.i += 1;
+            }
+            self.word.push(chars[self.i]);
+            self.i += 1;
+        }
+        true
+    }
+
+    fn escaped(&mut self) -> bool {
+        self.in_word = true;
+        if self.chars[self.i + 1] != '\n' {
+            self.word.push(self.chars[self.i + 1]);
+        }
+        self.i += 1;
+        true
+    }
+
+    /// `$(…)`: kept whole inside the word.
+    fn substitution(&mut self) -> bool {
+        self.in_word = true;
+        let mut depth = 0;
+        while self.i < self.chars.len() {
+            let c = self.chars[self.i];
+            self.word.push(c);
+            if c == '(' {
+                depth += 1;
+            } else if c == ')' {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            self.i += 1;
+        }
+        true
+    }
+
+    fn backticks(&mut self) -> bool {
+        self.in_word = true;
+        self.word.push('`');
+        self.i += 1;
+        while self.i < self.chars.len() && self.chars[self.i] != '`' {
+            self.word.push(self.chars[self.i]);
+            self.i += 1;
+        }
+        self.word.push('`');
+        true
+    }
+
+    /// Up to the newline, which ends the command as usual.
+    fn comment(&mut self) -> bool {
+        while self.i < self.chars.len() && self.chars[self.i] != '\n' {
+            self.i += 1;
+        }
+        false
+    }
+
+    fn newline(&mut self) -> bool {
+        self.push_word();
+        self.end_cmd(false);
+        // Heredoc bodies follow the line that opened them.
+        for (delim, at) in std::mem::take(&mut self.pending_heredoc) {
+            let body = self.heredoc_body(&delim);
+            if let Some(cmd) = self.out.get_mut(at) {
+                cmd.heredoc = Some(body);
             }
         }
-        i += 1;
+        true
     }
-    push_word(&mut cur, &mut word, &mut in_word, &mut redirect);
-    end_cmd(&mut out, &mut cur, false);
-    out
+
+    /// The lines after the current one up to `delim`, leaving `i` on the
+    /// newline that ends the delimiter's line (or at the end).
+    fn heredoc_body(&mut self, delim: &str) -> String {
+        let mut body = String::new();
+        self.i += 1;
+        loop {
+            let start = self.i;
+            while self.i < self.chars.len() && self.chars[self.i] != '\n' {
+                self.i += 1;
+            }
+            let line: String = self.chars[start..self.i].iter().collect();
+            if line.trim() == delim || self.i >= self.chars.len() {
+                if line.trim() != delim {
+                    body.push_str(&line);
+                }
+                return body;
+            }
+            body.push_str(&line);
+            body.push('\n');
+            self.i += 1;
+        }
+    }
+
+    /// `;`, `&`, `|` and their doubles end a command; `&>` redirects.
+    fn separator(&mut self, c: char) -> bool {
+        self.push_word();
+        let pipe = c == '|' && self.chars.get(self.i + 1) != Some(&'|');
+        if c == '&' && self.chars.get(self.i + 1) == Some(&'>') {
+            // &> file
+            self.redirect = true;
+            self.i += 2;
+            return false;
+        }
+        self.end_cmd(pipe);
+        if matches!(self.chars.get(self.i + 1), Some('&' | '|')) {
+            self.i += 1;
+        }
+        true
+    }
+
+    fn redirect_out(&mut self) -> bool {
+        self.push_word();
+        if word_is_fd(&self.cur) {
+            self.cur.words.pop();
+        }
+        // 2>&1, >&2: not a file.
+        if self.chars.get(self.i + 1) == Some(&'&') {
+            self.i += 2;
+            while self.i < self.chars.len() && self.chars[self.i].is_ascii_digit() {
+                self.i += 1;
+            }
+            return false;
+        }
+        if self.chars.get(self.i + 1) == Some(&'>') {
+            self.i += 1;
+        }
+        self.redirect = true;
+        true
+    }
+
+    /// `<<EOF`, `<<-'EOF'`: remember the delimiter; the body comes after the line.
+    fn heredoc_start(&mut self) -> bool {
+        self.push_word();
+        self.i += 2;
+        if self.chars.get(self.i) == Some(&'-') {
+            self.i += 1;
+        }
+        while self.chars.get(self.i) == Some(&' ') {
+            self.i += 1;
+        }
+        let mut delim = String::new();
+        while self.i < self.chars.len() && !self.chars[self.i].is_whitespace() && !matches!(self.chars[self.i], ';' | '|' | '&' | ')') {
+            if !matches!(self.chars[self.i], '\'' | '"') {
+                delim.push(self.chars[self.i]);
+            }
+            self.i += 1;
+        }
+        self.pending_heredoc.push((delim, self.out.len()));
+        false
+    }
 }
 
 /// `2>` and the like: the digit before `>` is a file descriptor, not a word.
@@ -645,276 +700,291 @@ fn files(list: &[&str]) -> (String, String) {
     (shown.first().cloned().unwrap_or_default(), joined)
 }
 
+/// What one program in a command does; `None` when its arguments say too
+/// little (`cat` with no file) to be worth a line.
 fn program_action(p: &str, args: &[String], c: &Cmd, vars: &[(String, String)]) -> Option<Action> {
     let ops = |with: &[&str]| operands(args, with);
-    let sub = ops(&[]).first().copied().unwrap_or("").to_string();
     Some(match p {
-        "cat" | "bat" | "less" | "more" => {
-            let fs = ops(&[]);
-            if let Some(f) = &c.out {
-                Action::new(Verb::Write, short(f), format!("Write {}", short(f)))
-            } else if fs.is_empty() {
-                return None;
-            } else {
-                let (first, all) = files(&fs);
-                Action::new(Verb::Read, first, format!("Read {all}"))
-            }
-        }
-        "head" | "tail" => {
-            let fs = ops(&["-n", "-c"]);
-            let (first, all) = files(&fs);
-            if fs.is_empty() {
-                return None;
-            }
-            if p == "tail" && has(args, &["-f", "-F"]) {
-                return Some(Action::new(Verb::Read, first, format!("Follow {all}")));
-            }
-            let n = flag(args, &["-n", "--lines"]).or_else(|| args.iter().find(|a| a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| c.is_ascii_digit())).map(|a| &a[1..]));
-            let which = if p == "head" { "first" } else { "last" };
-            match n {
-                Some(n) => Action::new(Verb::Read, first, format!("Read the {which} {} lines of {all}", n.trim_start_matches('+'))),
-                None => Action::new(Verb::Read, first, format!("Read the {which} lines of {all}")),
-            }
-        }
-        "sed" | "gsed" => {
-            // BSD `sed -i ''`: the empty suffix isn't a word.
-            let fs: Vec<&str> = ops(&["-e", "-f"]).into_iter().filter(|f| !f.is_empty()).collect();
-            let script_given = flag(args, &["-e"]).is_some();
-            let (script, targets): (&str, &[&str]) = if script_given { (flag(args, &["-e"]).unwrap_or(""), &fs[..]) } else { (fs.first().copied().unwrap_or(""), fs.get(1..).unwrap_or(&[])) };
-            let (first, all) = files(targets);
-            if has(args, &["-i"]) || args.iter().any(|a| a.starts_with("-i")) {
-                return Some(Action::new(Verb::Edit, first, format!("Edit {}", if all.is_empty() { "a file".into() } else { all })));
-            }
-            if targets.is_empty() {
-                return None;
-            }
-            let ranges: Vec<String> = script
-                .split(';')
-                .filter_map(|part| {
-                    let part = part.trim().strip_suffix('p')?;
-                    let (a, b) = part.split_once(',').unwrap_or((part, part));
-                    let b = if b == "$" { "end".to_string() } else { b.to_string() };
-                    (a.chars().all(|c| c.is_ascii_digit()) && !a.is_empty()).then(|| if a == b { format!("line {a}") } else { format!("{a}–{b}") })
-                })
-                .collect();
-            match ranges.len() {
-                0 => Action::new(Verb::Read, first, format!("Read {all}")),
-                1 if ranges[0].starts_with("line") => Action::new(Verb::Read, first, format!("Read {} of {all}", ranges[0])),
-                _ => Action::new(Verb::Read, first, format!("Read lines {} of {all}", ranges.join(", "))),
-            }
-        }
-        "awk" | "gawk" => {
-            let fs = ops(&["-F", "-v", "-f"]);
-            let targets = fs.get(1..).unwrap_or(&[]);
-            if targets.is_empty() {
-                return None;
-            }
-            let (first, all) = files(targets);
-            Action::new(Verb::Read, first, format!("Read {all}"))
-        }
-        "grep" | "egrep" | "rg" | "ag" | "ack" | "ggrep" => {
-            let with = ["-e", "-f", "-A", "-B", "-C", "-m", "-g", "-t", "-T", "--type", "--glob", "--max-count", "--context", "-d", "-D", "--exclude", "--include", "--max-depth"];
-            let fs = ops(&with);
-            let explicit = flag(args, &["-e", "--regexp"]);
-            let (pat, places): (&str, &[&str]) = match explicit {
-                Some(e) => (e, &fs[..]),
-                None => (fs.first().copied().unwrap_or(""), fs.get(1..).unwrap_or(&[])),
-            };
-            let extended = p != "grep" || has(args, &["-E", "-P"]) || p == "egrep";
-            let q = patterns(pat, extended);
-            // `$f` from a loop says nothing about where.
-            let places: Vec<&str> = places.iter().copied().filter(|f| !f.starts_with('$')).collect();
-            let place = if places.is_empty() {
-                if c.piped || p == "grep" && !has(args, &["-r", "-R"]) { String::new() } else { " in .".to_string() }
-            } else {
-                let mut names: Vec<String> = Vec::new();
-                for f in &places {
-                    let n = short_dir(f);
-                    if !names.contains(&n) {
-                        names.push(n);
-                    }
-                }
-                let more = if names.len() > 2 { format!(" +{}", names.len() - 2) } else { String::new() };
-                format!(" in {}{more}", names[..names.len().min(2)].join(", "))
-            };
-            Action::new(Verb::Search, q.clone(), format!("Search for {q}{place}"))
-        }
+        "cat" | "bat" | "less" | "more" => return cat_action(args, c),
+        "head" | "tail" => return head_tail_action(p, args),
+        "sed" | "gsed" => return sed_action(args),
+        "awk" | "gawk" => return read_files_action(ops(&["-F", "-v", "-f"]).get(1..).unwrap_or(&[]), "Read"),
+        "grep" | "egrep" | "rg" | "ag" | "ack" | "ggrep" => grep_action(p, args, c),
         "ls" | "eza" | "exa" | "tree" | "lsd" => {
-            let fs = ops(&["-L", "-I"]);
-            let d = fs.first().map(|f| short_dir(f)).unwrap_or_else(|| ".".into());
+            let d = ops(&["-L", "-I"]).first().map(|f| short_dir(f)).unwrap_or_else(|| ".".into());
             Action::new(Verb::List, d.clone(), format!("List {d}"))
         }
-        "find" | "fd" | "fdfind" => {
-            let fs = ops(&["-name", "-iname", "-path", "-type", "-maxdepth", "-mindepth", "-newer", "-not", "-o", "-e", "-t", "-d", "-E"]);
-            let name = flag(args, &["-name", "-iname", "-path"]).map(String::from).or_else(|| if p == "find" { None } else { fs.first().map(|s| s.to_string()) });
-            let dir = if p == "find" { fs.first() } else { fs.get(1) }.map(|f| short_dir(f)).unwrap_or_else(|| ".".into());
-            match name {
-                Some(n) => Action::new(Verb::Find, n.clone(), format!("Find {n} in {dir}")),
-                None => Action::new(Verb::Find, dir.clone(), format!("Find files in {dir}")),
-            }
-        }
-        "wc" => {
-            let fs = ops(&[]);
-            if fs.is_empty() {
-                return None;
-            }
-            let (first, all) = files(&fs);
-            Action::new(Verb::Read, first, format!("Count lines in {all}"))
-        }
+        "find" | "fd" | "fdfind" => find_action(p, args),
+        "wc" => return read_files_action(&ops(&[]), "Count lines in"),
         "diff" | "cmp" | "colordiff" | "difft" => {
             let fs = ops(&[]);
             Action::plain(Verb::Read, format!("Compare {}", fs.iter().take(2).map(|f| short(f)).collect::<Vec<_>>().join(" and ")))
         }
         "git" => git(args),
-        "gh" => {
-            let o = ops(&["-R", "--repo", "-q", "--jq", "--json", "-L", "--limit", "-X", "--method", "--input", "-f", "-F", "--field", "--raw-field", "-H", "--header", "-t", "--template", "-b", "--body", "--title", "-w"]);
-            let what = o.iter().take(2).copied().collect::<Vec<_>>().join(" ");
-            let target = o.get(2).filter(|t| t.chars().all(|c| c.is_ascii_digit())).map(|n| format!(" #{n}")).unwrap_or_default();
-            if o.first() == Some(&"api") {
-                Action::plain(Verb::GitHub, format!("Call the GitHub API: {}", o.get(1).unwrap_or(&"")))
-            } else {
-                Action::plain(Verb::GitHub, format!("GitHub: {what}{target}"))
-            }
-        }
-        "cargo" => {
-            let krate = flag(args, &["-p", "--package"]).map(|k| format!(" {k}")).unwrap_or_default();
-            match sub.as_str() {
-                "build" | "b" => Action::plain(Verb::Build, format!("Build{krate}")),
-                "check" | "c" => Action::plain(Verb::Build, format!("Check{krate} compiles")),
-                "test" | "t" | "nextest" => Action::plain(Verb::Test, format!("Run{krate} tests")),
-                "clippy" => Action::plain(Verb::Lint, format!("Lint{krate}")),
-                "fmt" => Action::plain(Verb::Format, "Format the code"),
-                "run" | "r" => Action::plain(Verb::Run, format!("Run{}", if krate.is_empty() { " the program".into() } else { krate })),
-                "add" | "install" => Action::plain(Verb::Install, format!("{} {}", if sub == "add" { "Add" } else { "Install" }, ops(&[]).get(1).unwrap_or(&"a crate"))),
-                "" => return None,
-                other => Action::plain(Verb::Run, format!("cargo {other}")),
-            }
-        }
-        "swift" | "xcodebuild" | "go" | "make" | "just" | "gradle" | "./gradlew" | "mvn" | "bazel" | "zig" | "deno" | "dotnet" => {
-            let s = sub.as_str();
-            match s {
-                "build" | "" if p != "go" || s == "build" => Action::plain(Verb::Build, if p == "make" || p == "just" { "Build".to_string() } else { format!("Build with {p}") }),
-                "test" => Action::plain(Verb::Test, "Run tests"),
-                "run" => Action::plain(Verb::Run, format!("Run {}", ops(&[]).get(1).map(|x| short(x)).unwrap_or_else(|| "the program".into()))),
-                "fmt" | "format" => Action::plain(Verb::Format, "Format the code"),
-                "lint" | "vet" => Action::plain(Verb::Lint, "Lint"),
-                other if p == "make" || p == "just" => Action::plain(Verb::Build, format!("{p} {other}")),
-                other => Action::plain(Verb::Run, format!("{p} {other}")),
-            }
-        }
-        "npm" | "pnpm" | "yarn" | "bun" => {
-            let o = ops(&[]);
-            match o.first().copied().unwrap_or("") {
-                "install" | "i" | "add" | "ci" => Action::plain(Verb::Install, if o.len() > 1 { format!("Install {}", o[1..].join(", ")) } else { "Install dependencies".into() }),
-                "test" | "t" => Action::plain(Verb::Test, "Run tests"),
-                "run" => {
-                    let script = o.get(1).copied().unwrap_or("");
-                    match script {
-                        "build" => Action::plain(Verb::Build, "Build"),
-                        "test" => Action::plain(Verb::Test, "Run tests"),
-                        "lint" => Action::plain(Verb::Lint, "Lint"),
-                        s => Action::plain(Verb::Run, format!("Run {s}")),
-                    }
-                }
-                "build" => Action::plain(Verb::Build, "Build"),
-                "" => return None,
-                s => Action::plain(Verb::Run, format!("{p} {s}")),
-            }
-        }
-        "npx" | "bunx" | "pnpx" | "uvx" => {
-            let o = ops(&[]);
-            let tool = o.first().copied().unwrap_or("a tool");
-            let rest = o.get(1).map(|s| format!(" {s}")).unwrap_or_default();
-            Action::plain(Verb::Run, format!("Run {tool}{rest}"))
-        }
-        "pip" | "pip3" | "uv" | "brew" | "apt" | "apt-get" | "gem" | "rustup" => {
-            let o = ops(&[]);
-            match o.first().copied().unwrap_or("") {
-                "install" | "add" => Action::plain(Verb::Install, format!("Install {}", o.get(1..).map(|r| r.join(", ")).filter(|r| !r.is_empty()).unwrap_or_else(|| "packages".into()))),
-                "target" if o.get(1) == Some(&"add") => Action::plain(Verb::Install, format!("Install the {} target", o.get(2).unwrap_or(&""))),
-                s => Action::plain(Verb::Run, format!("{p} {s}").trim_end().to_string()),
-            }
-        }
+        "gh" => gh_action(args),
+        "cargo" => return cargo_action(args),
+        "swift" | "xcodebuild" | "go" | "make" | "just" | "gradle" | "./gradlew" | "mvn" | "bazel" | "zig" | "deno" | "dotnet" => build_tool_action(p, args),
+        "npm" | "pnpm" | "yarn" | "bun" => return node_package_action(p, args),
+        "npx" | "bunx" | "pnpx" | "uvx" => runner_action(args),
+        "pip" | "pip3" | "uv" | "brew" | "apt" | "apt-get" | "gem" | "rustup" => package_manager_action(p, args),
         "python" | "python3" | "node" | "ruby" | "perl" | "bash" | "sh" | "zsh" | "deno-run" | "tsx" | "ts-node" => script(p, args, c),
         "pytest" => Action::plain(Verb::Test, "Run tests"),
-        "curl" | "wget" | "http" | "xh" => {
-            let url = ops(&["-X", "-H", "-d", "--data", "--data-raw", "-o", "-u", "-m", "--max-time", "-A", "-e", "-w", "--connect-timeout", "-F", "--retry"])
-                .into_iter()
-                .map(|u| expand(u, vars))
-                .find(|u| u.contains("://") || u.contains('.'));
-            let host = url.as_deref().map(host).unwrap_or_else(|| "a URL".into());
-            // A JSON-RPC call says which method.
-            let body = flag(args, &["-d", "--data", "--data-raw"]).unwrap_or("");
-            let method = body.split("\"method\"").nth(1).and_then(|r| r.split('"').nth(1)).filter(|m| !m.is_empty());
-            match method {
-                Some(m) => Action::new(Verb::Fetch, host.clone(), format!("Call {m} on {host}")),
-                None => Action::new(Verb::Fetch, host.clone(), format!("Fetch {}", url.as_deref().map(trim_url).unwrap_or(host))),
-            }
-        }
-        "rm" | "rmdir" | "trash" => {
-            let fs = ops(&[]);
-            let (first, all) = files(&fs);
-            Action::new(Verb::Delete, first, format!("Delete {all}"))
-        }
-        "mv" | "cp" | "ln" | "rsync" | "scp" => {
-            let fs = ops(&["-t"]);
-            let verb = match p { "mv" => "Move", "ln" => "Link", _ => "Copy" };
-            let (from, to) = (fs.first().map(|f| short(f)).unwrap_or_default(), fs.last().map(|f| short_dir(f)).unwrap_or_default());
-            Action::new(if p == "mv" { Verb::Move } else { Verb::Write }, from.clone(), format!("{verb} {from} to {to}"))
-        }
-        "mkdir" => {
-            let fs = ops(&["-m"]);
-            let (first, all) = files(&fs);
-            Action::new(Verb::Write, first, format!("Create {all}"))
-        }
-        "touch" => {
-            let (first, all) = files(&ops(&[]));
-            Action::new(Verb::Write, first, format!("Create {all}"))
-        }
-        "chmod" => {
-            let o = ops(&[]);
-            let (_, all) = files(o.get(1..).unwrap_or(&[]));
-            if o.first().is_some_and(|m| m.contains("+x")) {
-                Action::plain(Verb::Edit, format!("Make {all} executable"))
-            } else {
-                Action::plain(Verb::Edit, format!("Change permissions of {all}"))
-            }
-        }
-        "kill" | "pkill" | "killall" => {
-            let o = ops(&["-s", "-signal"]);
-            let what = o.iter().find(|w| !w.starts_with('%') && !w.chars().all(|c| c.is_ascii_digit())).map(|w| short(w));
-            Action::plain(Verb::Stop, format!("Stop {}", what.unwrap_or_else(|| "a process".into())))
-        }
+        "curl" | "wget" | "http" | "xh" => fetch_action(args, vars),
+        "rm" | "rmdir" | "trash" => files_action(Verb::Delete, "Delete", &ops(&[])),
+        "mv" | "cp" | "ln" | "rsync" | "scp" => move_copy_action(p, args),
+        "mkdir" => files_action(Verb::Write, "Create", &ops(&["-m"])),
+        "touch" => files_action(Verb::Write, "Create", &ops(&[])),
+        "chmod" => chmod_action(args),
+        "kill" | "pkill" | "killall" => kill_action(args),
         "du" | "df" => Action::plain(Verb::Run, format!("Check disk usage{}", ops(&["-d"]).first().map(|d| format!(" of {}", short_dir(d))).unwrap_or_default())),
         "ps" | "pgrep" | "lsof" => Action::plain(Verb::Run, format!("Check {}", if p == "lsof" { "open files and ports" } else { "running processes" })),
         "open" => Action::plain(Verb::Run, format!("Open {}", ops(&["-a"]).first().map(|f| short(f)).or_else(|| flag(args, &["-a"]).map(String::from)).unwrap_or_default())),
-        "sqlite3" | "psql" | "mysql" => {
-            let o = ops(&["-c", "-cmd"]);
-            Action::plain(Verb::Read, format!("Query {}", o.first().map(|d| short(d)).unwrap_or_else(|| "the database".into())))
-        }
-        "jq" | "yq" => {
-            let o = ops(&["--arg", "--argjson"]);
-            let fs = o.get(1..).unwrap_or(&[]);
-            if fs.is_empty() {
-                return None;
-            }
-            let (first, all) = files(fs);
-            Action::new(Verb::Read, first, format!("Read {all}"))
-        }
+        "sqlite3" | "psql" | "mysql" => Action::plain(Verb::Read, format!("Query {}", ops(&["-c", "-cmd"]).first().map(|d| short(d)).unwrap_or_else(|| "the database".into()))),
+        "jq" | "yq" => return read_files_action(ops(&["--arg", "--argjson"]).get(1..).unwrap_or(&[]), "Read"),
         "which" | "type" | "command -v" => Action::plain(Verb::Find, format!("Look for {}", ops(&[]).join(", "))),
         "ssh" => Action::plain(Verb::Run, format!("Run on {}", ops(&["-p", "-i", "-o", "-l", "-J"]).first().unwrap_or(&"a host"))),
         "docker" | "podman" | "kubectl" | "rex" | "axel" | "tmux" | "systemctl" | "launchctl" | "defaults" | "security" | "codesign" | "xcrun" => {
             let o = ops(&["-s", "-b", "-n", "--namespace", "-c", "-w"]);
             Action::plain(Verb::Run, format!("{p} {}", o.iter().take(2).copied().collect::<Vec<_>>().join(" ")).trim_end().to_string())
         }
-        _ => {
-            // A program of the project's (`./target/debug/pay send`,
-            // `scripts/bundle.sh`): its name and what it was asked to do.
-            let o = ops(&[]);
-            let what = o.first().filter(|w| w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && w.len() < 24).map(|w| format!(" {w}")).unwrap_or_default();
-            Action::plain(Verb::Run, format!("Run {p}{what}"))
-        }
+        _ => project_program_action(p, args),
     })
+}
+
+/// A program of the project's (`./target/debug/pay send`,
+/// `scripts/bundle.sh`): its name and what it was asked to do.
+fn project_program_action(p: &str, args: &[String]) -> Action {
+    let o = operands(args, &[]);
+    let what = o.first().filter(|w| w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && w.len() < 24).map(|w| format!(" {w}")).unwrap_or_default();
+    Action::plain(Verb::Run, format!("Run {p}{what}"))
+}
+
+/// `npx`, `bunx`, `uvx`: the tool they run.
+fn runner_action(args: &[String]) -> Action {
+    let o = operands(args, &[]);
+    let tool = o.first().copied().unwrap_or("a tool");
+    let rest = o.get(1).map(|s| format!(" {s}")).unwrap_or_default();
+    Action::plain(Verb::Run, format!("Run {tool}{rest}"))
+}
+
+fn kill_action(args: &[String]) -> Action {
+    let o = operands(args, &["-s", "-signal"]);
+    let what = o.iter().find(|w| !w.starts_with('%') && !w.chars().all(|c| c.is_ascii_digit())).map(|w| short(w));
+    Action::plain(Verb::Stop, format!("Stop {}", what.unwrap_or_else(|| "a process".into())))
+}
+
+/// `<text> a.rs, b.rs +1`, its object the first file.
+fn files_action(verb: Verb, text: &str, targets: &[&str]) -> Action {
+    let (first, all) = files(targets);
+    Action::new(verb, first, format!("{text} {all}"))
+}
+
+/// `<verb> a.rs, b.rs +1` over `targets`, a read; `None` without any.
+fn read_files_action(targets: &[&str], verb: &str) -> Option<Action> {
+    if targets.is_empty() {
+        return None;
+    }
+    let (first, all) = files(targets);
+    Some(Action::new(Verb::Read, first, format!("{verb} {all}")))
+}
+
+/// `cat` and pagers: a read, or a write when redirected (`cat > f <<EOF`).
+fn cat_action(args: &[String], c: &Cmd) -> Option<Action> {
+    if let Some(f) = &c.out {
+        return Some(Action::new(Verb::Write, short(f), format!("Write {}", short(f))));
+    }
+    read_files_action(&operands(args, &[]), "Read")
+}
+
+fn head_tail_action(p: &str, args: &[String]) -> Option<Action> {
+    let fs = operands(args, &["-n", "-c"]);
+    let (first, all) = files(&fs);
+    if fs.is_empty() {
+        return None;
+    }
+    if p == "tail" && has(args, &["-f", "-F"]) {
+        return Some(Action::new(Verb::Read, first, format!("Follow {all}")));
+    }
+    let n = flag(args, &["-n", "--lines"]).or_else(|| args.iter().find(|a| a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| c.is_ascii_digit())).map(|a| &a[1..]));
+    let which = if p == "head" { "first" } else { "last" };
+    Some(match n {
+        Some(n) => Action::new(Verb::Read, first, format!("Read the {which} {} lines of {all}", n.trim_start_matches('+'))),
+        None => Action::new(Verb::Read, first, format!("Read the {which} lines of {all}")),
+    })
+}
+
+/// `sed -i` edits; `sed -n 1,40p f` reads those lines.
+fn sed_action(args: &[String]) -> Option<Action> {
+    // BSD `sed -i ''`: the empty suffix isn't a word.
+    let fs: Vec<&str> = operands(args, &["-e", "-f"]).into_iter().filter(|f| !f.is_empty()).collect();
+    let script_given = flag(args, &["-e"]).is_some();
+    let (script, targets): (&str, &[&str]) = if script_given { (flag(args, &["-e"]).unwrap_or(""), &fs[..]) } else { (fs.first().copied().unwrap_or(""), fs.get(1..).unwrap_or(&[])) };
+    let (first, all) = files(targets);
+    if has(args, &["-i"]) || args.iter().any(|a| a.starts_with("-i")) {
+        return Some(Action::new(Verb::Edit, first, format!("Edit {}", if all.is_empty() { "a file".into() } else { all })));
+    }
+    if targets.is_empty() {
+        return None;
+    }
+    let ranges: Vec<String> = script
+        .split(';')
+        .filter_map(|part| {
+            let part = part.trim().strip_suffix('p')?;
+            let (a, b) = part.split_once(',').unwrap_or((part, part));
+            let b = if b == "$" { "end".to_string() } else { b.to_string() };
+            (a.chars().all(|c| c.is_ascii_digit()) && !a.is_empty()).then(|| if a == b { format!("line {a}") } else { format!("{a}–{b}") })
+        })
+        .collect();
+    Some(match ranges.len() {
+        0 => Action::new(Verb::Read, first, format!("Read {all}")),
+        1 if ranges[0].starts_with("line") => Action::new(Verb::Read, first, format!("Read {} of {all}", ranges[0])),
+        _ => Action::new(Verb::Read, first, format!("Read lines {} of {all}", ranges.join(", "))),
+    })
+}
+
+fn grep_action(p: &str, args: &[String], c: &Cmd) -> Action {
+    let with = ["-e", "-f", "-A", "-B", "-C", "-m", "-g", "-t", "-T", "--type", "--glob", "--max-count", "--context", "-d", "-D", "--exclude", "--include", "--max-depth"];
+    let fs = operands(args, &with);
+    let explicit = flag(args, &["-e", "--regexp"]);
+    let (pat, places): (&str, &[&str]) = match explicit {
+        Some(e) => (e, &fs[..]),
+        None => (fs.first().copied().unwrap_or(""), fs.get(1..).unwrap_or(&[])),
+    };
+    let extended = p != "grep" || has(args, &["-E", "-P"]) || p == "egrep";
+    let q = patterns(pat, extended);
+    // `$f` from a loop says nothing about where.
+    let places: Vec<&str> = places.iter().copied().filter(|f| !f.starts_with('$')).collect();
+    let place = if places.is_empty() {
+        if c.piped || p == "grep" && !has(args, &["-r", "-R"]) { String::new() } else { " in .".to_string() }
+    } else {
+        let mut names: Vec<String> = Vec::new();
+        for f in &places {
+            let n = short_dir(f);
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+        let more = if names.len() > 2 { format!(" +{}", names.len() - 2) } else { String::new() };
+        format!(" in {}{more}", names[..names.len().min(2)].join(", "))
+    };
+    Action::new(Verb::Search, q.clone(), format!("Search for {q}{place}"))
+}
+
+fn find_action(p: &str, args: &[String]) -> Action {
+    let fs = operands(args, &["-name", "-iname", "-path", "-type", "-maxdepth", "-mindepth", "-newer", "-not", "-o", "-e", "-t", "-d", "-E"]);
+    let name = flag(args, &["-name", "-iname", "-path"]).map(String::from).or_else(|| if p == "find" { None } else { fs.first().map(|s| s.to_string()) });
+    let dir = if p == "find" { fs.first() } else { fs.get(1) }.map(|f| short_dir(f)).unwrap_or_else(|| ".".into());
+    match name {
+        Some(n) => Action::new(Verb::Find, n.clone(), format!("Find {n} in {dir}")),
+        None => Action::new(Verb::Find, dir.clone(), format!("Find files in {dir}")),
+    }
+}
+
+fn gh_action(args: &[String]) -> Action {
+    let o = operands(args, &["-R", "--repo", "-q", "--jq", "--json", "-L", "--limit", "-X", "--method", "--input", "-f", "-F", "--field", "--raw-field", "-H", "--header", "-t", "--template", "-b", "--body", "--title", "-w"]);
+    let what = o.iter().take(2).copied().collect::<Vec<_>>().join(" ");
+    let target = o.get(2).filter(|t| t.chars().all(|c| c.is_ascii_digit())).map(|n| format!(" #{n}")).unwrap_or_default();
+    if o.first() == Some(&"api") {
+        Action::plain(Verb::GitHub, format!("Call the GitHub API: {}", o.get(1).unwrap_or(&"")))
+    } else {
+        Action::plain(Verb::GitHub, format!("GitHub: {what}{target}"))
+    }
+}
+
+fn cargo_action(args: &[String]) -> Option<Action> {
+    let ops = operands(args, &[]);
+    let sub = ops.first().copied().unwrap_or("");
+    let krate = flag(args, &["-p", "--package"]).map(|k| format!(" {k}")).unwrap_or_default();
+    Some(match sub {
+        "build" | "b" => Action::plain(Verb::Build, format!("Build{krate}")),
+        "check" | "c" => Action::plain(Verb::Build, format!("Check{krate} compiles")),
+        "test" | "t" | "nextest" => Action::plain(Verb::Test, format!("Run{krate} tests")),
+        "clippy" => Action::plain(Verb::Lint, format!("Lint{krate}")),
+        "fmt" => Action::plain(Verb::Format, "Format the code"),
+        "run" | "r" => Action::plain(Verb::Run, format!("Run{}", if krate.is_empty() { " the program".into() } else { krate })),
+        "add" | "install" => Action::plain(Verb::Install, format!("{} {}", if sub == "add" { "Add" } else { "Install" }, ops.get(1).unwrap_or(&"a crate"))),
+        "" => return None,
+        other => Action::plain(Verb::Run, format!("cargo {other}")),
+    })
+}
+
+/// Build tools with `build`/`test`/`run` subcommands (`make`, `go`, `swift`…).
+fn build_tool_action(p: &str, args: &[String]) -> Action {
+    let ops = operands(args, &[]);
+    let s = ops.first().copied().unwrap_or("");
+    match s {
+        "build" | "" if p != "go" || s == "build" => Action::plain(Verb::Build, if p == "make" || p == "just" { "Build".to_string() } else { format!("Build with {p}") }),
+        "test" => Action::plain(Verb::Test, "Run tests"),
+        "run" => Action::plain(Verb::Run, format!("Run {}", ops.get(1).map(|x| short(x)).unwrap_or_else(|| "the program".into()))),
+        "fmt" | "format" => Action::plain(Verb::Format, "Format the code"),
+        "lint" | "vet" => Action::plain(Verb::Lint, "Lint"),
+        other if p == "make" || p == "just" => Action::plain(Verb::Build, format!("{p} {other}")),
+        other => Action::plain(Verb::Run, format!("{p} {other}")),
+    }
+}
+
+/// `npm`, `pnpm`, `yarn`, `bun`.
+fn node_package_action(p: &str, args: &[String]) -> Option<Action> {
+    let o = operands(args, &[]);
+    Some(match o.first().copied().unwrap_or("") {
+        "install" | "i" | "add" | "ci" => Action::plain(Verb::Install, if o.len() > 1 { format!("Install {}", o[1..].join(", ")) } else { "Install dependencies".into() }),
+        "test" | "t" => Action::plain(Verb::Test, "Run tests"),
+        "run" => {
+            let script = o.get(1).copied().unwrap_or("");
+            match script {
+                "build" => Action::plain(Verb::Build, "Build"),
+                "test" => Action::plain(Verb::Test, "Run tests"),
+                "lint" => Action::plain(Verb::Lint, "Lint"),
+                s => Action::plain(Verb::Run, format!("Run {s}")),
+            }
+        }
+        "build" => Action::plain(Verb::Build, "Build"),
+        "" => return None,
+        s => Action::plain(Verb::Run, format!("{p} {s}")),
+    })
+}
+
+/// `pip`, `brew`, `apt`, `rustup`…
+fn package_manager_action(p: &str, args: &[String]) -> Action {
+    let o = operands(args, &[]);
+    match o.first().copied().unwrap_or("") {
+        "install" | "add" => Action::plain(Verb::Install, format!("Install {}", o.get(1..).map(|r| r.join(", ")).filter(|r| !r.is_empty()).unwrap_or_else(|| "packages".into()))),
+        "target" if o.get(1) == Some(&"add") => Action::plain(Verb::Install, format!("Install the {} target", o.get(2).unwrap_or(&""))),
+        s => Action::plain(Verb::Run, format!("{p} {s}").trim_end().to_string()),
+    }
+}
+
+/// `curl` and friends: the host, or the JSON-RPC method called on it.
+fn fetch_action(args: &[String], vars: &[(String, String)]) -> Action {
+    let url = operands(args, &["-X", "-H", "-d", "--data", "--data-raw", "-o", "-u", "-m", "--max-time", "-A", "-e", "-w", "--connect-timeout", "-F", "--retry"])
+        .into_iter()
+        .map(|u| expand(u, vars))
+        .find(|u| u.contains("://") || u.contains('.'));
+    let host = url.as_deref().map(host).unwrap_or_else(|| "a URL".into());
+    // A JSON-RPC call says which method.
+    let body = flag(args, &["-d", "--data", "--data-raw"]).unwrap_or("");
+    let method = body.split("\"method\"").nth(1).and_then(|r| r.split('"').nth(1)).filter(|m| !m.is_empty());
+    match method {
+        Some(m) => Action::new(Verb::Fetch, host.clone(), format!("Call {m} on {host}")),
+        None => Action::new(Verb::Fetch, host.clone(), format!("Fetch {}", url.as_deref().map(trim_url).unwrap_or(host))),
+    }
+}
+
+fn move_copy_action(p: &str, args: &[String]) -> Action {
+    let fs = operands(args, &["-t"]);
+    let verb = match p { "mv" => "Move", "ln" => "Link", _ => "Copy" };
+    let (from, to) = (fs.first().map(|f| short(f)).unwrap_or_default(), fs.last().map(|f| short_dir(f)).unwrap_or_default());
+    Action::new(if p == "mv" { Verb::Move } else { Verb::Write }, from.clone(), format!("{verb} {from} to {to}"))
+}
+
+fn chmod_action(args: &[String]) -> Action {
+    let o = operands(args, &[]);
+    let (_, all) = files(o.get(1..).unwrap_or(&[]));
+    if o.first().is_some_and(|m| m.contains("+x")) {
+        Action::plain(Verb::Edit, format!("Make {all} executable"))
+    } else {
+        Action::plain(Verb::Edit, format!("Change permissions of {all}"))
+    }
 }
 
 fn git(args: &[String]) -> Action {
