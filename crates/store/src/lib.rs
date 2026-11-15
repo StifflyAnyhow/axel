@@ -69,6 +69,34 @@ pub(crate) fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// A row count or limit as SQLite's `i64`.  Saturates: no table comes near
+/// `i64::MAX` rows, so the clamp never changes a result.
+pub(crate) fn sql_limit(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
+/// An unsigned value for an SQLite integer column, refused (as `what`) when
+/// it does not fit in an `i64` rather than wrapped to a negative number.
+pub(crate) fn sql_integer(value: u64, what: &str) -> Result<i64, Error> {
+    i64::try_from(value).map_err(|_| Error::Invalid(format!("{what} {value} is out of range")))
+}
+
+/// An integer column read as an unsigned (or narrower) type; a stored value
+/// out of its range is an error, not a wrapped number.
+pub(crate) fn get_integer<T: TryFrom<i64>>(
+    row: &rusqlite::Row<'_>,
+    column: &str,
+) -> rusqlite::Result<T> {
+    let value: i64 = row.get(column)?;
+    match T::try_from(value) {
+        Ok(converted) => Ok(converted),
+        Err(_) => Err(rusqlite::Error::IntegralValueOutOfRange(
+            row.as_ref().column_index(column)?,
+            value,
+        )),
+    }
+}
+
 /// A fresh ULID string (26 chars, Crockford base32, time-ordered).
 pub fn new_id() -> String {
     ulid::Ulid::new().to_string()

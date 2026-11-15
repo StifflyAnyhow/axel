@@ -19,7 +19,7 @@ use crate::schema::PROJECTION_TABLES;
 use crate::wire::{self, ParticipantAction, ProjectAction, kind, tag};
 use crate::{
     Appended, Error, ParticipantRole, SessionState, StatusState, Store,
-    USAGE_SAMPLE_RETENTION_SECS, now,
+    USAGE_SAMPLE_RETENTION_SECS, get_integer, now, sql_integer, sql_limit,
 };
 
 /// Columns that reconstruct an [`Envelope`], in [`row_envelope`] order.
@@ -33,8 +33,8 @@ pub(crate) fn row_envelope(r: &Row<'_>) -> rusqlite::Result<Envelope> {
     Ok(Envelope {
         id: r.get("id")?,
         from: r.get("from_pubkey")?,
-        created_at: r.get::<_, i64>("created_at")? as u64,
-        kind: r.get::<_, i64>("kind")? as u32,
+        created_at: get_integer(r, "created_at")?,
+        kind: get_integer(r, "kind")?,
         tags,
         content: r.get("content")?,
         sig: r.get("sig")?,
@@ -87,7 +87,7 @@ impl Store {
         let mut st = self.conn.prepare(&format!(
             "SELECT seq, {EVENT_COLS} FROM events WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2"
         ))?;
-        let rows = st.query_map(params![cursor, limit as i64], |r| {
+        let rows = st.query_map(params![cursor, sql_limit(limit)], |r| {
             Ok((r.get::<_, i64>("seq")?, row_envelope(r)?))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -173,6 +173,9 @@ impl Store {
 }
 
 fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
+    // Refused before storing, like a bad signature: a `created_at` past
+    // `i64::MAX` would be stored negative and replay before everything.
+    let created_at = sql_integer(env.created_at, "envelope created_at")?;
     let tags_json = serde_json::to_string(&env.tags)?;
     let thread_id = thread_id_of(env);
     let session_id = env.first_tag(tag::SESSION);
@@ -182,8 +185,8 @@ fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
         params![
             env.id,
             env.from,
-            env.created_at as i64,
-            env.kind as i64,
+            created_at,
+            i64::from(env.kind),
             tags_json,
             env.content,
             env.sig,
@@ -605,7 +608,8 @@ fn parse<T: serde::de::DeserializeOwned>(env: &Envelope) -> Result<T, Applied> {
 /// Apply one authorized envelope to the projections: the kind decides which
 /// rows it writes, then every kind indexes its tags and bumps the thread.
 fn apply(conn: &Connection, e: &Envelope, thread_id: &str) -> Result<Applied, Error> {
-    let at = e.created_at as i64;
+    let at = i64::try_from(e.created_at)
+        .expect("replayed events are read back from an i64 column");
     let applied = match e.kind {
         kind::THREAD_CREATE => apply_thread_create(conn, e, at)?,
         kind::THREAD_UPDATE => apply_thread_update(conn, e, thread_id, at)?,

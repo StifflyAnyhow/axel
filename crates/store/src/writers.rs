@@ -12,7 +12,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::wire::{self, kind, tag};
 use crate::{TurnMark, 
     Error, Harness, LimitWindow, NewSession, ParticipantRole, Relationship, Session, SessionUpdate, StatusReport, Store,
-    Thread, ThreadState, ThreadWorkspace, TurnSummary, Usage, UsageDelta, new_id, now,
+    Thread, ThreadState, ThreadWorkspace, TurnSummary, Usage, UsageDelta, new_id, now, sql_integer,
 };
 
 fn tag2(a: &str, b: &str) -> Vec<String> {
@@ -31,7 +31,9 @@ impl Store {
             )
             .optional()?
             .flatten();
-        Ok(now().max(last.map_or(0, |l| l + 1)) as u64)
+        let next = now().max(last.map_or(0, |l| l.saturating_add(1)));
+        debug_assert!(last.is_none_or(|l| next > l || l == i64::MAX));
+        u64::try_from(next).map_err(|_| Error::Corrupt(format!("clock before 1970: {next}")))
     }
 
     /// The owner attestation registered for `signer`, if it is one of our agents.
@@ -392,7 +394,7 @@ impl Store {
         self.conn.execute(
             "INSERT INTO session_context (session_id, used, size, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (session_id) DO UPDATE SET used = excluded.used, size = excluded.size, updated_at = excluded.updated_at",
-            params![session_id, used as i64, size as i64, now()],
+            params![session_id, sql_integer(used, "context tokens used")?, sql_integer(size, "context window size")?, now()],
         )?;
         Ok(())
     }
@@ -408,7 +410,7 @@ impl Store {
             params![
                 m.session_id,
                 m.ordinal,
-                m.open as i64,
+                i64::from(m.open),
                 m.before_commit,
                 m.before_tree,
                 m.last_after_tree,
@@ -479,7 +481,7 @@ impl Store {
     pub fn set_transcript_offset(&self, session_id: &str, offset: u64) -> Result<(), Error> {
         let n = self.conn.execute(
             "UPDATE sessions SET transcript_offset = ?2 WHERE id = ?1",
-            params![session_id, offset as i64],
+            params![session_id, sql_integer(offset, "transcript offset")?],
         )?;
         if n == 0 {
             return Err(Error::NotFound(format!("session {session_id}")));

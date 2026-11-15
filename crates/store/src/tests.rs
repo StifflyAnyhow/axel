@@ -2881,3 +2881,23 @@ fn each_harness_says_how_its_pane_takes_a_reasoning_effort() {
     assert!("ultra".parse::<Effort>().is_err());
     assert_eq!(Effort::ALL.iter().map(|e| e.to_string()).collect::<Vec<_>>(), ["low", "medium", "high", "xhigh", "max"]);
 }
+
+#[test]
+fn an_envelope_dated_past_i64_is_refused_not_wrapped() {
+    let s = store();
+    let kp = Keypair::generate();
+    let last_second = u64::try_from(i64::MAX).unwrap();
+    let env = EnvelopeBuilder::new(kind::NOTE, "from the far future")
+        .created_at(last_second + 1)
+        .sign(&kp)
+        .unwrap();
+    assert!(matches!(s.append(&env), Err(Error::Invalid(_))));
+    assert!(s.get_event(&env.id).unwrap().is_none(), "nothing is stored");
+
+    let edge = EnvelopeBuilder::new(kind::NOTE, "the last second")
+        .created_at(last_second)
+        .sign(&kp)
+        .unwrap();
+    assert!(s.append(&edge).unwrap().projected);
+    assert_eq!(s.get_event(&edge.id).unwrap().unwrap(), edge, "read back unchanged");
+}

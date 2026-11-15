@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{OptionalExtension, Row, params};
 
-use crate::{Agent, Environment, Error, Harness, NewAgent, Project, Store, new_id, now};
+use crate::{Agent, Environment, Error, Harness, NewAgent, Project, Store, new_id, now, sql_limit};
 
 // ---------------------------------------------------------------------------
 // environments
@@ -153,7 +153,7 @@ impl Store {
                 repo_key = COALESCE(excluded.repo_key, projects.repo_key),
                 axel_md_present = excluded.axel_md_present,
                 last_opened_at = excluded.last_opened_at",
-            params![new_id(), env_id, path_str, project_name(path), repo_key, has_axel_md as i64, now()],
+            params![new_id(), env_id, path_str, project_name(path), repo_key, i64::from(has_axel_md), now()],
         )?;
         Ok(self.conn.query_row(
             &format!("SELECT {PROJECT_COLS} FROM projects WHERE environment_id = ?1 AND path = ?2"),
@@ -167,7 +167,7 @@ impl Store {
         let mut st = self.conn.prepare(&format!(
             "SELECT {PROJECT_COLS} FROM projects ORDER BY last_opened_at DESC, name LIMIT ?1"
         ))?;
-        let rows = st.query_map([limit as i64], row_project)?;
+        let rows = st.query_map([sql_limit(limit)], row_project)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::items::{ITEM_COLS, row_item};
 use crate::log::{EVENT_COLS, row_envelope};
-use crate::{ConversationItem, Environment, Error, Store, now};
+use crate::{ConversationItem, Environment, Error, Store, now, sql_limit};
 
 /// One change to a conversation item, in revision order.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -289,7 +289,7 @@ impl Store {
             "SELECT ci.rev AS rev, {cols} FROM conversation_items ci JOIN sessions s ON s.id = ci.session_id
              WHERE s.environment_id = ?1 AND ci.rev > ?2 ORDER BY ci.rev ASC LIMIT ?3"
         ))?;
-        let rows = st.query_map(params![environment_id, cursor, limit as i64], |r| {
+        let rows = st.query_map(params![environment_id, cursor, sql_limit(limit)], |r| {
             Ok(ItemChange::Upsert { rev: r.get("rev")?, item: row_item(r)? })
         })?;
         let mut out: Vec<ItemChange> = rows.collect::<Result<_, _>>()?;
@@ -297,7 +297,7 @@ impl Store {
             "SELECT t.rev, t.id FROM item_tombstones t JOIN sessions s ON s.id = t.session_id
              WHERE s.environment_id = ?1 AND t.rev > ?2 ORDER BY t.rev ASC LIMIT ?3",
         )?;
-        let rows = st.query_map(params![environment_id, cursor, limit as i64], |r| {
+        let rows = st.query_map(params![environment_id, cursor, sql_limit(limit)], |r| {
             Ok(ItemChange::Delete { rev: r.get(0)?, id: r.get(1)? })
         })?;
         for r in rows {

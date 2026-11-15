@@ -561,10 +561,14 @@ pub(crate) fn migrate_to(conn: &mut Connection, target: i64) -> Result<(), Error
             supported: SCHEMA_VERSION,
         });
     }
+    // `user_version` is a signed 32-bit pragma; only this module writes it.
+    let Ok(mut index) = usize::try_from(version) else {
+        return Err(Error::Corrupt(format!("negative schema version {version}")));
+    };
     while version < target.min(SCHEMA_VERSION) {
         let next = version + 1;
         let tx = conn.transaction()?;
-        tx.execute_batch(MIGRATIONS[version as usize])?;
+        tx.execute_batch(MIGRATIONS[index])?;
         post_migrate(&tx, next)?;
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
@@ -573,6 +577,9 @@ pub(crate) fn migrate_to(conn: &mut Connection, target: i64) -> Result<(), Error
         tx.pragma_update(None, "user_version", next)?;
         tx.commit()?;
         version = next;
+        index += 1;
     }
+    assert!(version >= target.min(SCHEMA_VERSION));
+    debug_assert_eq!(current_version(conn)?, version);
     Ok(())
 }

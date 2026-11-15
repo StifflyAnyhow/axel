@@ -11,6 +11,7 @@ use crate::{TurnMark,
     Error, Harness, INBOX_SCOPE, Participant, ParticipantRole, Session, SessionFilter, Status, Store, Thread,
     ThreadFilter, ThreadProject, ThreadSummary, ThreadWorkspace, Turn, TurnSummary, Usage,
     UsageSample, UsageTotals, UsageWindows, SessionContext, LimitWindow, PlanLimit,
+    get_integer, sql_integer, sql_limit,
 };
 
 fn conv<E: std::error::Error + Send + Sync + 'static>(e: E) -> rusqlite::Error {
@@ -92,7 +93,7 @@ impl Store {
         }
         sql.push_str(" ORDER BY t.updated_at DESC, t.created_at DESC, t.id DESC");
         if let Some(limit) = f.limit {
-            args.push(Box::new(limit as i64));
+            args.push(Box::new(sql_limit(limit)));
             sql.push_str(&format!(" LIMIT ?{}", args.len()));
         }
         let mut st = self.conn.prepare(&sql)?;
@@ -355,7 +356,7 @@ impl Store {
         }
         sql.push_str(" ORDER BY s.started_at DESC, s.id DESC");
         if let Some(limit) = f.limit {
-            args.push(Box::new(limit as i64));
+            args.push(Box::new(sql_limit(limit)));
             sql.push_str(&format!(" LIMIT ?{}", args.len()));
         }
         let mut st = self.conn.prepare(&sql)?;
@@ -379,7 +380,7 @@ impl Store {
                 thread_id: r.get("thread_id")?,
                 session_id: r.get("session_id")?,
                 from_pubkey: r.get("from_pubkey")?,
-                created_at: r.get::<_, i64>("created_at")? as u64,
+                created_at: get_integer(r, "created_at")?,
                 summary: TurnSummary {
                     ordinal: r.get("ordinal")?,
                     user_text: r.get("user_text")?,
@@ -450,7 +451,7 @@ fn row_status(r: &Row<'_>) -> rusqlite::Result<Status> {
         msg: r.get("msg")?,
         progress: r
             .get::<_, Option<i64>>("progress")?
-            .map(|p| p.clamp(0, 100) as u8),
+            .map(|p| u8::try_from(p.clamp(0, 100)).expect("a percentage clamped to 0..=100 fits in u8")),
         updated_at: r.get("updated_at")?,
     })
 }
@@ -605,7 +606,7 @@ impl Store {
             sums("1"),
         );
         let mut st = self.conn.prepare(&sql)?;
-        let limit = limit.map(|l| l as i64).unwrap_or(-1);
+        let limit = limit.map(sql_limit).unwrap_or(-1);
         let rows = st.query_map(params![now - 3600, now - 86_400, limit], |r| {
             let totals = |at: usize| -> rusqlite::Result<UsageTotals> {
                 Ok(UsageTotals {
@@ -627,17 +628,20 @@ impl Store {
     /// `now`, oldest first: a sparkline's worth.  `agent` `None` is everyone.
     pub fn usage_series(&self, agent: Option<&str>, now: i64, bucket_secs: i64, buckets: usize) -> Result<Vec<i64>, Error> {
         let bucket_secs = bucket_secs.max(1);
-        let since = now - bucket_secs * buckets as i64;
+        let since = now.saturating_sub(bucket_secs.saturating_mul(sql_limit(buckets)));
         let mut out = vec![0i64; buckets];
-        let mut st = self.conn.prepare(
+        let mut statement = self.conn.prepare(
             "SELECT (at - ?1) / ?2, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
              FROM effective_usage_log WHERE at >= ?1 AND at < ?3 AND (?4 IS NULL OR agent_pubkey = ?4) GROUP BY 1",
         )?;
-        let rows = st.query_map(params![since, bucket_secs, now + 1, agent], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let rows = statement.query_map(params![since, bucket_secs, now.saturating_add(1), agent], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
-            let (i, n) = row?;
-            if let Some(slot) = usize::try_from(i).ok().and_then(|i| out.get_mut(i.min(buckets.saturating_sub(1)))) {
-                *slot += n;
+            let (bucket, tokens) = row?;
+            // `at >= since` makes every bucket index non-negative; the last
+            // bucket also takes the second at `now` itself.
+            let Ok(bucket) = usize::try_from(bucket) else { continue };
+            if let Some(slot) = out.get_mut(bucket.min(buckets.saturating_sub(1))) {
+                *slot = slot.saturating_add(tokens);
             }
         }
         Ok(out)
@@ -721,7 +725,7 @@ impl Store {
              WHERE m.pubkey = ?1 AND e.applied_at IS NOT NULL
              ORDER BY e.created_at DESC, e.id DESC LIMIT ?2"
         ))?;
-        let rows = st.query_map(params![pubkey, limit as i64], row_envelope)?;
+        let rows = st.query_map(params![pubkey, sql_limit(limit)], row_envelope)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -742,7 +746,7 @@ impl Store {
                 |r| r.get(0),
             )?,
         };
-        Ok(n as u64)
+        Ok(u64::try_from(n).expect("COUNT(*) is never negative"))
     }
 
     /// Advance `pubkey`'s read frontier; it never moves backwards.
@@ -759,7 +763,7 @@ impl Store {
              WHERE excluded.through_created_at > read_frontiers.through_created_at
                 OR (excluded.through_created_at = read_frontiers.through_created_at
                     AND excluded.through_id > read_frontiers.through_id)",
-            params![pubkey, INBOX_SCOPE, through_created_at as i64, through_id],
+            params![pubkey, INBOX_SCOPE, sql_integer(through_created_at, "read frontier created_at")?, through_id],
         )?;
         Ok(())
     }
