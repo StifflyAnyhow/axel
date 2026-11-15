@@ -24,7 +24,7 @@
 
 use core::fmt;
 
-use crate::attest::{conditions_permit, validate_conditions};
+use crate::attest::{SIGNATURE_HEX_CHARS, conditions_permit, validate_conditions};
 use crate::hex;
 use crate::{Error, Keypair, PublicKey};
 
@@ -81,7 +81,11 @@ pub fn delegate(
     }
     let conditions = format!("created_at>{not_before}&created_at<{not_after}");
     validate_conditions(&conditions)?;
-    let sig = delegator.sign(&preimage(delegate, thread, &conditions));
+    let message = preimage(delegate, thread, &conditions);
+    let sig = delegator.sign(&message);
+    // Pairs with `verify_for`: what we sign must verify the way a replica
+    // will check it.
+    debug_assert!(delegator.public().verify(&message, &sig).is_ok(), "a fresh delegation must verify");
     Ok(Delegation { delegator: delegator.public(), thread: thread.to_string(), conditions, sig })
 }
 
@@ -105,7 +109,7 @@ impl Delegation {
         let delegator = PublicKey::from_base58(&tag[1]).map_err(|e| Error::InvalidInput(format!("delegator pubkey: {e}")))?;
         validate_conditions(&tag[3])?;
         let sig_hex = tag[4].as_str();
-        if sig_hex.len() != 128 || !hex::is_lowercase_hex(sig_hex) {
+        if sig_hex.len() != SIGNATURE_HEX_CHARS || !hex::is_lowercase_hex(sig_hex) {
             return Err(Error::InvalidInput("signature must be 128 lowercase hex chars".into()));
         }
         let sig = hex::decode_array::<64>(sig_hex).ok_or_else(|| Error::InvalidSignature("bad hex".into()))?;

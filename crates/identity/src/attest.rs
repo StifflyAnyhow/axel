@@ -34,6 +34,14 @@ use crate::{Error, Keypair, PublicKey};
 /// Domain separator prefixed to every attestation preimage.
 pub const DOMAIN: &str = "axel:agent-auth:v1:";
 
+/// An Ed25519 signature (64 bytes) in lowercase hex, as tags carry it.
+pub(crate) const SIGNATURE_HEX_CHARS: usize = 64 * 2;
+/// The largest `kind=` a condition may name: kinds are 16-bit.
+const CONDITION_KIND_MAX: u64 = u16::MAX as u64;
+/// The largest `created_at` bound a condition may name: Unix seconds in 32
+/// bits, as in Buzz's NIP-OA.
+const CONDITION_CREATED_AT_MAX: u64 = u32::MAX as u64;
+
 /// A parsed owner attestation.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AuthTag {
@@ -88,7 +96,7 @@ impl AuthTag {
             .map_err(|e| Error::InvalidInput(format!("owner pubkey: {e}")))?;
         validate_conditions(&tag[2])?;
         let sig_hex = tag[3].as_str();
-        if sig_hex.len() != 128 || !hex::is_lowercase_hex(sig_hex) {
+        if sig_hex.len() != SIGNATURE_HEX_CHARS || !hex::is_lowercase_hex(sig_hex) {
             return Err(Error::InvalidInput(format!(
                 "signature must be 128 lowercase hex chars, got length {}",
                 sig_hex.len()
@@ -158,11 +166,11 @@ pub fn validate_conditions(conditions: &str) -> Result<(), Error> {
 
 fn validate_clause(clause: &str) -> Result<(), Error> {
     if let Some(value) = clause.strip_prefix("kind=") {
-        validate_canonical_decimal(value, 0, 65535, "kind")
+        validate_canonical_decimal(value, 0, CONDITION_KIND_MAX, "kind")
     } else if let Some(value) = clause.strip_prefix("created_at<") {
-        validate_canonical_decimal(value, 0, 4_294_967_295, "created_at<")
+        validate_canonical_decimal(value, 0, CONDITION_CREATED_AT_MAX, "created_at<")
     } else if let Some(value) = clause.strip_prefix("created_at>") {
-        validate_canonical_decimal(value, 0, 4_294_967_295, "created_at>")
+        validate_canonical_decimal(value, 0, CONDITION_CREATED_AT_MAX, "created_at>")
     } else {
         Err(Error::InvalidInput(format!(
             "unsupported clause: {clause:?}"
@@ -243,7 +251,11 @@ pub fn attest(owner: &Keypair, agent: &PublicKey, conditions: &str) -> Result<Au
         ));
     }
     validate_conditions(conditions)?;
-    let sig = owner.sign(&preimage(agent, conditions));
+    let message = preimage(agent, conditions);
+    let sig = owner.sign(&message);
+    // Pairs with `verify_attestation`: what we sign must verify the way a
+    // replica will check it.
+    debug_assert!(owner_pk.verify(&message, &sig).is_ok(), "a fresh attestation must verify");
     Ok(AuthTag {
         owner: owner_pk,
         conditions: conditions.to_string(),

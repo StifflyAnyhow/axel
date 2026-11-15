@@ -44,9 +44,44 @@ pub const BACKEND_ENV: &str = "AXEL_KEYSTORE";
 /// Env var overriding the `~/.axel` directory.
 pub const HOME_ENV: &str = "AXEL_HOME";
 
+/// The largest secrets file read. An entry is about 100 bytes (two base58
+/// strings of 44 characters plus JSON punctuation), so 1 MiB holds some ten
+/// thousand agents; anything bigger is not a file we wrote.
+const SECRETS_FILE_BYTES_MAX: u64 = 1024 * 1024;
+
+/// An Ed25519 secret seed's length.
+const SEED_BYTES: usize = 32;
+
 enum Backend {
     Keychain(keyring::Entry),
     File(PathBuf),
+}
+
+/// The backend `AXEL_KEYSTORE` asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackendChoice {
+    /// The `0600` file only: unset, empty or `file`.
+    File,
+    /// The keychain if it answers, otherwise the file: `auto`.
+    Auto,
+    /// The keychain or an error: `keychain`.
+    Keychain,
+}
+
+impl BackendChoice {
+    /// From the variable's text, case- and whitespace-insensitive.
+    fn parse(text: &str) -> Result<BackendChoice, Error> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            // Default is the 0600 file (like ssh keys): the OS keychain re-prompts
+            // whenever the binary changes, which is constantly during development.
+            "" | "file" => Ok(BackendChoice::File),
+            "auto" => Ok(BackendChoice::Auto),
+            "keychain" => Ok(BackendChoice::Keychain),
+            other => Err(Error::InvalidInput(format!(
+                "{BACKEND_ENV} must be \"file\", \"keychain\" or unset, got {other:?}"
+            ))),
+        }
+    }
 }
 
 /// The owner's and agents' secret keys, in the keychain or a `0600` file.
@@ -93,13 +128,13 @@ fn decode_secret(s: &str, what: &str) -> Result<Keypair, Error> {
             .into_vec()
             .map_err(|e| Error::Keystore(format!("{what}: secret is not base58: {e}")))?,
     );
-    if bytes.len() != 32 {
+    if bytes.len() != SEED_BYTES {
         return Err(Error::Keystore(format!(
-            "{what}: secret must be 32 bytes, got {}",
+            "{what}: secret must be {SEED_BYTES} bytes, got {}",
             bytes.len()
         )));
     }
-    let mut seed = Zeroizing::new([0u8; 32]);
+    let mut seed = Zeroizing::new([0u8; SEED_BYTES]);
     seed.copy_from_slice(&bytes);
     Ok(Keypair::from_secret_bytes(&seed))
 }
@@ -124,13 +159,13 @@ impl Keystore {
     /// - unset/empty: the keychain if it answers, otherwise the file.
     pub fn open() -> Result<Keystore, Error> {
         let path = Keystore::default_file_path();
+        // Unset (or not Unicode, which no valid choice is) reads as empty,
+        // the default.
         let selector = std::env::var(BACKEND_ENV).unwrap_or_default();
-        match selector.trim().to_ascii_lowercase().as_str() {
-            // Default is the 0600 file (like ssh keys): the OS keychain re-prompts
-            // whenever the binary changes, which is constantly during development.
-            "" | "file" => Keystore::open_at(path, false),
-            "auto" => Keystore::open_at(path, true),
-            "keychain" => {
+        match BackendChoice::parse(&selector)? {
+            BackendChoice::File => Keystore::open_at(path, false),
+            BackendChoice::Auto => Keystore::open_at(path, true),
+            BackendChoice::Keychain => {
                 let entry = probe_keychain().ok_or_else(|| {
                     Error::Keychain(format!(
                         "{BACKEND_ENV}=keychain but the OS keychain is unusable"
@@ -140,9 +175,6 @@ impl Keystore {
                     backend: Backend::Keychain(entry),
                 })
             }
-            other => Err(Error::InvalidInput(format!(
-                "{BACKEND_ENV} must be \"file\", \"keychain\" or unset, got {other:?}"
-            ))),
         }
     }
 
@@ -294,15 +326,14 @@ impl Keystore {
                 Err(keyring::Error::NoEntry) => None,
                 Err(e) => return Err(Error::Keychain(e.to_string())),
             },
-            Backend::File(path) => match fs::read(path) {
+            Backend::File(path) => match read_secrets_file(path) {
                 Ok(bytes) => {
-                    let bytes = Zeroizing::new(bytes);
                     let s = String::from_utf8(bytes.to_vec())
                         .map_err(|e| Error::Keystore(format!("secrets file is not UTF-8: {e}")))?;
                     Some(Zeroizing::new(s))
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(Error::Io(e)),
+                Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
             },
         };
         match raw {
@@ -323,8 +354,32 @@ impl Keystore {
     }
 }
 
+/// The secrets file's bytes, refused past [`SECRETS_FILE_BYTES_MAX`].
+fn read_secrets_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, Error> {
+    use std::io::Read;
+
+    let file = fs::File::open(path)?;
+    // Sized up front, as `fs::read` does, so the read doesn't reallocate and
+    // leave copies of the secrets behind that the zeroizing wrapper can't
+    // reach.
+    let expected_bytes = file.metadata()?.len().min(SECRETS_FILE_BYTES_MAX + 1);
+    let capacity = usize::try_from(expected_bytes).expect("at most SECRETS_FILE_BYTES_MAX + 1, which fits usize");
+    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
+    // One byte past the limit tells "exactly at the limit" from "over it".
+    file.take(SECRETS_FILE_BYTES_MAX + 1).read_to_end(&mut bytes)?;
+    let is_too_big = u64::try_from(bytes.len()).map_or(true, |read_bytes| read_bytes > SECRETS_FILE_BYTES_MAX);
+    if is_too_big {
+        return Err(Error::Keystore(format!(
+            "{} is larger than {SECRETS_FILE_BYTES_MAX} bytes",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
 /// Probe the keychain. Returns the entry if the keychain is usable (an
-/// existing blob, or a clean "no entry"), `None` on any other failure.
+/// existing blob, or a clean "no entry"), `None` on any other failure: the
+/// callers fall back to the file, or report the keychain unusable.
 fn probe_keychain() -> Option<keyring::Entry> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER).ok()?;
     match entry.get_password() {
@@ -376,6 +431,8 @@ fn write_atomic_0600(path: &Path, data: &[u8]) -> Result<(), Error> {
     })();
 
     if result.is_err() {
+        // Best effort: the write's own error is what the caller needs, and a
+        // stray temp file (named `.…tmp`) is never read back as secrets.
         let _ = fs::remove_file(&tmp);
     }
     result
@@ -548,6 +605,23 @@ mod tests {
         let (_dir, ks) = temp_store();
         write_atomic_0600(ks.file_path().unwrap(), b"{ not json").unwrap();
         assert!(matches!(ks.owner(), Err(Error::Json(_))));
+    }
+
+    #[test]
+    fn oversized_secrets_file_is_refused() {
+        let (_dir, ks) = temp_store();
+        let too_big = vec![b' '; usize::try_from(SECRETS_FILE_BYTES_MAX).unwrap() + 1];
+        write_atomic_0600(ks.file_path().unwrap(), &too_big).unwrap();
+        assert!(matches!(ks.list_agents(), Err(Error::Keystore(_))));
+    }
+
+    #[test]
+    fn backend_choice_parses_the_documented_values_only() {
+        assert_eq!(BackendChoice::parse("").unwrap(), BackendChoice::File);
+        assert_eq!(BackendChoice::parse(" File ").unwrap(), BackendChoice::File);
+        assert_eq!(BackendChoice::parse("auto").unwrap(), BackendChoice::Auto);
+        assert_eq!(BackendChoice::parse("KEYCHAIN").unwrap(), BackendChoice::Keychain);
+        assert!(matches!(BackendChoice::parse("cloud"), Err(Error::InvalidInput(_))));
     }
 
     #[test]

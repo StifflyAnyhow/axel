@@ -27,7 +27,8 @@ pub fn decode(s: &str) -> Option<Vec<u8>> {
     for &[hi, lo] in pairs {
         let hi = (hi as char).to_digit(16)?;
         let lo = (lo as char).to_digit(16)?;
-        out.push(((hi << 4) | lo) as u8);
+        let byte = u8::try_from((hi << 4) | lo).expect("two hex digits are at most 0xff");
+        out.push(byte);
     }
     Some(out)
 }
