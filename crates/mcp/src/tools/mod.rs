@@ -13,6 +13,19 @@ pub(crate) fn tool_error(message: impl Into<String>) -> rmcp::model::CallToolRes
     rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(message.into())])
 }
 
+/// `value` as pretty JSON. The tool results are plain structs of strings,
+/// numbers and lists, so this only fails on a bug; it is still reported as
+/// an internal error rather than sent as an empty `{}`.
+pub(crate) fn to_json(value: &impl serde::Serialize) -> Result<String, rmcp::ErrorData> {
+    serde_json::to_string_pretty(value)
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("serializing the result: {e}"), None))
+}
+
+/// A successful result whose text is `value` as pretty JSON.
+pub(crate) fn json_success(value: &impl serde::Serialize) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(to_json(value)?)]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

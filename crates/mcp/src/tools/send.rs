@@ -47,7 +47,10 @@ pub fn validate(params: &Params) -> Result<(Vec<String>, crate::context::Message
 pub fn finish(result: Result<crate::context::SendReport, crate::context::SendError>) -> CallToolResult {
     match result {
         Ok(report) => {
-            let json = serde_json::to_string_pretty(&report).unwrap_or_default();
+            let json = match super::to_json(&report) {
+                Ok(json) => json,
+                Err(e) => return super::tool_error(e.message),
+            };
             let failed = report.deliveries.iter().any(|d| matches!(d.outcome, crate::context::Outcome::Failed { .. }));
             let content = vec![rmcp::model::ContentBlock::text(json)];
             if failed { CallToolResult::error(content) } else { CallToolResult::success(content) }

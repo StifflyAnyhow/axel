@@ -101,22 +101,13 @@ pub struct CreateAgentResult {
 }
 
 pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::ErrorData> {
-    use axel_identity::{Keypair, attest};
-    use axel_store::{AgentColor, Harness, NewAgent, RuntimeMode};
-
-    // Validate name.
     let name = params.name.trim();
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
+    if !is_mention_handle(name) {
         return Ok(super::tool_error(
             "Agent names must match [A-Za-z0-9_-]+ so they work as @mentions.",
         ));
     }
 
-    // Check for duplicates.
     let existing = scope
         .store
         .agent_by_name(name)
@@ -127,52 +118,9 @@ pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::Er
         )));
     }
 
-    // Parse harness, color, runtime mode.
-    let harness = Harness::parse(&params.harness);
-    let color: Option<AgentColor> = params
-        .color
-        .as_deref()
-        .and_then(|s| s.parse().ok());
-    let runtime_mode: RuntimeMode = params
-        .runtime_mode
-        .parse()
-        .unwrap_or_default();
-    let skills: Vec<String> = params
-        .skills
-        .split(',')
-        .map(|x| x.trim().to_string())
-        .filter(|x| !x.is_empty())
-        .collect();
-
-    // Generate key, store it, attest it, insert the agent record.
-    let kp = Keypair::generate();
-    scope
-        .keystore
-        .put_agent(&kp)
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("keystore error: {e}"), None))?;
-
-    let owner = scope
-        .keystore
-        .owner()
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("owner key error: {e}"), None))?;
-    let tag = attest(&owner, &kp.public(), "")
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("attestation error: {e}"), None))?;
-
-    let agent = scope
-        .store
-        .insert_agent(&NewAgent {
-            pubkey: kp.public().to_string(),
-            name: name.to_string(),
-            harness: harness.clone(),
-            model: params.model.clone(),
-            effort: None,
-            skills,
-            prompt: params.prompt,
-            color,
-            runtime_mode,
-            auth_tag: Some(tag.to_tag()),
-        })
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("insert error: {e}"), None))?;
+    let name = name.to_string();
+    let new_agent = new_agent(&name, params);
+    let agent = insert_keyed_agent(scope, new_agent)?;
 
     let result = CreateAgentResult {
         name: agent.name,
@@ -181,13 +129,69 @@ pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::Er
         model: agent.model,
         runtime_mode: agent.runtime_mode.to_string(),
     };
+    super::json_success(&result)
+}
 
-    let json =
-        serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string());
+/// Whether `name` works as an @mention handle: non-empty, letters, digits,
+/// `-` and `_` only.
+fn is_mention_handle(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
 
-    Ok(CallToolResult::success(vec![
-        rmcp::model::ContentBlock::text(json),
-    ]))
+/// The agent record `params` describe, still without its key and tag.
+fn new_agent(name: &str, params: Params) -> axel_store::NewAgent {
+    use axel_store::{AgentColor, Harness, NewAgent, RuntimeMode};
+
+    // An unknown colour leaves it unset, which the TUI reads as "assign one
+    // automatically", as the parameter's description promises.
+    let color: Option<AgentColor> = params.color.as_deref().and_then(|s| s.parse().ok());
+    // An unknown mode falls back to the default (autopilot), the same as
+    // leaving the parameter out.
+    let runtime_mode: RuntimeMode = params.runtime_mode.parse().unwrap_or_default();
+    let skills: Vec<String> = params
+        .skills
+        .split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect();
+    NewAgent {
+        pubkey: String::new(),
+        name: name.to_string(),
+        harness: Harness::parse(&params.harness),
+        model: params.model,
+        effort: None,
+        skills,
+        prompt: params.prompt,
+        color,
+        runtime_mode,
+        auth_tag: None,
+    }
+}
+
+/// Generate a key for `agent`, store it, attest it with the owner key and
+/// insert the agent record.
+fn insert_keyed_agent(scope: &CallScope, mut agent: axel_store::NewAgent) -> Result<axel_store::Agent, rmcp::ErrorData> {
+    use axel_identity::{Keypair, attest};
+
+    let keypair = Keypair::generate();
+    scope
+        .keystore
+        .put_agent(&keypair)
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("keystore error: {e}"), None))?;
+
+    let owner = scope
+        .keystore
+        .owner()
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("owner key error: {e}"), None))?;
+    let tag = attest(&owner, &keypair.public(), "")
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("attestation error: {e}"), None))?;
+
+    agent.pubkey = keypair.public().to_string();
+    agent.auth_tag = Some(tag.to_tag());
+    scope
+        .store
+        .insert_agent(&agent)
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("insert error: {e}"), None))
 }
 
 #[cfg(test)]

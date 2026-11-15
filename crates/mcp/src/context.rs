@@ -156,13 +156,21 @@ pub enum Outcome {
     Failed { error: String },
 }
 
+/// How much of a session id [`Outcome::describe`] shows: enough to tell
+/// sessions apart on screen without printing the whole id.
+const SESSION_ID_SHOWN_BYTES: usize = 12;
+
 impl Outcome {
     /// One line for people.
     pub fn describe(&self) -> String {
         match self {
             Outcome::Delivered => "delivered to its session".into(),
             Outcome::Queued => "busy; queued for its next turn".into(),
-            Outcome::Summoned { session } => format!("summoned onto the thread (session {})", &session[..12.min(session.len())]),
+            // A session id is ASCII, so the prefix is a char boundary; `get`
+            // keeps a malformed id from panicking all the same.
+            Outcome::Summoned { session } => {
+                format!("summoned onto the thread (session {})", session.get(..SESSION_ID_SHOWN_BYTES).unwrap_or(session))
+            }
             Outcome::Noted => "noted; it reads it with its next turn".into(),
             Outcome::NotOnThread => "not working on the thread; a note doesn't summon, so it's left in its inbox".into(),
             Outcome::InPane => "runs in a pane; left in its inbox".into(),

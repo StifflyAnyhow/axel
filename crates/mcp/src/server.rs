@@ -85,14 +85,13 @@ impl AxelMcp {
             return Ok(tools::send::finish(first));
         };
         let question = tools::send::reach_question(from, denied);
+        let refused = || tools::tool_error(format!("The owner didn't allow {from} to message {}. Don't try another way.", denied.join(", ")));
         match rq.peer.elicit::<tools::send::ReachAnswer>(question).await {
             Ok(Some(a)) => match tools::send::grant_for(tools::send::ReachChoice::parse(&a.answer)) {
                 Some(grant) => Ok(tools::send::finish(ctx.send(&to, &params.text, kind, grant))),
-                None => Ok(tools::tool_error(format!("The owner didn't allow {from} to message {}. Don't try another way.", denied.join(", ")))),
+                None => Ok(refused()),
             },
-            Err(rmcp::service::ElicitationError::UserDeclined | rmcp::service::ElicitationError::UserCancelled) | Ok(None) => {
-                Ok(tools::tool_error(format!("The owner didn't allow {from} to message {}. Don't try another way.", denied.join(", "))))
-            }
+            Err(rmcp::service::ElicitationError::UserDeclined | rmcp::service::ElicitationError::UserCancelled) | Ok(None) => Ok(refused()),
             // The client can't ask (or asking failed): the refusal, with the command to allow it.
             Err(_) => Ok(tools::send::finish(first)),
         }

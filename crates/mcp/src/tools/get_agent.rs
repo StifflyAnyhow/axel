@@ -52,7 +52,7 @@ pub struct AgentDetails {
     pub key_in_keystore: bool,
     /// Whether the owner attestation is valid.
     #[schemars(description = "Owner attestation validity: \"valid\", \"invalid\", or \"none\"")]
-    pub attestation: String,
+    pub attestation: Attestation,
     /// Owner public key from the attestation, if present.
     #[schemars(description = "Owner public key from the attestation tag")]
     pub attestation_owner: Option<String>,
@@ -64,21 +64,27 @@ pub struct AgentDetails {
     pub created_at: i64,
 }
 
+/// What the agent's owner attestation proves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Attestation {
+    /// Signed by the owner it names, for this agent's key.
+    Valid,
+    /// Present, but unreadable or its signature doesn't check out.
+    Invalid,
+    /// The agent carries no attestation.
+    None,
+}
+
 pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::ErrorData> {
     let query = params.agent.trim();
+    let store_error = |e: axel_store::Error| rmcp::ErrorData::internal_error(format!("store error: {e}"), None);
 
     // Try by name first, then by pubkey.
-    let agent = scope
-        .store
-        .agent_by_name(query)
-        .map_err(|e| rmcp::ErrorData::internal_error(format!("store error: {e}"), None))?
-        .or_else(|| {
-            scope
-                .store
-                .agent_by_pubkey(query)
-                .ok()
-                .flatten()
-        });
+    let agent = match scope.store.agent_by_name(query).map_err(store_error)? {
+        Some(agent) => Some(agent),
+        None => scope.store.agent_by_pubkey(query).map_err(store_error)?,
+    };
 
     let Some(agent) = agent else {
         return Ok(super::tool_error(format!(
@@ -86,36 +92,8 @@ pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::Er
         )));
     };
 
-    // Check keystore.
-    let key_in_keystore = agent
-        .pubkey
-        .parse()
-        .ok()
-        .and_then(|pk| scope.keystore.agent(&pk).ok().flatten())
-        .is_some();
-
-    // Check attestation.
-    let (attestation, attestation_owner) = match &agent.auth_tag {
-        Some(tag) => {
-            match axel_identity::AuthTag::from_tag(tag) {
-                Ok(auth_tag) => {
-                    let owner_str = auth_tag.owner.to_string();
-                    let valid = agent
-                        .pubkey
-                        .parse()
-                        .ok()
-                        .map(|pk| axel_identity::verify_attestation(&auth_tag, &pk).is_ok())
-                        .unwrap_or(false);
-                    (
-                        if valid { "valid" } else { "invalid" }.to_string(),
-                        Some(owner_str),
-                    )
-                }
-                Err(_) => ("invalid".to_string(), None),
-            }
-        }
-        None => ("none".to_string(), None),
-    };
+    let key_in_keystore = key_in_keystore(scope, &agent.pubkey);
+    let (attestation, attestation_owner) = attestation_of(&agent);
 
     let details = AgentDetails {
         name: agent.name,
@@ -134,12 +112,30 @@ pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::Er
         created_at: agent.created_at,
     };
 
-    let json =
-        serde_json::to_string_pretty(&details).unwrap_or_else(|_| "{}".to_string());
+    super::json_success(&details)
+}
 
-    Ok(CallToolResult::success(vec![
-        rmcp::model::ContentBlock::text(json),
-    ]))
+/// Whether this machine's keystore holds the signing key for `pubkey`.
+/// A report, not a gate: a pubkey that doesn't parse can't be in the
+/// keystore, and a keystore that can't be read (a locked keychain, say)
+/// reads as not holding it rather than failing the whole lookup.
+fn key_in_keystore(scope: &CallScope, pubkey: &str) -> bool {
+    let Ok(pubkey) = pubkey.parse() else { return false };
+    matches!(scope.keystore.agent(&pubkey), Ok(Some(_)))
+}
+
+/// The agent's attestation checked against its key, and the owner it names.
+fn attestation_of(agent: &axel_store::Agent) -> (Attestation, Option<String>) {
+    let Some(tag) = &agent.auth_tag else { return (Attestation::None, None) };
+    let Ok(auth_tag) = axel_identity::AuthTag::from_tag(tag) else { return (Attestation::Invalid, None) };
+    let owner = auth_tag.owner.to_string();
+    // A pubkey that doesn't parse can't be the key the owner signed.
+    let is_valid = match agent.pubkey.parse() {
+        Ok(pubkey) => axel_identity::verify_attestation(&auth_tag, &pubkey).is_ok(),
+        Err(_) => false,
+    };
+    let attestation = if is_valid { Attestation::Valid } else { Attestation::Invalid };
+    (attestation, Some(owner))
 }
 
 #[cfg(test)]

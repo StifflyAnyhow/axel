@@ -55,8 +55,11 @@ pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::Er
         .into_iter()
         .filter(|a| params.include_archived || a.archived_at.is_none())
         .map(|a| {
-            let unread = scope.store.unread_count(&a.pubkey).unwrap_or(0);
-            AgentEntry {
+            let unread = scope
+                .store
+                .unread_count(&a.pubkey)
+                .map_err(|e| rmcp::ErrorData::internal_error(format!("store error: {e}"), None))?;
+            Ok(AgentEntry {
                 name: a.name,
                 pubkey: a.pubkey,
                 harness: a.harness.to_string(),
@@ -65,16 +68,11 @@ pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::Er
                 runtime_mode: a.runtime_mode.to_string(),
                 archived: a.archived_at.is_some(),
                 unread,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, rmcp::ErrorData>>()?;
 
-    let json =
-        serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string());
-
-    Ok(CallToolResult::success(vec![
-        rmcp::model::ContentBlock::text(json),
-    ]))
+    super::json_success(&entries)
 }
 
 #[cfg(test)]

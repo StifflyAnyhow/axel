@@ -27,6 +27,14 @@ pub use server::AxelMcp;
 pub use rmcp::ErrorData;
 
 use rmcp::ServiceExt;
+use rmcp::transport::async_rw::AsyncRwTransport;
+
+/// The longest JSON-RPC line read from stdin; a longer one is dropped (and
+/// logged by rmcp) without being buffered. 16 MiB is rmcp's own default
+/// (`DEFAULT_MAX_LINE_LENGTH`), named here so the bound is visible: the
+/// largest request we take is a `send` whose text is a prompt, orders of
+/// magnitude smaller.
+const REQUEST_LINE_BYTES_MAX: usize = 16 * 1024 * 1024;
 
 /// Start the MCP server on stdio, backed by the local store.
 pub async fn run_server() -> Result<(), String> {
@@ -47,8 +55,10 @@ pub async fn run_server_with(context: std::sync::Arc<dyn AxelContext>) -> Result
 
     tracing::info!("Starting axel MCP server");
 
+    let transport = AsyncRwTransport::new(tokio::io::stdin(), tokio::io::stdout())
+        .with_max_line_length(REQUEST_LINE_BYTES_MAX);
     let service = AxelMcp::with_context(context)
-        .serve((tokio::io::stdin(), tokio::io::stdout()))
+        .serve(transport)
         .await
         .inspect_err(|e| {
             tracing::error!("serving error: {:?}", e);

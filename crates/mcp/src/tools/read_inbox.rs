@@ -17,11 +17,16 @@ pub struct Params {
     pub limit: Option<usize>,
 }
 
+/// Messages returned when the caller names no limit: a screenful.
+const MESSAGES_DEFAULT: usize = 20;
+/// The most messages one call returns, whatever the caller asks, so a reply
+/// stays a size an agent can read in one go.
+const MESSAGES_MAX: usize = 100;
+
 pub fn run(params: Params, ctx: &dyn AxelContext) -> Result<CallToolResult, rmcp::ErrorData> {
-    match ctx.inbox(params.limit.unwrap_or(20).clamp(1, 100)) {
-        Ok(msgs) => Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-            serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "[]".into()),
-        )])),
+    let limit = params.limit.unwrap_or(MESSAGES_DEFAULT).clamp(1, MESSAGES_MAX);
+    match ctx.inbox(limit) {
+        Ok(messages) => super::json_success(&messages),
         Err(e) => Ok(super::tool_error(e)),
     }
 }
