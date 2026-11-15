@@ -27,6 +27,11 @@ pub const ID_MAX_BYTES: usize = 128;
 /// Maximum number of `/`-separated segments in an `id`.
 pub const ID_MAX_DEPTH: usize = 8;
 
+/// The longest sequence [`encode`] may produce. The field caps above add up
+/// to about 3.2 KiB encoded; 4 KiB leaves room and is the bound
+/// `encoded_output_is_within_wire_limits` holds the encoder to.
+const ENCODED_MAX_BYTES: usize = 4096;
+
 /// The feature-detection query; a supporting terminal replies with `OSC 7501 ; ? ... ST`.
 pub const QUERY: &str = "\x1b]7501;?\x1b\\";
 
@@ -219,11 +224,14 @@ fn truncate_bytes(s: &mut String, max_bytes: usize) {
     if s.len() <= max_bytes {
         return;
     }
+    // Index 0 is always a char boundary, so this walks back at most three
+    // bytes (a UTF-8 character is at most four).
     let mut cut = max_bytes;
     while !s.is_char_boundary(cut) {
         cut -= 1;
     }
     s.truncate(cut);
+    debug_assert!(s.len() <= max_bytes);
 }
 
 /// Encode `r` as a complete `OSC 7501 ... ST` sequence.
@@ -266,7 +274,10 @@ pub fn encode(r: &Report) -> String {
             body.push_str(&BASE64_STANDARD.encode(clean));
         }
     }
-    format!("\x1b]7501;{body}\x1b\\")
+    let encoded = format!("\x1b]7501;{body}\x1b\\");
+    // Every field is capped above, so the whole sequence is too.
+    debug_assert!(encoded.len() <= ENCODED_MAX_BYTES, "OSC 7501 report of {} bytes", encoded.len());
+    encoded
 }
 
 /// Write `r` to the controlling terminal (`/dev/tty`) so the hosting Rex block
@@ -277,6 +288,8 @@ pub fn emit_to_tty(r: &Report) -> std::io::Result<()> {
     let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") else {
         return Ok(());
     };
+    // Ignored on purpose: a status report that can't be written is dropped
+    // (see above); the next report replaces it anyway.
     let _ = tty
         .write_all(encode(r).as_bytes())
         .and_then(|()| tty.flush());
@@ -464,7 +477,7 @@ mod tests {
             .title(&title)
             .msg(&msg);
         let enc = encode(&r);
-        assert!(enc.len() <= 4096, "{}", enc.len());
+        assert!(enc.len() <= ENCODED_MAX_BYTES, "{}", enc.len());
         // Body uses only the value charset (plus ':' and '=' separators).
         let body = enc
             .strip_prefix("\x1b]7501;")

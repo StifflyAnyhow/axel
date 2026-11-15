@@ -155,17 +155,34 @@ impl Default for CliRunner {
     }
 }
 
+/// The most of `rex`'s stdout read for one call. The largest reply is
+/// `session.view` of a busy session, tens of KiB; 64 MiB is far past any
+/// real one and still keeps a runaway child from exhausting memory.
+const STDOUT_BYTES_MAX: u64 = 64 * 1024 * 1024;
+/// The most of `rex`'s stderr kept for an error message: a diagnostic is a
+/// few lines. The rest is read and dropped so the child never blocks on a
+/// full pipe.
+const STDERR_BYTES_MAX: u64 = 64 * 1024;
+
 impl Runner for CliRunner {
     fn run(&self, args: &[String]) -> Result<String, Error> {
         let mut cmd = Command::new(&self.program);
-        cmd.args(args).stdin(std::process::Stdio::null());
+        cmd.args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         if let Some(server) = &self.server {
             cmd.env("REX_SERVER", server);
         }
-        let out = cmd.output().map_err(|source| Error::Spawn {
-            program: self.program.clone(),
-            source,
-        })?;
+        let spawn_error = |source| Error::Spawn { program: self.program.clone(), source };
+        let mut child = cmd.spawn().map_err(spawn_error)?;
+        let out = read_output(&mut child).map_err(spawn_error)?;
+        if out.is_stdout_cut {
+            return Err(Error::Rex {
+                method: CliRunner::method_of(args),
+                stderr: format!("printed more than {STDOUT_BYTES_MAX} bytes"),
+            });
+        }
         if !out.status.success() {
             let mut stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             if stderr.trim().is_empty() {
@@ -178,6 +195,50 @@ impl Runner for CliRunner {
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
+}
+
+/// What a `rex` child printed, each stream cut to its limit.
+struct Output {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    /// Stdout went past [`STDOUT_BYTES_MAX`]; the child was killed.
+    is_stdout_cut: bool,
+}
+
+/// Read `child`'s stdout and stderr (both piped) up to their limits and
+/// wait for it. Stderr is drained on a thread so a child that fills one
+/// pipe while we read the other can't deadlock.
+fn read_output(child: &mut std::process::Child) -> std::io::Result<Output> {
+    use std::io::Read;
+
+    let stderr_pipe = child.stderr.take().expect("stderr is piped by the caller");
+    let stderr_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut stderr_pipe = stderr_pipe;
+        let mut stderr = Vec::new();
+        (&mut stderr_pipe).take(STDERR_BYTES_MAX).read_to_end(&mut stderr)?;
+        std::io::copy(&mut stderr_pipe, &mut std::io::sink())?;
+        Ok(stderr)
+    });
+
+    let stdout_pipe = child.stdout.take().expect("stdout is piped by the caller");
+    let mut stdout = Vec::new();
+    // One byte past the limit tells "exactly at the limit" from "over it".
+    let read_result = stdout_pipe.take(STDOUT_BYTES_MAX + 1).read_to_end(&mut stdout);
+    let is_stdout_cut = u64::try_from(stdout.len()).map_or(true, |read_bytes| read_bytes > STDOUT_BYTES_MAX);
+    if is_stdout_cut {
+        // It would block on a full pipe forever; it already failed us.
+        // Killing a child that has just exited fails harmlessly.
+        let _ = child.kill();
+        stdout.clear();
+    }
+    let status = child.wait()?;
+    let stderr = match stderr_reader.join() {
+        Ok(stderr) => stderr?,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    read_result?;
+    Ok(Output { status, stdout, stderr, is_stdout_cut })
 }
 
 /// A floating layer created by [`Rex::new_floating_terminal`].
@@ -312,12 +373,7 @@ impl Rex {
         cwd: Option<&Path>,
         env: &[(String, String)],
     ) -> Result<Layer, Error> {
-        let args = payload::new_layer(label, bounds, command, cwd, env)?;
-        let result = self.api_call("session.new_layer", args)?;
-        Ok(Layer {
-            layer_id: str_field(&result, "session.new_layer", "layer_id")?,
-            block_ids: ids_field(&result, "block_ids"),
-        })
+        self.new_floating_terminal_with_focus(label, bounds, command, cwd, env, true)
     }
 
     /// Close a floating layer and every block in it.
@@ -351,18 +407,19 @@ impl Rex {
             "com.superlogical.terminal.size",
             payload::terminal_size(block_id),
         )?;
+        // A size past u16 is nonsense from the server; saturate rather than
+        // wrap it to a small number.
         let n = |k: &str| {
-            v.get(k).and_then(|x| x.as_u64()).or_else(|| {
-                v.get("size")
-                    .and_then(|s| s.get(k))
-                    .and_then(|x| x.as_u64())
-            })
+            v.get(k)
+                .and_then(|x| x.as_u64())
+                .or_else(|| v.get("size").and_then(|s| s.get(k)).and_then(|x| x.as_u64()))
+                .map(|x| u16::try_from(x).unwrap_or(u16::MAX))
         };
         Ok(TerminalSize {
-            columns: n("columns").unwrap_or(0) as u16,
-            rows: n("rows").unwrap_or(0) as u16,
-            cell_width_px: n("cell_width_px").map(|x| x as u16),
-            cell_height_px: n("cell_height_px").map(|x| x as u16),
+            columns: n("columns").unwrap_or(0),
+            rows: n("rows").unwrap_or(0),
+            cell_width_px: n("cell_width_px"),
+            cell_height_px: n("cell_height_px"),
         })
     }
 
@@ -971,6 +1028,21 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(CliRunner::method_of(&args), "server.status");
+    }
+
+    #[test]
+    fn cli_runner_returns_stdout_and_reports_stderr_on_failure() {
+        let runner = CliRunner { program: "/bin/sh".into(), server: None };
+        let ok = runner.run(&["-c".into(), "echo out; echo noise >&2".into()]).unwrap();
+        assert_eq!(ok, "out\n");
+        match runner.run(&["-c".into(), "echo bad >&2; exit 3".into()]) {
+            Err(Error::Rex { stderr, .. }) => assert_eq!(stderr.trim(), "bad"),
+            other => panic!("{other:?}"),
+        }
+        match runner.run(&["-c".into(), "exit 4".into()]) {
+            Err(Error::Rex { stderr, .. }) => assert!(stderr.contains("exit status"), "{stderr}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

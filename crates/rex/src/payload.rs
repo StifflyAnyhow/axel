@@ -11,6 +11,20 @@ use serde_json::{Map, Value, json};
 
 use crate::{Error, TERMINAL_FLAVOR};
 
+/// The longest block label Rex accepts, in characters (its
+/// `session.set_block_label` schema); a longer one is refused here, before
+/// anything runs.
+const LABEL_CHARS_MAX: usize = 128;
+
+/// `ratio` splits a pane in two: strictly between 0 and 1, so neither side
+/// is empty.
+fn check_ratio(ratio: f64) -> Result<(), Error> {
+    if ratio > 0.0 && ratio < 1.0 {
+        return Ok(());
+    }
+    Err(Error::Invalid("ratio must be between 0 and 1".into()))
+}
+
 /// `/usr/bin/env K=V ... cmd args` — the only way to pass environment to a
 /// block, since the terminal flavor's options have no env field.  An empty
 /// `env` returns `command` unchanged.
@@ -44,7 +58,7 @@ pub fn terminal_block(
         return Err(Error::Invalid("command must name a program".into()));
     }
     let label = label.trim();
-    if label.chars().count() > 128 || label.chars().any(char::is_control) {
+    if label.chars().count() > LABEL_CHARS_MAX || label.chars().any(char::is_control) {
         return Err(Error::Invalid(
             "label must be ≤128 characters with no control characters".into(),
         ));
@@ -136,9 +150,7 @@ pub fn new_window_stacked(
     ratio: f64,
     focus: bool,
 ) -> Result<Value, Error> {
-    if !(ratio > 0.0 && ratio < 1.0) {
-        return Err(Error::Invalid("ratio must be between 0 and 1".into()));
-    }
+    check_ratio(ratio)?;
     let mut body = Map::new();
     let label = label.trim();
     if !label.is_empty() {
@@ -156,11 +168,8 @@ pub fn new_window_stacked(
 /// which keeps `keep` of the width, holding `top` above `bottom`; `top` gets
 /// `stack` of the column's height.
 pub fn new_split_right_stacked(anchor: &str, top: Value, bottom: Value, keep: f64, stack: f64, focus: bool) -> Result<Value, Error> {
-    for r in [keep, stack] {
-        if !(r > 0.0 && r < 1.0) {
-            return Err(Error::Invalid("ratio must be between 0 and 1".into()));
-        }
-    }
+    check_ratio(keep)?;
+    check_ratio(stack)?;
     Ok(json!({
         "anchor_id": anchor,
         "direction": "horizontal",
@@ -174,25 +183,19 @@ pub fn new_split_right_stacked(anchor: &str, top: Value, bottom: Value, keep: f6
 /// `session.new_split`: one terminal right of `anchor` (a block or a split),
 /// which keeps `keep` of the width.
 pub fn new_split_right(anchor: &str, block: Value, keep: f64, focus: bool) -> Result<Value, Error> {
-    if !(keep > 0.0 && keep < 1.0) {
-        return Err(Error::Invalid("ratio must be between 0 and 1".into()));
-    }
+    check_ratio(keep)?;
     Ok(json!({ "anchor_id": anchor, "direction": "horizontal", "side": "after", "ratio": keep, "focus": focus, "layout": block }))
 }
 
 /// Two layout nodes side by side, `left` keeping `keep` of the width.
 pub fn row(left: Value, right: Value, keep: f64) -> Result<Value, Error> {
-    if !(keep > 0.0 && keep < 1.0) {
-        return Err(Error::Invalid("ratio must be between 0 and 1".into()));
-    }
+    check_ratio(keep)?;
     Ok(json!({ "split": { "direction": "horizontal", "before": left, "after": right, "ratio": keep } }))
 }
 
 /// `session.new_split`: one terminal below `anchor`, which keeps `ratio` of the height.
 pub fn new_split_below(anchor: &str, block: Value, ratio: f64, focus: bool) -> Result<Value, Error> {
-    if !(ratio > 0.0 && ratio < 1.0) {
-        return Err(Error::Invalid("ratio must be between 0 and 1".into()));
-    }
+    check_ratio(ratio)?;
     Ok(json!({
         "anchor_id": anchor,
         "direction": "vertical",
