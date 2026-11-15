@@ -359,6 +359,7 @@ pub fn load_recent_threads(store: &Store, owner_pk: &str, now: i64) -> Result<Ve
 }
 
 pub fn load_dashboard(store: &Store, owner_pk: &str, now: i64) -> Result<DashboardData> {
+    // The dashboard's charts show the last hour.
     let since = now - 3600;
     let mut names = Names::new(store, owner_pk)?;
     let statuses: HashMap<String, axel_store::Status> =
@@ -366,11 +367,27 @@ pub fn load_dashboard(store: &Store, owner_pk: &str, now: i64) -> Result<Dashboa
     let usages: HashMap<String, axel_store::Usage> =
         store.usages().map_err(se)?.into_iter().map(|u| (u.session_id.clone(), u)).collect();
 
-    // ---- threads ----
     let mut threads = thread_rows(store, &mut names, &statuses, vec![ThreadState::Open], since, now)?;
     threads.sort_by_key(|t| (sort_urgency(t.state).min(2), std::cmp::Reverse(t.updated_at)));
+    let mut agents = dashboard_agents(store, &statuses, &usages, since, now)?;
+    agents.sort_by_key(|a| sort_urgency(a.state));
+    let tokens = tokens_panel(store, &usages, since, now)?;
 
-    // ---- agents ----
+    let requests = requests(store, &mut names)?;
+    let messages = messages(store, owner_pk, &mut names, DASHBOARD_MESSAGES_MAX)?;
+    let unread = store.unread_count(owner_pk).map_err(se)?;
+    Ok(DashboardData { threads, agents, tokens, requests, messages, unread })
+}
+
+/// Every agent with what it's on: its latest session's thread, state and
+/// the tokens it spent since `since`.
+fn dashboard_agents(
+    store: &Store,
+    statuses: &HashMap<String, axel_store::Status>,
+    usages: &HashMap<String, axel_store::Usage>,
+    since: i64,
+    now: i64,
+) -> Result<Vec<DashAgentRow>> {
     let mut agents = Vec::new();
     let mut thread_titles: HashMap<String, Option<String>> = HashMap::new();
     for a in store.list_agents().map_err(se)? {
@@ -420,9 +437,11 @@ pub fn load_dashboard(store: &Store, owner_pk: &str, now: i64) -> Result<Dashboa
             active_session_id: active,
         });
     }
-    agents.sort_by_key(|a| sort_urgency(a.state));
+    Ok(agents)
+}
 
-    // ---- tokens ----
+/// Every session's tokens together, and a minute-by-minute series since `since`.
+fn tokens_panel(store: &Store, usages: &HashMap<String, axel_store::Usage>, since: i64, now: i64) -> Result<TokensPanel> {
     let samples = samples_to_pairs(store.usage_samples(None, since).map_err(se)?);
     let mut tokens = TokensPanel { series: bucket_series(&samples, since, now, 60), ..Default::default() };
     for u in usages.values() {
@@ -432,11 +451,7 @@ pub fn load_dashboard(store: &Store, owner_pk: &str, now: i64) -> Result<Dashboa
         tokens.cache_write += u.cache_write_tokens;
         tokens.cost_usd += u.cost_usd_est;
     }
-
-    let requests = requests(store, &mut names)?;
-    let messages = messages(store, owner_pk, &mut names, DASHBOARD_MESSAGES_MAX)?;
-    let unread = store.unread_count(owner_pk).map_err(se)?;
-    Ok(DashboardData { threads, agents, tokens, requests, messages, unread })
+    Ok(tokens)
 }
 
 // ---------------------------------------------------------------- thread view

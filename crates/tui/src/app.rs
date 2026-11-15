@@ -268,34 +268,7 @@ impl<'a> App<'a> {
     fn handle(&mut self, ev: Event) -> Option<Outcome> {
         crate::util::log_key(&ev);
         match ev {
-            Event::Key(key) if key.kind != KeyEventKind::Release => match &self.screen {
-                Screen::Dashboard => {
-                    let action = self.dashboard.handle_key(key, now_secs());
-                    self.on_dashboard(action)
-                }
-                Screen::Launcher => {
-                    let action = self.launcher.handle_key(key);
-                    let out = self.on_launcher(action);
-                    self.sync_runtime_label();
-                    self.fit_prompt();
-                    out
-                }
-                Screen::Inbox => {
-                    let action = self.inbox.handle_key(key);
-                    self.on_inbox(action)
-                }
-                Screen::Thread(_) => {
-                    let action = self.thread.as_mut().map(|t| t.handle_key(key)).unwrap_or(ThreadAction::Back);
-                    self.on_thread(action)
-                }
-                Screen::Threads => {
-                    self.focused = true;
-                    let action = self.picker.handle_key(key);
-                    self.on_picker(action)
-                }
-                // Nothing to pick: Esc or q closes it.
-                Screen::Usage => matches!(key.code, KeyCode::Esc | KeyCode::Char('q')).then_some(Outcome::Quit),
-            },
+            Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key),
             Event::FocusGained => {
                 self.focused = true;
                 None
@@ -304,50 +277,86 @@ impl<'a> App<'a> {
                 self.focused = false;
                 None
             }
-            Event::Mouse(m) => {
-                let delta = match m.kind {
-                    MouseEventKind::ScrollUp => -3,
-                    MouseEventKind::ScrollDown => 3,
-                    _ => return None,
-                };
-                match &self.screen {
-                    Screen::Thread(_) => {
-                        if let Some(t) = self.thread.as_mut() {
-                            t.scroll(delta);
-                        }
-                        None
-                    }
-                    // The wheel only moves the cursor here; ↑ on the first row would leave the pane.
-                    Screen::Threads => {
-                        let code = if delta < 0 { KeyCode::Up } else { KeyCode::Down };
-                        if !(code == KeyCode::Up && self.picker.sel == 0) {
-                            self.picker.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
-                        }
-                        None
-                    }
-                    // Lists elsewhere: the wheel moves the selection, one row per notch.
-                    _ => {
-                        let code = if delta < 0 { KeyCode::Up } else { KeyCode::Down };
-                        self.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
-                    }
-                }
-            }
+            Event::Mouse(m) => self.handle_mouse(m.kind),
             Event::Paste(text) => {
-                match &self.screen {
-                    Screen::Launcher => {
-                        self.launcher.handle_paste(&text);
-                        self.fit_prompt();
-                    }
-                    Screen::Thread(_) => {
-                        if let Some(t) = self.thread.as_mut() {
-                            t.handle_paste(&text);
-                        }
-                    }
-                    _ => {}
-                }
+                self.handle_paste(&text);
                 None
             }
             _ => None,
+        }
+    }
+
+    /// A key, to the screen that has it.
+    fn handle_key(&mut self, key: KeyEvent) -> Option<Outcome> {
+        match &self.screen {
+            Screen::Dashboard => {
+                let action = self.dashboard.handle_key(key, now_secs());
+                self.on_dashboard(action)
+            }
+            Screen::Launcher => {
+                let action = self.launcher.handle_key(key);
+                let out = self.on_launcher(action);
+                self.sync_runtime_label();
+                self.fit_prompt();
+                out
+            }
+            Screen::Inbox => {
+                let action = self.inbox.handle_key(key);
+                self.on_inbox(action)
+            }
+            Screen::Thread(_) => {
+                let action = self.thread.as_mut().map(|t| t.handle_key(key)).unwrap_or(ThreadAction::Back);
+                self.on_thread(action)
+            }
+            Screen::Threads => {
+                self.focused = true;
+                let action = self.picker.handle_key(key);
+                self.on_picker(action)
+            }
+            // Nothing to pick: Esc or q closes it.
+            Screen::Usage => matches!(key.code, KeyCode::Esc | KeyCode::Char('q')).then_some(Outcome::Quit),
+        }
+    }
+
+    /// The wheel: scrolls the thread, moves the selection in lists.
+    fn handle_mouse(&mut self, kind: MouseEventKind) -> Option<Outcome> {
+        let delta = match kind {
+            MouseEventKind::ScrollUp => -3,
+            MouseEventKind::ScrollDown => 3,
+            _ => return None,
+        };
+        let code = if delta < 0 { KeyCode::Up } else { KeyCode::Down };
+        match &self.screen {
+            Screen::Thread(_) => {
+                if let Some(t) = self.thread.as_mut() {
+                    t.scroll(delta);
+                }
+                None
+            }
+            // The wheel only moves the cursor here; ↑ on the first row would leave the pane.
+            Screen::Threads => {
+                if !(code == KeyCode::Up && self.picker.sel == 0) {
+                    self.picker.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+                }
+                None
+            }
+            // Lists elsewhere: the wheel moves the selection, one row per notch.
+            _ => self.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE))),
+        }
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        match &self.screen {
+            Screen::Launcher => {
+                self.launcher.handle_paste(text);
+                self.fit_prompt();
+            }
+            Screen::Thread(_) => {
+                if let Some(t) = self.thread.as_mut() {
+                    t.handle_paste(text);
+                }
+            }
+            _ => {}
         }
     }
 
