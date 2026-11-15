@@ -128,30 +128,13 @@ pub fn spawn_detached(spec: &cfg_launch::LaunchSpec, session_id: &str) -> Result
 }
 
 pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Launched> {
-    let target = opts.target;
     let resume = opts.resume.clone().or_else(|| std::env::var("AXEL_RESUME").ok()).filter(|r| !r.trim().is_empty());
     let owner = ctx.owner()?;
     let env = ctx.store.local_environment()?;
-    if env.rex_host_id.is_none()
-        && let Some(host) = ctx.rex.as_ref().and_then(|r| r.host_id().ok()) {
-            ctx.store.set_environment_rex_host(&env.id, &host).ok();
-        }
-    let agent = ctx
-        .store
-        .agent_by_pubkey(&req.agent_pubkey)?
-        .with_context(|| format!("agent {} not found", req.agent_pubkey))?;
+    record_rex_host(ctx, &env);
+    let Cleared { agent, agent_kp, parent_session, runtime_mode } = clear_agent(ctx, &req)?;
     let claude_profile = ClaudeProfile::load(&agent.pubkey)?;
     let claude_state = claude_profile.as_ref().map(ClaudeProfile::state_path).transpose()?;
-    // The agent's key, or (on a remote host) this host's key under the
-    // agent's delegation for the thread.
-    let agent_kp = ctx
-        .agent_signer(&req.agent_pubkey, req.thread_id.as_deref())
-        .with_context(|| format!("refusing to launch {}: its key is missing from the keystore", agent.name))?;
-    // Reach, loops, depth and budget; a summoned session never runs broader
-    // than the session that summoned it.
-    let (parent_session, mode_cap) = super::policy::check_summon(ctx, &agent.pubkey)
-        .with_context(|| format!("refusing to launch {}", agent.name))?;
-    let runtime_mode = mode_cap.map_or(agent.runtime_mode, |cap| axel_store::narrower(agent.runtime_mode, cap));
 
     // 1. Thread: new, or an existing one we're spawning another agent onto.
     let thread = match &req.thread_id {
@@ -161,51 +144,7 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     };
 
     // 2. Projects (0..n). Zero projects = scratch directory.
-    let mut primary_dir: Option<PathBuf> = opts.work_dir.clone();
-    let mut primary_repo_key: Option<String> = opts.work_dir.as_deref().and_then(repo_key);
-    if primary_dir.is_some() {
-        // A remote job: the worktree was prepared by the caller.
-    } else if req.thread_id.is_none() {
-        for p in &req.projects {
-            let path = std::fs::canonicalize(p).unwrap_or(p.clone());
-            let key = repo_key(&path);
-            ctx.store.upsert_project(&env.id, &path, key.as_deref())?;
-            let (work_dir, ws) = prepare_workspace(&path, req.workspace, req.branch.as_deref(), &axel_tui::util::title_line(&req.title))?;
-            ctx.store.attach_project(&owner, &thread.id, key.as_deref(), &path, &ws)?;
-            if primary_dir.is_none() {
-                primary_dir = Some(work_dir);
-                primary_repo_key = key;
-            }
-        }
-    } else {
-        // Spawning: reuse the thread's first project that exists on this replica.
-        for tp in ctx.store.thread_projects(&thread.id)? {
-            let local = tp
-                .local_project_id
-                .as_deref()
-                .and_then(|id| ctx.store.get_project(id).ok().flatten())
-                .map(|p| p.path)
-                .or_else(|| tp.path_hint.is_dir().then(|| tp.path_hint.clone()));
-            if let Some(path) = local {
-                let dir = tp.workspace.worktree_path.clone().filter(|w| w.is_dir()).unwrap_or(path);
-                primary_dir = Some(dir);
-                primary_repo_key = tp.repo_key.clone();
-                break;
-            }
-        }
-    }
-    let work_dir = match primary_dir {
-        Some(d) => d,
-        None => {
-            let dir = paths::home().join("scratch").join(format!("{}-{}", axel_tui::slugify(&thread.title), &thread.id[..8]));
-            std::fs::create_dir_all(&dir)?;
-            if req.thread_id.is_none() {
-                let ws = ThreadWorkspace { kind: WorkspaceKind::Scratch, branch: None, worktree_path: None };
-                ctx.store.attach_project(&owner, &thread.id, None, &dir, &ws)?;
-            }
-            dir
-        }
-    };
+    let (work_dir, primary_repo_key) = resolve_work_dir(ctx, &req, &opts, &owner, &env.id, &thread)?;
 
     // 3. Profile, from the agent's row in the store.
     let config = WorkspaceConfig::load(&work_dir).context("reading AXEL.md")?;
@@ -215,19 +154,8 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     if let Some(driver) = drivers::for_harness(profile.harness.kind) {
         install_skills(driver.as_ref(), &work_dir, &profile.skills, config.as_ref(), &paths::global_skills_dir())?;
     }
-
-    // Picking the project in the launcher is the trust decision, and picking
-    // autopilot is the permissions decision: pre-answer Claude Code's two startup
-    // dialogs (both default to "No, exit"). This mirrors t3code, which runs Claude
-    // through the Agent SDK with bypassPermissions and never shows them.
     if profile.harness.kind == HarnessKind::Claude {
-        let path = claude_state.map_or_else(default_claude_state_path, Ok)?;
-        if let Err(e) = prepare_claude_config(&path, &work_dir, runtime_mode == RuntimeMode::Autopilot) {
-            if claude_profile.is_some() {
-                return Err(e).with_context(|| format!("preparing Claude Code config at {}", path.display()));
-            }
-            eprintln!("axel: could not prepare Claude Code config for {}: {e}", work_dir.display());
-        }
+        prepare_claude_state(claude_state, claude_profile.is_some(), &work_dir, runtime_mode)?;
     }
 
     // 5. Session, signed by the agent itself.
@@ -246,53 +174,265 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
             resumed_from: resume.as_ref().and(last_session_id(ctx, &thread.id)),
         },
     )?;
+    assert_eq!(session.thread_id, thread.id, "the store starts the session on the thread asked for");
+    assert_eq!(session.agent_pubkey, agent.pubkey, "the store starts the session for the agent asked for");
     if let Some(parent) = &parent_session {
         ctx.store.link_session(&session.id, parent)?;
     }
     ctx.store.touch_agent(&agent.pubkey)?;
 
     // 6. Command line.
-    let prompt = match &opts.prompt {
-        Some(p) => p.clone(),
-        None if req.thread_id.is_some() => format!("{}\n\n(You are joining an existing thread. Read the inbox with `axel inbox` for context.)", thread.intent),
-        None => thread.intent.clone(),
-    };
+    let prompt = first_prompt(opts.prompt.as_deref(), req.thread_id.is_some(), &thread.intent);
     let mut spec = cfg_launch::build(&profile, if resume.is_some() { None } else { Some(&prompt) });
-    if let Some(hs) = &resume {
-        match profile.harness.kind {
-            HarnessKind::Claude => {
-                let mut args = vec!["--resume".to_string(), hs.clone()];
-                args.append(&mut spec.args);
-                spec.args = args;
-            }
-            HarnessKind::Codex => {
-                // `codex resume <id>` is a subcommand: it must come right after the program.
-                let mut args = vec!["resume".to_string(), hs.clone()];
-                args.append(&mut spec.args);
-                spec.args = args;
-            }
-            _ => {}
+    if let Some(harness_session) = &resume {
+        prepend_resume(&mut spec, profile.harness.kind, harness_session);
+    }
+    finish_spec(&mut spec, &profile, &agent, &work_dir, runtime_mode)?;
+    push_session_env(&mut spec, &thread.id, &session.id, &agent, &profile, runtime_mode);
+    if runtime == SessionRuntime::Pane {
+        apply_pane_only(&mut spec, &agent, claude_profile.as_ref())?;
+    }
+    if !work_dir.is_dir() {
+        bail!("workspace directory does not exist: {}", work_dir.display());
+    }
+    let label = format!("{} · {}", agent.name, truncate(&thread.title, LABEL_TITLE_CHARS_MAX));
+    let started = Started { thread, session, agent, agent_kp, work_dir, label };
+
+    // Managed runtime: the harness is driven over ACP by `axel session host`,
+    // which runs in its own pane (that pane is the raw log). The caller opens
+    // the thread view wherever it likes.
+    if runtime == SessionRuntime::Managed {
+        let attachments: Vec<PathBuf> = opts.attachments.iter().chain(req.attachments.iter()).cloned().collect();
+        return start_managed(ctx, started, &spec, &prompt, &attachments, resume);
+    }
+    match (&ctx.rex, opts.target) {
+        (None, _) => start_inline(ctx, started, spec, None),
+        (Some(rex), Target::Here) => start_inline(ctx, started, spec, Some(rex)),
+        (Some(rex), Target::NewWindow) => start_window(ctx, started, &spec, rex),
+    }
+}
+
+/// The agent a launch is for, once policy lets it run.
+struct Cleared {
+    agent: axel_store::Agent,
+    agent_kp: axel_identity::Keypair,
+    /// The session that summoned this one, when an agent did.
+    parent_session: Option<String>,
+    /// The agent's mode, narrowed to its summoner's.
+    runtime_mode: RuntimeMode,
+}
+
+/// Find the agent, the key that signs for it, and whether policy lets it be
+/// launched from here.
+fn clear_agent(ctx: &Ctx, req: &LaunchRequest) -> Result<Cleared> {
+    let agent = ctx
+        .store
+        .agent_by_pubkey(&req.agent_pubkey)?
+        .with_context(|| format!("agent {} not found", req.agent_pubkey))?;
+    // The agent's key, or (on a remote host) this host's key under the
+    // agent's delegation for the thread.
+    let agent_kp = ctx
+        .agent_signer(&req.agent_pubkey, req.thread_id.as_deref())
+        .with_context(|| format!("refusing to launch {}: its key is missing from the keystore", agent.name))?;
+    // Reach, loops, depth and budget; a summoned session never runs broader
+    // than the session that summoned it.
+    let (parent_session, mode_cap) = super::policy::check_summon(ctx, &agent.pubkey)
+        .with_context(|| format!("refusing to launch {}", agent.name))?;
+    let runtime_mode = mode_cap.map_or(agent.runtime_mode, |cap| axel_store::narrower(agent.runtime_mode, cap));
+    Ok(Cleared { agent, agent_kp, parent_session, runtime_mode })
+}
+
+/// The agent's first message: the caller's, else the thread's intent (with a
+/// pointer to the inbox when joining a thread already under way).
+fn first_prompt(prompt: Option<&str>, joining: bool, intent: &str) -> String {
+    match prompt {
+        Some(p) => p.to_string(),
+        None if joining => format!("{intent}\n\n(You are joining an existing thread. Read the inbox with `axel inbox` for context.)"),
+        None => intent.to_string(),
+    }
+}
+
+/// Longest thread title, in characters, shown in a session's pane label.
+const LABEL_TITLE_CHARS_MAX: usize = 40;
+
+/// What a launch has made by the time it starts the harness somewhere.
+struct Started {
+    thread: axel_store::Thread,
+    session: axel_store::Session,
+    agent: axel_store::Agent,
+    agent_kp: axel_identity::Keypair,
+    work_dir: PathBuf,
+    label: String,
+}
+
+/// Remember which Rex host this environment is, the first time we see one.
+fn record_rex_host(ctx: &Ctx, env: &axel_store::Environment) {
+    if env.rex_host_id.is_some() {
+        return;
+    }
+    let Some(host) = ctx.rex.as_ref().and_then(|r| r.host_id().ok()) else { return };
+    // Best effort: the next launch tries again, and nothing reads it before then.
+    ctx.store.set_environment_rex_host(&env.id, &host).ok();
+}
+
+/// Where the agent works, and that project's repository key: the caller's
+/// worktree (a remote job), the new thread's projects, the existing thread's
+/// first project on this machine, or else a scratch directory.
+fn resolve_work_dir(
+    ctx: &Ctx,
+    req: &LaunchRequest,
+    opts: &LaunchOptions,
+    owner: &axel_identity::Keypair,
+    environment_id: &str,
+    thread: &axel_store::Thread,
+) -> Result<(PathBuf, Option<String>)> {
+    let primary = if let Some(dir) = &opts.work_dir {
+        // A remote job: the worktree was prepared by the caller.
+        Some((dir.clone(), repo_key(dir)))
+    } else if req.thread_id.is_none() {
+        attach_projects(ctx, req, owner, environment_id, &thread.id)?
+    } else {
+        existing_project_dir(ctx, &thread.id)?
+    };
+    if let Some(found) = primary {
+        return Ok(found);
+    }
+    let id_prefix = thread.id.get(..8).unwrap_or(&thread.id);
+    let dir = paths::home().join("scratch").join(format!("{}-{id_prefix}", axel_tui::slugify(&thread.title)));
+    std::fs::create_dir_all(&dir)?;
+    if req.thread_id.is_none() {
+        let ws = ThreadWorkspace { kind: WorkspaceKind::Scratch, branch: None, worktree_path: None };
+        ctx.store.attach_project(owner, &thread.id, None, &dir, &ws)?;
+    }
+    Ok((dir, None))
+}
+
+/// A new thread: record and attach each requested project, preparing its
+/// workspace.  The first one is where the agent works.
+fn attach_projects(
+    ctx: &Ctx,
+    req: &LaunchRequest,
+    owner: &axel_identity::Keypair,
+    environment_id: &str,
+    thread_id: &str,
+) -> Result<Option<(PathBuf, Option<String>)>> {
+    let mut primary = None;
+    for p in &req.projects {
+        // A path that can't be canonicalized is still the user's choice; keep it as given.
+        let path = std::fs::canonicalize(p).unwrap_or(p.clone());
+        let key = repo_key(&path);
+        ctx.store.upsert_project(environment_id, &path, key.as_deref())?;
+        let (work_dir, ws) = prepare_workspace(&path, req.workspace, req.branch.as_deref(), &axel_tui::util::title_line(&req.title))?;
+        ctx.store.attach_project(owner, thread_id, key.as_deref(), &path, &ws)?;
+        if primary.is_none() {
+            primary = Some((work_dir, key));
         }
     }
-    inject_runtime_mode(&mut spec, profile.harness.kind, runtime_mode);
-    inject_hooks(&mut spec, profile.harness.kind)?;
+    Ok(primary)
+}
+
+/// Spawning onto a thread: its first project that exists on this replica.
+fn existing_project_dir(ctx: &Ctx, thread_id: &str) -> Result<Option<(PathBuf, Option<String>)>> {
+    for tp in ctx.store.thread_projects(thread_id)? {
+        let local = tp
+            .local_project_id
+            .as_deref()
+            .and_then(|id| ctx.store.get_project(id).ok().flatten())
+            .map(|p| p.path)
+            .or_else(|| tp.path_hint.is_dir().then(|| tp.path_hint.clone()));
+        if let Some(path) = local {
+            let dir = tp.workspace.worktree_path.clone().filter(|w| w.is_dir()).unwrap_or(path);
+            return Ok(Some((dir, tp.repo_key.clone())));
+        }
+    }
+    Ok(None)
+}
+
+/// Picking the project in the launcher is the trust decision, and picking
+/// autopilot is the permissions decision: pre-answer Claude Code's two startup
+/// dialogs (both default to "No, exit"). This mirrors t3code, which runs Claude
+/// through the Agent SDK with bypassPermissions and never shows them.  Only an
+/// agent with its own Claude profile fails the launch when that can't be done.
+fn prepare_claude_state(state: Option<PathBuf>, has_profile: bool, work_dir: &Path, runtime_mode: RuntimeMode) -> Result<()> {
+    let path = state.map_or_else(default_claude_state_path, Ok)?;
+    if let Err(e) = prepare_claude_config(&path, work_dir, runtime_mode == RuntimeMode::Autopilot) {
+        if has_profile {
+            return Err(e).with_context(|| format!("preparing Claude Code config at {}", path.display()));
+        }
+        eprintln!("axel: could not prepare Claude Code config for {}: {e}", work_dir.display());
+    }
+    Ok(())
+}
+
+/// The runtime mode's flags, the hooks, and (for Claude Code) Axel's skill,
+/// identity and tools.
+fn finish_spec(
+    spec: &mut cfg_launch::LaunchSpec,
+    profile: &AgentProfile,
+    agent: &axel_store::Agent,
+    work_dir: &Path,
+    runtime_mode: RuntimeMode,
+) -> Result<()> {
+    inject_runtime_mode(spec, profile.harness.kind, runtime_mode);
+    inject_hooks(spec, profile.harness.kind)?;
     if profile.harness.kind == HarnessKind::Claude {
-        // The axel skill and who-you-are, for pane sessions; managed sessions
-        // get the same through the adapter (`session_meta`).
-        let mut args = vec!["--append-system-prompt".to_string(), system_prompt(&agent, &work_dir)];
-        match write_axel_plugin() {
-            Ok(dir) => args.extend(["--plugin-dir".to_string(), dir.to_string_lossy().into_owned()]),
-            Err(e) => eprintln!("axel: could not write the axel skill plugin: {e}"),
-        }
-        // Axel's tools; the server inherits the pane's AXEL_* identity.
-        let mcp = serde_json::json!({ "mcpServers": { MCP_SERVER: { "command": axel_exe(), "args": ["mcp"] } } });
-        // `=` form: both flags take lists, so a bare value would swallow a prompt argument after it.
-        args.extend([format!("--mcp-config={mcp}"), format!("--allowedTools={MCP_ALLOW}")]);
-        args.append(&mut spec.args);
-        spec.args = args;
+        prepend_claude_axel_args(spec, agent, work_dir);
     }
-    spec.env.push(("AXEL_THREAD".into(), thread.id.clone()));
-    spec.env.push(("AXEL_SESSION".into(), session.id.clone()));
+    Ok(())
+}
+
+/// What only a pane session needs: a managed session's host applies the
+/// effort and the Claude profile itself (see `axel session host`).
+fn apply_pane_only(spec: &mut cfg_launch::LaunchSpec, agent: &axel_store::Agent, claude_profile: Option<&ClaudeProfile>) -> Result<()> {
+    // The agent's reasoning effort, by the harness's own flag.
+    super::effort::pane(&agent.harness, spec, agent.effort, |w| eprintln!("axel: {w}"));
+    if let Some(profile) = claude_profile {
+        spec.env.retain(|(key, _)| !profile.overrides(key));
+        profile.wrap(&mut spec.program, &mut spec.args)?;
+    }
+    Ok(())
+}
+
+/// Continue the harness's own conversation `harness_session` instead of a new one.
+fn prepend_resume(spec: &mut cfg_launch::LaunchSpec, kind: HarnessKind, harness_session: &str) {
+    let mut args = match kind {
+        HarnessKind::Claude => vec!["--resume".to_string(), harness_session.to_string()],
+        // `codex resume <id>` is a subcommand: it must come right after the program.
+        HarnessKind::Codex => vec!["resume".to_string(), harness_session.to_string()],
+        HarnessKind::Opencode | HarnessKind::Custom => return,
+    };
+    args.append(&mut spec.args);
+    spec.args = args;
+}
+
+/// The axel skill and who-you-are, for pane sessions; managed sessions get
+/// the same through the adapter (`session_meta`).  Then Axel's MCP tools.
+fn prepend_claude_axel_args(spec: &mut cfg_launch::LaunchSpec, agent: &axel_store::Agent, work_dir: &Path) {
+    let mut args = vec!["--append-system-prompt".to_string(), system_prompt(agent, work_dir)];
+    match write_axel_plugin() {
+        Ok(dir) => args.extend(["--plugin-dir".to_string(), dir.to_string_lossy().into_owned()]),
+        Err(e) => eprintln!("axel: could not write the axel skill plugin: {e}"),
+    }
+    // Axel's tools; the server inherits the pane's AXEL_* identity.
+    let mcp = serde_json::json!({ "mcpServers": { MCP_SERVER: { "command": axel_exe(), "args": ["mcp"] } } });
+    // `=` form: both flags take lists, so a bare value would swallow a prompt argument after it.
+    args.extend([format!("--mcp-config={mcp}"), format!("--allowedTools={MCP_ALLOW}")]);
+    args.append(&mut spec.args);
+    spec.args = args;
+}
+
+/// The session's identity for hooks and tools, and a PATH and program that
+/// work in a Rex pane.
+fn push_session_env(
+    spec: &mut cfg_launch::LaunchSpec,
+    thread_id: &str,
+    session_id: &str,
+    agent: &axel_store::Agent,
+    profile: &AgentProfile,
+    runtime_mode: RuntimeMode,
+) {
+    spec.env.push(("AXEL_THREAD".into(), thread_id.to_string()));
+    spec.env.push(("AXEL_SESSION".into(), session_id.to_string()));
     spec.env.push(("AXEL_AGENT".into(), agent.pubkey.clone()));
     spec.env.push(("AXEL_AGENT_NAME".into(), agent.name.clone()));
     spec.env.push(("AXEL_RUNTIME_MODE".into(), runtime_mode.to_string()));
@@ -301,6 +441,7 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     if !profile.disallowed_tools.is_empty() {
         spec.env.push(("AXEL_DISALLOWED_TOOLS".into(), profile.disallowed_tools.join(",")));
     }
+    // Without our own path, hooks fall back to `axel` on PATH.
     if let Ok(exe) = std::env::current_exe() {
         spec.env.push(("AXEL_BIN".into(), exe.to_string_lossy().into_owned()));
     }
@@ -312,95 +453,90 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     if let Ok(path) = std::env::var("PATH") {
         spec.env.push(("PATH".into(), path));
     }
-    if runtime == SessionRuntime::Pane {
-        // The agent's reasoning effort, by the harness's own flag (a managed
-        // session's host applies it instead; see `axel session host`).
-        super::effort::pane(&agent.harness, &mut spec, agent.effort, |w| eprintln!("axel: {w}"));
-        if let Some(profile) = &claude_profile {
-            spec.env.retain(|(key, _)| !profile.overrides(key));
-            profile.wrap(&mut spec.program, &mut spec.args)?;
-        }
-    }
-    if !work_dir.is_dir() {
-        bail!("workspace directory does not exist: {}", work_dir.display());
-    }
-    let label = format!("{} · {}", agent.name, truncate(&thread.title, 40));
+}
 
-    // Managed runtime: the harness is driven over ACP by `axel session host`,
-    // which runs in its own pane (that pane is the raw log). The caller opens
-    // the thread view wherever it likes.
-    if runtime == SessionRuntime::Managed {
-        // Resuming: the host loads this conversation (`session/load`).
-        ctx.store.update_session(
-            &agent_kp,
-            &session.id,
-            &SessionUpdate { state: Some(SessionState::Starting), harness_session_id: resume.clone(), ..Default::default() },
-        )?;
-        let axel = std::env::current_exe().context("locating axel")?.to_string_lossy().into_owned();
-        let mut host_spec = cfg_launch::LaunchSpec { program: axel, args: vec!["session".into(), "host".into(), session.id.clone()], env: vec![] };
-        // The host reads what it needs from the store; pass only process env.
-        for (k, v) in &spec.env {
-            if k == "PATH" || k.starts_with("ANTHROPIC_") || k.starts_with("OPENAI_") || k.starts_with("CODEX_") || k == "AXEL_API_KEY_ENV" || k.starts_with("AXEL_") {
-                host_spec.env.push((k.clone(), v.clone()));
-            }
-        }
-        host_spec.env.push(("AXEL_PROMPT".into(), prompt.clone()));
-        // Summoned by another agent: the first message is from it, not the owner.
-        if let Some(from) = super::policy::caller_agent().filter(|pk| *pk != agent.pubkey) {
-            host_spec.env.push(("AXEL_PROMPT_FROM".into(), from));
-        }
-        let attachments: Vec<PathBuf> = opts.attachments.iter().chain(req.attachments.iter()).cloned().collect();
-        if !attachments.is_empty() {
-            let joined = attachments.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n");
-            host_spec.env.push(("AXEL_ATTACHMENTS".into(), joined));
-        }
-        host_spec.env.push(("AXEL_CWD".into(), work_dir.to_string_lossy().into_owned()));
-        let Some(rex) = &ctx.rex else {
-            return Ok(Launched::Managed { thread_id: thread.id, session_id: session.id, host_window: None, host_spec: Some(host_spec) });
-        };
-        let mut command = vec![host_spec.program.clone()];
-        command.extend(host_spec.args.iter().cloned());
-        let pane_label = format!("{label}{}", super::ui::AGENT_PANE_SUFFIX);
-        // The session host runs out of sight, in no window: the thread's own
-        // pane reports each agent's status to Rex (see `ui::run_stream`).
-        // The thread's window is still its window, for focusing it.
-        let window_id = super::ui::window_of_block(rex, &rex.env().block).ok().flatten().unwrap_or_default();
-        let block = Some(
-            rex.new_detached_terminal(&pane_label, &command, Some(&work_dir), &host_spec.env)
-                .context("starting the session host in Rex")?,
-        );
-        ctx.store.update_session(
-            &agent_kp,
-            &session.id,
-            &SessionUpdate { rex: Some((Some(rex.env().session.clone()), Some(window_id.clone()), block)), ..Default::default() },
-        )?;
-        return Ok(Launched::Managed { thread_id: thread.id, session_id: session.id, host_window: Some(window_id), host_spec: None });
-    }
+/// Whether the session host should inherit this variable of the session's
+/// environment: the host reads what it needs from the store, so only process
+/// environment (credentials, PATH, Axel's own) goes through.
+fn host_keeps_env(key: &str) -> bool {
+    key == "PATH" || key.starts_with("ANTHROPIC_") || key.starts_with("OPENAI_") || key.starts_with("CODEX_") || key.starts_with("AXEL_")
+}
 
-    let here = match (&ctx.rex, target) {
-        (None, _) => None,
-        (Some(rex), Target::Here) => Some(rex),
-        (Some(_), Target::NewWindow) => None,
+/// A managed session: `axel session host` drives the harness over ACP, in a
+/// detached Rex terminal, or (outside Rex) in a process the caller execs.
+fn start_managed(
+    ctx: &Ctx,
+    started: Started,
+    spec: &cfg_launch::LaunchSpec,
+    prompt: &str,
+    attachments: &[PathBuf],
+    resume: Option<String>,
+) -> Result<Launched> {
+    let Started { thread, session, agent, agent_kp, work_dir, label } = started;
+    // Resuming: the host loads this conversation (`session/load`).
+    ctx.store.update_session(
+        &agent_kp,
+        &session.id,
+        &SessionUpdate { state: Some(SessionState::Starting), harness_session_id: resume, ..Default::default() },
+    )?;
+    let axel = std::env::current_exe().context("locating axel")?.to_string_lossy().into_owned();
+    let mut host_spec = cfg_launch::LaunchSpec { program: axel, args: vec!["session".into(), "host".into(), session.id.clone()], env: vec![] };
+    for (k, v) in spec.env.iter().filter(|(k, _)| host_keeps_env(k)) {
+        host_spec.env.push((k.clone(), v.clone()));
+    }
+    host_spec.env.push(("AXEL_PROMPT".into(), prompt.to_string()));
+    // Summoned by another agent: the first message is from it, not the owner.
+    if let Some(from) = super::policy::caller_agent().filter(|pk| *pk != agent.pubkey) {
+        host_spec.env.push(("AXEL_PROMPT_FROM".into(), from));
+    }
+    if !attachments.is_empty() {
+        let joined = attachments.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n");
+        host_spec.env.push(("AXEL_ATTACHMENTS".into(), joined));
+    }
+    host_spec.env.push(("AXEL_CWD".into(), work_dir.to_string_lossy().into_owned()));
+    let Some(rex) = &ctx.rex else {
+        return Ok(Launched::Managed { thread_id: thread.id, session_id: session.id, host_window: None, host_spec: Some(host_spec) });
     };
-    if here.is_some() || ctx.rex.is_none() {
-        let rex_ids = here.map(|rex| {
-            let block = rex.env().block.clone();
-            let window = super::ui::window_of_block(rex, &block).ok().flatten();
-            (Some(rex.env().session.clone()), window, Some(block))
-        });
-        ctx.store.update_session(&agent_kp, &session.id, &SessionUpdate { state: Some(SessionState::Running), rex: rex_ids, ..Default::default() })?;
-        ctx.store.record_status(
-            &agent_kp,
-            &session.id,
-            &StatusReport { state: StatusState::Working, kind: None, title: Some(thread.title.clone()), msg: Some("starting".into()), progress: None },
-        )?;
-        // cwd for the exec'd harness.
-        spec.env.push(("AXEL_CWD".into(), work_dir.to_string_lossy().into_owned()));
-        return Ok(Launched::Inline { spec, label, thread_id: thread.id, session_id: session.id });
-    }
-    let rex = ctx.rex.as_ref().expect("checked above");
+    let mut command = vec![host_spec.program.clone()];
+    command.extend(host_spec.args.iter().cloned());
+    let pane_label = format!("{label}{}", super::ui::AGENT_PANE_SUFFIX);
+    // The session host runs out of sight, in no window: the thread's own
+    // pane reports each agent's status to Rex (see `ui::run_stream`).
+    // The thread's window is still its window, for focusing it; without one
+    // the session simply has none to focus.
+    let window_id = super::ui::window_of_block(rex, &rex.env().block).ok().flatten().unwrap_or_default();
+    let block = Some(
+        rex.new_detached_terminal(&pane_label, &command, Some(&work_dir), &host_spec.env)
+            .context("starting the session host in Rex")?,
+    );
+    ctx.store.update_session(
+        &agent_kp,
+        &session.id,
+        &SessionUpdate { rex: Some((Some(rex.env().session.clone()), Some(window_id.clone()), block)), ..Default::default() },
+    )?;
+    Ok(Launched::Managed { thread_id: thread.id, session_id: session.id, host_window: Some(window_id), host_spec: None })
+}
 
-    // 7. Rex window.
+/// The harness runs in this very process: outside Rex, or (`rex` given) in
+/// the calling pane.
+fn start_inline(ctx: &Ctx, started: Started, mut spec: cfg_launch::LaunchSpec, rex: Option<&axel_rex::Rex>) -> Result<Launched> {
+    let Started { thread, session, agent_kp, work_dir, label, .. } = started;
+    let rex_ids = rex.map(|rex| {
+        let block = rex.env().block.clone();
+        // A pane whose window can't be found still runs; it just can't be focused by window.
+        let window = super::ui::window_of_block(rex, &block).ok().flatten();
+        (Some(rex.env().session.clone()), window, Some(block))
+    });
+    ctx.store.update_session(&agent_kp, &session.id, &SessionUpdate { state: Some(SessionState::Running), rex: rex_ids, ..Default::default() })?;
+    record_starting(ctx, &agent_kp, &session.id, &thread.title)?;
+    // cwd for the exec'd harness.
+    spec.env.push(("AXEL_CWD".into(), work_dir.to_string_lossy().into_owned()));
+    Ok(Launched::Inline { spec, label, thread_id: thread.id, session_id: session.id })
+}
+
+/// 7. The harness in a new Rex window.
+fn start_window(ctx: &Ctx, started: Started, spec: &cfg_launch::LaunchSpec, rex: &axel_rex::Rex) -> Result<Launched> {
+    let Started { thread, session, agent_kp, work_dir, label, .. } = started;
     let mut command = vec![spec.program.clone()];
     command.extend(spec.args.iter().cloned());
     let window = rex
@@ -416,12 +552,17 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
             ..Default::default()
         },
     )?;
-    ctx.store.record_status(
-        &agent_kp,
-        &session.id,
-        &StatusReport { state: StatusState::Working, kind: None, title: Some(thread.title.clone()), msg: Some("starting".into()), progress: None },
-    )?;
+    record_starting(ctx, &agent_kp, &session.id, &thread.title)?;
     Ok(Launched::RexWindow { window_id: window.window_id, thread_id: thread.id, session_id: session.id })
+}
+
+fn record_starting(ctx: &Ctx, agent_kp: &axel_identity::Keypair, session_id: &str, title: &str) -> Result<()> {
+    ctx.store.record_status(
+        agent_kp,
+        session_id,
+        &StatusReport { state: StatusState::Working, kind: None, title: Some(title.to_string()), msg: Some("starting".into()), progress: None },
+    )?;
+    Ok(())
 }
 
 fn last_session_id(ctx: &Ctx, thread_id: &str) -> Option<String> {
@@ -469,22 +610,22 @@ pub fn prepare_claude_config(path: &Path, dir: &Path, autopilot: bool) -> Result
     }
     let mut changed = false;
     let key = dir.to_string_lossy().into_owned();
-    let projects = root.as_object_mut().unwrap().entry("projects").or_insert_with(|| serde_json::json!({}));
+    let projects = root.as_object_mut().expect("checked to be an object above").entry("projects").or_insert_with(|| serde_json::json!({}));
     if !projects.is_object() {
         *projects = serde_json::json!({});
     }
-    let entry = projects.as_object_mut().unwrap().entry(key).or_insert_with(|| serde_json::json!({}));
+    let entry = projects.as_object_mut().expect("replaced by an object above when it was not one").entry(key).or_insert_with(|| serde_json::json!({}));
     if !entry.is_object() {
         *entry = serde_json::json!({});
     }
     if entry.get("hasTrustDialogAccepted").and_then(|v| v.as_bool()) != Some(true) {
-        entry.as_object_mut().unwrap().insert("hasTrustDialogAccepted".into(), serde_json::Value::Bool(true));
+        entry.as_object_mut().expect("replaced by an object above when it was not one").insert("hasTrustDialogAccepted".into(), serde_json::Value::Bool(true));
         changed = true;
     }
     // Autopilot runs with --dangerously-skip-permissions; pre-accept Claude
     // Code's one-time bypass-permissions warning so the pane doesn't block on it.
     if autopilot && root.get("bypassPermissionsModeAccepted").and_then(|v| v.as_bool()) != Some(true) {
-        root.as_object_mut().unwrap().insert("bypassPermissionsModeAccepted".into(), serde_json::Value::Bool(true));
+        root.as_object_mut().expect("checked to be an object above").insert("bypassPermissionsModeAccepted".into(), serde_json::Value::Bool(true));
         changed = true;
     }
     if !changed {
@@ -583,7 +724,16 @@ fn exclude_from_git(dir: &Path, paths: &[PathBuf]) {
     };
     let top = PathBuf::from(&top).canonicalize().unwrap_or_else(|_| PathBuf::from(&top));
     let exclude = PathBuf::from(exclude);
-    let have = std::fs::read_to_string(&exclude).unwrap_or_default();
+    // A read failure other than "not there yet" stops here: writing would
+    // replace a file we couldn't read.
+    let have = match std::fs::read_to_string(&exclude) {
+        Ok(have) => have,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            eprintln!("axel: could not read {}: {e}; skill links stay visible to git", exclude.display());
+            return;
+        }
+    };
     let mut add = String::new();
     for p in paths {
         let abs = p.parent().and_then(|d| d.canonicalize().ok()).map(|d| d.join(p.file_name().unwrap_or_default())).unwrap_or_else(|| p.clone());
@@ -597,12 +747,16 @@ fn exclude_from_git(dir: &Path, paths: &[PathBuf]) {
     if add.is_empty() {
         return;
     }
+    // A failure here surfaces as the write's error just below.
     if let Some(parent) = exclude.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let sep = if have.is_empty() || have.ends_with('\n') { "" } else { "\n" };
     let header = if have.contains("# axel:") { "" } else { "# axel: skill links installed for agents on this machine\n" };
-    let _ = std::fs::write(&exclude, format!("{have}{sep}{header}{add}"));
+    // The links still work; git just sees them, so this is a warning, not a failed launch.
+    if let Err(e) = std::fs::write(&exclude, format!("{have}{sep}{header}{add}")) {
+        eprintln!("axel: could not update {}: {e}; skill links stay visible to git", exclude.display());
+    }
 }
 
 pub fn project_skills(config: Option<&WorkspaceConfig>) -> Result<axel_config::IndexMap<String, axel_config::Skill>> {
@@ -682,7 +836,7 @@ fn inject_hooks(spec: &mut cfg_launch::LaunchSpec, kind: HarnessKind) -> Result<
             spec.args = args;
         }
         HarnessKind::Codex => {
-            let axel = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
+            let axel = axel_exe();
             let mut args = vec!["-c".to_string(), format!(r#"notify=["{axel}","hook","codex"]"#)];
             args.append(&mut spec.args);
             spec.args = args;
@@ -761,24 +915,23 @@ pub fn identity_prompt(agent: &axel_store::Agent) -> String {
 pub fn write_claude_hooks() -> Result<PathBuf> {
     let dir = paths::hooks_dir();
     std::fs::create_dir_all(&dir)?;
-    let axel = std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "axel".into());
-    let hook = |timeout: u64| {
-        serde_json::json!([{ "hooks": [{ "type": "command", "command": format!("{axel} hook claude"), "timeout": timeout }] }])
+    let axel = axel_exe();
+    let hook = |timeout_secs: u64| {
+        serde_json::json!([{ "hooks": [{ "type": "command", "command": format!("{axel} hook claude"), "timeout": timeout_secs }] }])
     };
-    let wait = hook_wait_secs();
+    // The permission hook outlives its wait for the owner's answer by a margin.
+    let permission_timeout_secs = hook_wait_secs().max(HOOK_TIMEOUT_SECS).saturating_add(5);
     let settings = serde_json::json!({
         "hooks": {
-            "SessionStart": hook(10),
-            "UserPromptSubmit": hook(10),
-            "PreToolUse": hook(10),
-            "PostToolUse": hook(10),
-            "Notification": hook(10),
-            "PermissionRequest": hook(wait.max(10) + 5),
-            "Stop": hook(10),
-            "SubagentStop": hook(10),
-            "SessionEnd": hook(10)
+            "SessionStart": hook(HOOK_TIMEOUT_SECS),
+            "UserPromptSubmit": hook(HOOK_TIMEOUT_SECS),
+            "PreToolUse": hook(HOOK_TIMEOUT_SECS),
+            "PostToolUse": hook(HOOK_TIMEOUT_SECS),
+            "Notification": hook(HOOK_TIMEOUT_SECS),
+            "PermissionRequest": hook(permission_timeout_secs),
+            "Stop": hook(HOOK_TIMEOUT_SECS),
+            "SubagentStop": hook(HOOK_TIMEOUT_SECS),
+            "SessionEnd": hook(HOOK_TIMEOUT_SECS)
         }
     });
     let path = dir.join("claude.json");
@@ -793,13 +946,11 @@ pub fn write_claude_hooks() -> Result<PathBuf> {
 pub fn write_claude_guard_hooks() -> Result<PathBuf> {
     let dir = paths::hooks_dir();
     std::fs::create_dir_all(&dir)?;
-    let axel = std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "axel".into());
+    let axel = axel_exe();
     let settings = serde_json::json!({
         "permissions": { "allow": [MCP_ALLOW] },
         "hooks": {
-            "PreToolUse": [{ "hooks": [{ "type": "command", "command": format!("{axel} hook claude --guard-only"), "timeout": 10 }] }]
+            "PreToolUse": [{ "hooks": [{ "type": "command", "command": format!("{axel} hook claude --guard-only"), "timeout": HOOK_TIMEOUT_SECS }] }]
         }
     });
     let path = dir.join("claude-guard.json");
@@ -808,10 +959,19 @@ pub fn write_claude_guard_hooks() -> Result<PathBuf> {
 }
 
 /// How long a `PermissionRequest` hook waits for an answer from the Axel inbox
-/// before letting Claude Code show its own prompt. 0 disables waiting.
+/// before letting Claude Code show its own prompt. 0 disables waiting; at most
+/// [`HOOK_WAIT_SECS_MAX`].
 pub fn hook_wait_secs() -> u64 {
-    std::env::var("AXEL_HOOK_WAIT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    std::env::var("AXEL_HOOK_WAIT_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0).min(HOOK_WAIT_SECS_MAX)
 }
+
+/// How long Claude Code may run each of Axel's hooks.  A hook's own work
+/// (a status row, a checkpoint within `hook::HOOK_BUDGET`) fits well inside.
+pub const HOOK_TIMEOUT_SECS: u64 = 10;
+
+/// The longest a permission hook waits for the owner: an hour.  Past that the
+/// owner is away, and the agent's pane shows Claude Code's own prompt instead.
+pub const HOOK_WAIT_SECS_MAX: u64 = 60 * 60;
 
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
