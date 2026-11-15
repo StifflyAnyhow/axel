@@ -30,7 +30,7 @@
 pub mod tools;
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::agent_rpc::{Client, Lines, RpcError, RpcResult};
+use crate::agent_rpc::{Client, Lines, RpcError, RpcResult, bounded_lines};
 use crate::usage::{CodexMeter, codex_limits, limits_params};
 
 /// codex-acp's `/init` prompt.
@@ -100,11 +100,43 @@ impl Drop for Codex {
     }
 }
 
-/// Per-item state while a turn runs.
+/// The most of one command's output kept while it runs.  Axel's host stores
+/// 16 KiB of a tool's output; 1 MiB leaves room for a client that shows
+/// more, without holding a runaway build log whole.
+const COMMAND_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
+
+/// A running command's output, up to [`COMMAND_OUTPUT_LIMIT_BYTES`].
+#[derive(Default)]
+struct CommandOutput {
+    text: String,
+    is_cut: bool,
+}
+
+impl CommandOutput {
+    fn push(&mut self, delta: &str) {
+        if self.is_cut {
+            return;
+        }
+        let room_bytes = COMMAND_OUTPUT_LIMIT_BYTES.saturating_sub(self.text.len());
+        if delta.len() <= room_bytes {
+            self.text.push_str(delta);
+            return;
+        }
+        let mut end = room_bytes;
+        while !delta.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.text.push_str(&delta[..end]);
+        self.text.push_str("\n[output cut]\n");
+        self.is_cut = true;
+    }
+}
+
+/// Per-item state while a turn runs (one turn's items, dropped when it ends).
 #[derive(Default)]
 struct Items {
     /// Output collected per command, shown when it ends.
-    output: HashMap<String, String>,
+    output: HashMap<String, CommandOutput>,
     extension: HashMap<String, Option<String>>,
     /// Items whose text arrived as deltas (so the full text isn't sent again).
     streamed: HashSet<String>,
@@ -131,7 +163,7 @@ struct Agent {
 pub fn serve_stdio() -> anyhow::Result<()> {
     let client = Arc::new(Client::stdio());
     let agent = Arc::new(Agent { client: client.clone(), sessions: Mutex::new(HashMap::new()) });
-    for line in std::io::stdin().lock().lines() {
+    for line in bounded_lines(std::io::stdin().lock(), "axel codex-acp") {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         let Some(method) = msg.get("method").and_then(Value::as_str).map(String::from) else {
@@ -430,7 +462,7 @@ impl Agent {
                 "item/reasoning/summaryPartAdded" => self.text(s, "agent_thought_chunk", "\n\n"),
                 "item/commandExecution/outputDelta" => {
                     let id = p.get("itemId").and_then(Value::as_str).unwrap_or("").to_string();
-                    items.output.entry(id).or_default().push_str(p.get("delta").and_then(Value::as_str).unwrap_or(""));
+                    items.output.entry(id).or_default().push(p.get("delta").and_then(Value::as_str).unwrap_or(""));
                 }
                 "turn/plan/updated" => {
                     let entries: Vec<Value> = p
@@ -548,7 +580,7 @@ impl Agent {
             }
             "commandExecution" => {
                 let status = item.get("status").and_then(Value::as_str);
-                let mut output = items.output.remove(&id).unwrap_or_default();
+                let mut output = items.output.remove(&id).map(|o| o.text).unwrap_or_default();
                 if output.is_empty() {
                     output = item.get("aggregatedOutput").and_then(Value::as_str).unwrap_or("").to_string();
                 }
@@ -726,7 +758,7 @@ fn spawn_codex(cwd: &PathBuf) -> Result<Arc<Codex>, RpcError> {
     let codex = Arc::new(Codex { stdin: Lines::new(stdin), child: Mutex::new(child), next_id: AtomicU64::new(1), pending: Mutex::new(HashMap::new()), events: Mutex::new(rx) });
     let reader = codex.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        for line in bounded_lines(BufReader::new(stdout), "axel codex-acp").map_while(Result::ok) {
             let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
             if msg.get("method").is_none() {
                 let Some(id) = msg.get("id").and_then(Value::as_u64) else { continue };

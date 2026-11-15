@@ -17,6 +17,11 @@ use serde::{Deserialize, Serialize};
 /// How long [`send`] waits to connect, write and read.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The longest reply [`send`] reads.  Replies are a status or an error
+/// message; 1 MiB is far beyond either, and a broken host can't make the
+/// client hold more.
+const REPLY_LIMIT_BYTES: u64 = 1024 * 1024;
+
 /// What a client can ask the host to do.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -96,7 +101,8 @@ pub fn send(socket_path: &Path, cmd: &Command) -> std::io::Result<Reply> {
     line.push('\n');
     (&stream).write_all(line.as_bytes())?;
     (&stream).flush()?;
-    let mut reader = BufReader::new(&stream);
+    // A reply cut at the limit has no newline and fails to parse below.
+    let mut reader = BufReader::new(std::io::Read::take(&stream, REPLY_LIMIT_BYTES));
     let mut reply = String::new();
     let n = reader.read_line(&mut reply)?;
     if n == 0 {

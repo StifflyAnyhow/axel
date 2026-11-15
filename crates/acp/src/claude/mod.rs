@@ -36,7 +36,7 @@
 pub mod tools;
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -46,7 +46,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
-use crate::agent_rpc::{Client, Lines, RpcError, RpcResult};
+use crate::agent_rpc::{Client, Lines, RpcError, RpcResult, bounded_lines};
 use crate::usage::{ClaudeMeter, claude_limits, limits_params};
 
 /// One Claude Code process and what we know about its conversation.
@@ -64,7 +64,7 @@ struct Session {
     permission_mode: Mutex<String>,
     cancelled: AtomicBool,
     /// `tool_use` blocks by id, for naming their results.
-    tool_uses: Mutex<HashMap<String, Value>>,
+    tool_uses: Mutex<ToolUses>,
     /// Tool uses whose PostToolUse hook should send the tool response.
     hooked: Mutex<HashSet<String>>,
     /// The turn's steering: whether a prompt is running, and the messages
@@ -161,7 +161,7 @@ pub fn serve_stdio() -> anyhow::Result<()> {
     let client = Arc::new(Client::stdio());
     let agent = Arc::new(Agent { client: client.clone(), sessions: Mutex::new(HashMap::new()), client_caps: Mutex::new(Value::Null) });
     let stdin = std::io::stdin();
-    for line in stdin.lock().lines() {
+    for line in bounded_lines(stdin.lock(), "axel claude-acp") {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
@@ -401,7 +401,7 @@ impl Agent {
             withdrawn: Mutex::new(HashSet::new()),
             permission_mode: Mutex::new("default".into()),
             cancelled: AtomicBool::new(false),
-            tool_uses: Mutex::new(HashMap::new()),
+            tool_uses: Mutex::new(ToolUses::default()),
             hooked: Mutex::new(HashSet::new()),
             steering: Mutex::new(Steering::default()),
             meter: Mutex::new(if resume.is_some() { ClaudeMeter::resumed() } else { ClaudeMeter::default() }),
@@ -464,7 +464,7 @@ impl Agent {
     fn spawn_reader(self: &Arc<Self>, session: Arc<Session>, stdout: std::process::ChildStdout, tx: Sender<Value>) {
         let agent = self.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
+            for line in bounded_lines(BufReader::new(stdout), "axel claude-acp") {
                 let Ok(line) = line else { break };
                 let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
                 match msg.get("type").and_then(Value::as_str) {
@@ -1077,7 +1077,42 @@ fn always_rule(tool: &str) -> Value {
 }
 
 /// ACP session/update payloads for Claude content blocks: `toAcpNotifications`.
-fn to_acp(content: &Value, role: &str, cache: &mut HashMap<String, Value>, hooks: Option<&Mutex<HashSet<String>>>) -> Vec<Value> {
+/// The tool uses most recently seen, to name their results.  A result
+/// follows its call within the turn, and a turn rarely makes more than a
+/// few hundred calls: past this many, the oldest are forgotten (a result
+/// that late shows as untracked) rather than kept for the whole session.
+const TOOL_USES_MAX: usize = 1024;
+
+/// `tool_use` blocks by id, the newest [`TOOL_USES_MAX`].
+#[derive(Default)]
+struct ToolUses {
+    by_id: HashMap<String, Value>,
+    /// Ids, oldest first.
+    order: std::collections::VecDeque<String>,
+}
+
+impl ToolUses {
+    /// Remember a tool use; returns the id forgotten to make room, if any.
+    fn insert(&mut self, id: String, tool_use: Value) -> Option<String> {
+        if self.by_id.insert(id.clone(), tool_use).is_some() {
+            return None;
+        }
+        self.order.push_back(id);
+        let forgotten = if self.order.len() > TOOL_USES_MAX { self.order.pop_front() } else { None };
+        if let Some(old) = &forgotten {
+            self.by_id.remove(old);
+        }
+        debug_assert_eq!(self.by_id.len(), self.order.len());
+        assert!(self.by_id.len() <= TOOL_USES_MAX);
+        forgotten
+    }
+
+    fn get(&self, id: &str) -> Option<&Value> {
+        self.by_id.get(id)
+    }
+}
+
+fn to_acp(content: &Value, role: &str, cache: &mut ToolUses, hooks: Option<&Mutex<HashSet<String>>>) -> Vec<Value> {
     let chunk_kind = if role == "assistant" { "agent_message_chunk" } else { "user_message_chunk" };
     if let Value::String(text) = content {
         return vec![json!({ "sessionUpdate": chunk_kind, "content": { "type": "text", "text": text } })];
@@ -1103,7 +1138,12 @@ fn to_acp(content: &Value, role: &str, cache: &mut HashMap<String, Value>, hooks
             "thinking" | "thinking_delta" => Some(json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": chunk.get("thinking") } })),
             "tool_use" | "server_tool_use" | "mcp_tool_use" => {
                 let id = chunk.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-                cache.insert(id.clone(), chunk.clone());
+                // A forgotten call can't be named any more: its hook can go too.
+                if let Some(forgotten) = cache.insert(id.clone(), chunk.clone())
+                    && let Some(h) = hooks
+                {
+                    h.lock().expect("hooked lock").remove(&forgotten);
+                }
                 let name = chunk.get("name").and_then(Value::as_str).unwrap_or("");
                 let input = chunk.get("input").cloned().unwrap_or(json!({}));
                 if name == "TodoWrite" {
@@ -1332,8 +1372,8 @@ fn find_session_file(session_id: &str, cwd: &Path) -> Option<PathBuf> {
 /// Send a saved conversation to the client: `replaySessionHistory`.
 fn replay(client: &Client, session_id: &str, file: &Path) {
     let Ok(f) = std::fs::File::open(file) else { return };
-    let mut cache = HashMap::new();
-    for line in BufReader::new(f).lines().map_while(Result::ok) {
+    let mut cache = ToolUses::default();
+    for line in bounded_lines(BufReader::new(f), "axel claude-acp").map_while(Result::ok) {
         let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else { continue };
         let kind = entry.get("type").and_then(Value::as_str).unwrap_or("");
         if kind != "user" && kind != "assistant" {
@@ -1451,7 +1491,7 @@ mod tests {
 
     #[test]
     fn blocks_become_acp_updates() {
-        let mut cache = HashMap::new();
+        let mut cache = ToolUses::default();
         let hooked = Mutex::new(HashSet::new());
         let blocks = json!([
             { "type": "text", "text": "hello" },

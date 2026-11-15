@@ -11,11 +11,32 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use agent_client_protocol::{Client, ConnectTo, Lines};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::agent_rpc::{LINE_LIMIT_BYTES, LineAccumulator, LineRead};
 use crate::log::{Dir, FrameLog};
+
+/// The longest stderr line kept from the adapter: the pane shows its first
+/// 200 characters, so anything past a few pages is noise.
+const STDERR_LINE_LIMIT_BYTES: usize = 64 * 1024;
+
+/// Read one line of at most `limit_bytes` (see [`LineAccumulator`]).
+pub(crate) async fn read_line_bounded<R: AsyncBufRead + Unpin>(reader: &mut R, limit_bytes: usize) -> io::Result<Option<LineRead>> {
+    let mut line = LineAccumulator::new(limit_bytes);
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Ok(line.finish());
+        }
+        let (consumed, complete) = line.feed(chunk);
+        reader.consume(consumed);
+        if complete {
+            return Ok(line.finish());
+        }
+    }
+}
 
 /// Spawn `cmd` in `cwd` with extra `env`; return the child and a transport
 /// speaking NDJSON over its stdin/stdout.  Stderr lines go to `stderr_tx`.
@@ -61,8 +82,13 @@ pub fn spawn(
         .ok_or_else(|| io::Error::other("no stderr"))?;
 
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut reader = BufReader::new(stderr);
+        while let Ok(Some(read)) = read_line_bounded(&mut reader, STDERR_LINE_LIMIT_BYTES).await {
+            // Stderr is for people: shown as well as it can be, never refused.
+            let line = match read {
+                LineRead::Line(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                LineRead::TooLong { length_bytes } => format!("[a {length_bytes}-byte line, not shown]"),
+            };
             if stderr_tx.send(line).is_err() {
                 break;
             }
@@ -70,16 +96,26 @@ pub fn spawn(
     });
 
     let log_in = log.clone();
-    let incoming = futures::stream::unfold(BufReader::new(stdout).lines(), move |mut lines| {
+    let incoming = futures::stream::unfold(BufReader::new(stdout), move |mut reader| {
         let log = log_in.clone();
         async move {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
-                    log.record(Dir::In, &line);
-                    Some((Ok(line), lines))
+            loop {
+                match read_line_bounded(&mut reader, LINE_LIMIT_BYTES).await {
+                    Ok(Some(LineRead::Line(bytes))) => {
+                        let line = String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+                        if let Ok(line) = &line {
+                            log.record(Dir::In, line);
+                        }
+                        return Some((line, reader));
+                    }
+                    // Dropped, not passed on: a frame that size is no
+                    // message the host could use. The log says it was there.
+                    Ok(Some(LineRead::TooLong { length_bytes })) => {
+                        log.record(Dir::In, &format!("[dropped a {length_bytes}-byte line: over the {LINE_LIMIT_BYTES}-byte limit]"));
+                    }
+                    Ok(None) => return None,
+                    Err(e) => return Some((Err(e), reader)),
                 }
-                Ok(None) => None,
-                Err(e) => Some((Err(e), lines)),
             }
         }
     });

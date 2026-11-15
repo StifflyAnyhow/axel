@@ -18,11 +18,12 @@ use axel_store::{
     SessionState, SessionUpdate, StatusReport, StatusState, Store, TurnChanges, TurnSummary,
 };
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::adapter::{adapter_command, runs_builtin_adapter};
+use crate::agent_rpc::LineRead;
 use crate::checkpoint;
 use crate::usage::TurnUsage;
 use crate::attach::{self, PromptCaps};
@@ -257,6 +258,10 @@ pub async fn run_host(
         FrameLog::open(&cfg.log_path)
             .with_context(|| format!("opening frame log {}", cfg.log_path.display()))?,
     );
+    // Unbounded on purpose: the ACP connection's handlers must never wait on
+    // the loop (it may be awaiting them), and what goes in is bounded by its
+    // sources: one adapter's frames, socket commands (at most
+    // `CONNECTIONS_MAX` in flight) and the pane's EOF.
     let (tx, rx) = mpsc::unbounded_channel::<Event>();
 
     // Adapter.
@@ -492,6 +497,15 @@ const YELLOW: &str = "\x1b[33m";
 const BLUE: &str = "\x1b[34m";
 const MAGENTA: &str = "\x1b[35m";
 const CYAN: &str = "\x1b[36m";
+
+/// The most items read back to find a turn's last message: far more than
+/// any session holds, so the newest are always in it.
+const SESSION_ITEMS_MAX: usize = 100_000;
+
+/// Prompts that may wait at once, queued or sent into the turn.  A person
+/// queues a handful; past this, something (a script, two agents answering
+/// each other) is looping, and its prompts are refused.
+const QUEUED_MAX: usize = 64;
 
 /// How long a stopping host waits for the socket's last reply to go out.
 const STOP_DRAIN: Duration = Duration::from_millis(50);
@@ -1259,6 +1273,7 @@ impl<W: Write> Host<W> {
     /// Persist a prompt sent mid-turn as a pending `UserMessage` and queue it
     /// (first when steering).  Returns the item id.
     fn enqueue(&mut self, text: String, files: Vec<PathBuf>, steer: bool, from: Option<Sender>) -> Result<String> {
+        self.ensure_room_to_queue()?;
         let paths = attach::attachment_paths(&files);
         let mut content = json!({ "text": text, "attachments": paths, "queued": true });
         if let Some(f) = &from {
@@ -1284,12 +1299,20 @@ impl<W: Write> Host<W> {
     /// Record a prompt sent into the running turn, as a pending `UserMessage`
     /// (it shows as not read yet until the agent takes it in). Its item id.
     fn record_steer(&mut self, text: String, files: Vec<PathBuf>) -> Result<String> {
+        self.ensure_room_to_queue()?;
         let paths = attach::attachment_paths(&files);
         let content = json!({ "text": text, "attachments": paths, "queued": true, "steering": true });
         let item = self.push(ItemKind::UserMessage, Some(ItemStatus::Pending), None, content)?;
         self.line(BLUE, "↳", &format!("into the turn  {DIM}{}{RESET}", head(&text, 100)));
         self.steering.push_back(Queued { item_id: item.id.clone(), text, files, from: None });
         Ok(item.id)
+    }
+
+    /// Refuse another waiting prompt past [`QUEUED_MAX`].
+    fn ensure_room_to_queue(&self) -> Result<()> {
+        let waiting = self.queue.len() + self.steering.len();
+        anyhow::ensure!(waiting < QUEUED_MAX, "{waiting} messages are already waiting; send this once the agent has read some");
+        Ok(())
     }
 
     /// Hand a prompt in `steering` to the adapter for the running turn. If it
@@ -1447,7 +1470,7 @@ impl<W: Write> Host<W> {
         self.finalize_text();
         let last = self
             .store
-            .items(&self.cfg.session_id, 0, 100_000)
+            .items(&self.cfg.session_id, 0, SESSION_ITEMS_MAX)
             .unwrap_or_default()
             .into_iter()
             .rev()
@@ -2424,45 +2447,68 @@ impl<W: Write> Host<W> {
 /// rate that can't spin a core.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
+/// The longest command line a client may send.  Commands carry a prompt's
+/// text and attachment paths, never file contents: 16 MiB is far more than
+/// anyone types or pastes, and one line can't take all memory.
+const COMMAND_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Connections served at once.  Clients (`axel send`, the thread view) send
+/// one command per connection and hang up; more than this at once is a
+/// runaway script, which then waits for a turn instead of piling up tasks.
+const CONNECTIONS_MAX: usize = 64;
+
 async fn serve_socket(listener: UnixListener, tx: mpsc::UnboundedSender<Event>) {
+    let slots = Arc::new(tokio::sync::Semaphore::new(CONNECTIONS_MAX));
     loop {
+        let slot = Arc::clone(&slots).acquire_owned().await.expect("the semaphore is never closed");
         let Ok((stream, _)) = listener.accept().await else {
             tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
             continue;
         };
         let tx = tx.clone();
         tokio::spawn(async move {
-            let (r, mut w) = stream.into_split();
-            let mut lines = BufReader::new(r).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            serve_connection(stream, tx).await;
+            drop(slot);
+        });
+    }
+}
+
+/// One client: a reply line for every command line, until it hangs up.
+async fn serve_connection(stream: tokio::net::UnixStream, tx: mpsc::UnboundedSender<Event>) {
+    let (r, mut w) = stream.into_split();
+    let mut reader = BufReader::new(r);
+    while let Ok(Some(read)) = transport::read_line_bounded(&mut reader, COMMAND_LIMIT_BYTES).await {
+        let reply = match read {
+            LineRead::Line(bytes) => {
+                let line = String::from_utf8_lossy(&bytes);
                 if line.trim().is_empty() {
                     continue;
                 }
-                let reply = match serde_json::from_str::<Command>(&line) {
-                    Err(e) => Reply::Error {
-                        message: format!("bad command: {e}"),
-                    },
-                    Ok(cmd) => {
-                        let (rtx, rrx) = oneshot::channel();
-                        if tx.send(Event::Command { cmd, reply: rtx }).is_err() {
-                            Reply::Error {
-                                message: "host is shutting down".into(),
-                            }
-                        } else {
-                            rrx.await.unwrap_or(Reply::Error {
-                                message: "host dropped the command".into(),
-                            })
-                        }
-                    }
-                };
-                let mut s = serde_json::to_string(&reply).expect("a Reply has only strings and numbers: it always serializes");
-                s.push('\n');
-                if w.write_all(s.as_bytes()).await.is_err() {
-                    break;
-                }
+                command_reply(&line, &tx).await
             }
-        });
+            LineRead::TooLong { length_bytes } => Reply::Error {
+                message: format!("command too long: {length_bytes} bytes, over the {COMMAND_LIMIT_BYTES}-byte limit"),
+            },
+        };
+        let mut s = serde_json::to_string(&reply).expect("a Reply has only strings and numbers: it always serializes");
+        s.push('\n');
+        if w.write_all(s.as_bytes()).await.is_err() {
+            break;
+        }
     }
+}
+
+/// Hand one command line to the host's loop and wait for its reply.
+async fn command_reply(line: &str, tx: &mpsc::UnboundedSender<Event>) -> Reply {
+    let cmd = match serde_json::from_str::<Command>(line) {
+        Ok(cmd) => cmd,
+        Err(e) => return Reply::Error { message: format!("bad command: {e}") },
+    };
+    let (rtx, rrx) = oneshot::channel();
+    if tx.send(Event::Command { cmd, reply: rtx }).is_err() {
+        return Reply::Error { message: "host is shutting down".into() };
+    }
+    rrx.await.unwrap_or(Reply::Error { message: "host dropped the command".into() })
 }
 
 // --- fs client methods ---------------------------------------------------------
@@ -2475,12 +2521,26 @@ fn resolve(cwd: &Path, p: &Path) -> PathBuf {
     }
 }
 
+/// The largest file an agent may read through `fs/read_text_file`.  Source
+/// files are kilobytes and logs megabytes; past 64 MiB it isn't text an
+/// agent can read in one go, and reading it would hold it all in memory.
+const FS_READ_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+
 async fn fs_read(
     cwd: &Path,
     req: acp::ReadTextFileRequest,
     responder: Responder<acp::ReadTextFileResponse>,
 ) -> Result<(), acp::Error> {
     let path = resolve(cwd, &req.path);
+    // Refused before it is read: the whole file is held to slice its lines.
+    if let Ok(meta) = tokio::fs::metadata(&path).await
+        && meta.len() > FS_READ_LIMIT_BYTES
+    {
+        return responder.respond_with_error(acp::Error::invalid_params().data(json!({
+            "path": path.display().to_string(),
+            "error": format!("file is {} bytes, over the {FS_READ_LIMIT_BYTES}-byte limit for a text read", meta.len()),
+        })));
+    }
     match tokio::fs::read_to_string(&path).await {
         Ok(text) => {
             let content = slice_lines(&text, req.line, req.limit);

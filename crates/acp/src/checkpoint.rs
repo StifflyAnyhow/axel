@@ -205,18 +205,10 @@ pub fn git(dir: &Path, args: &[&str], env: &[(&str, &OsStr)], deadline: Instant)
     }
     let mut child = cmd.spawn().context("running git")?;
     // Read both pipes on threads, so a chatty command can't block on a full pipe.
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    let mut stderr = child.stderr.take().expect("piped stderr");
-    let out = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = stdout.read_to_end(&mut v);
-        v
-    });
-    let err = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = stderr.read_to_end(&mut v);
-        v
-    });
+    let stdout = child.stdout.take().expect("stdout was set to piped above");
+    let stderr = child.stderr.take().expect("stderr was set to piped above");
+    let out = std::thread::spawn(move || read_capped(stdout));
+    let err = std::thread::spawn(move || read_capped(stderr));
     let status = loop {
         if let Some(s) = child.try_wait()? {
             break s;
@@ -230,12 +222,34 @@ pub fn git(dir: &Path, args: &[&str], env: &[(&str, &OsStr)], deadline: Instant)
         }
         std::thread::sleep(GIT_POLL_INTERVAL);
     };
-    let stdout = out.join().unwrap_or_default();
-    let stderr = err.join().unwrap_or_default();
+    let (stdout, stdout_cut) = out.join().unwrap_or_default();
+    let (stderr, _) = err.join().unwrap_or_default();
     if !status.success() {
         bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&stderr).trim());
     }
+    // Cut output would be read as a wrong answer (a short file list), so it
+    // is an error; a cut error message is still the message.
+    if stdout_cut {
+        bail!("git {}: output over {GIT_OUTPUT_LIMIT_BYTES} bytes", args.first().copied().unwrap_or(""));
+    }
     Ok(String::from_utf8_lossy(&stdout).trim().to_string())
+}
+
+/// The most of a git command's stdout or stderr that is kept.  The largest
+/// output read here is a turn's `diff-tree --numstat`: a line per changed
+/// file, so 64 MiB is hundreds of thousands of files.
+const GIT_OUTPUT_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read `pipe` to its end, keeping at most [`GIT_OUTPUT_LIMIT_BYTES`]; the
+/// rest is read and thrown away, so git never blocks on a full pipe.
+/// Returns what was kept, and whether anything was cut.
+fn read_capped(mut pipe: impl Read) -> (Vec<u8>, bool) {
+    let mut kept = Vec::new();
+    // A read error ends the output early; git's exit status, checked by the
+    // caller, says whether the command worked.
+    let _ = (&mut pipe).take(GIT_OUTPUT_LIMIT_BYTES).read_to_end(&mut kept);
+    let rest_bytes = std::io::copy(&mut pipe, &mut std::io::sink()).unwrap_or(0);
+    (kept, rest_bytes > 0)
 }
 
 #[cfg(test)]
