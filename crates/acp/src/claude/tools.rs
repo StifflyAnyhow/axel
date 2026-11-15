@@ -20,155 +20,163 @@ fn text_content(text: &str) -> Value {
 
 /// `{ title, kind, content, locations? }` for a `tool_use` block.
 pub fn tool_info(name: &str, input: &Value) -> Map<String, Value> {
-    let mut out = Map::new();
-    let (title, kind, content, locations): (String, &str, Vec<Value>, Option<Vec<Value>>) = match name {
-        "Task" => (
-            s(input, "description").unwrap_or("Task").to_string(),
-            "think",
-            s(input, "prompt").map(|p| vec![text_content(p)]).unwrap_or_default(),
-            None,
-        ),
-        "NotebookRead" => {
-            let p = s(input, "notebook_path");
-            (
-                p.map(|p| format!("Read Notebook {p}")).unwrap_or_else(|| "Read Notebook".into()),
-                "read",
-                vec![],
-                Some(p.map(|p| vec![json!({ "path": p })]).unwrap_or_default()),
-            )
-        }
-        "NotebookEdit" => {
-            let p = s(input, "notebook_path");
-            (
-                p.map(|p| format!("Edit Notebook {p}")).unwrap_or_else(|| "Edit Notebook".into()),
-                "edit",
-                s(input, "new_source").map(|t| vec![text_content(t)]).unwrap_or_default(),
-                Some(p.map(|p| vec![json!({ "path": p })]).unwrap_or_default()),
-            )
-        }
-        "Bash" => (
+    let info = match name {
+        "Task" => ToolInfo::new(s(input, "description").unwrap_or("Task"), "think").content(text_of(input, "prompt")),
+        "NotebookRead" => notebook_info(input, "Read Notebook", "read").locations(path_location(s(input, "notebook_path"))),
+        "NotebookEdit" => notebook_info(input, "Edit Notebook", "edit")
+            .content(text_of(input, "new_source"))
+            .locations(path_location(s(input, "notebook_path"))),
+        "Bash" => ToolInfo::new(
             s(input, "command").map(|c| format!("`{}`", c.replace('`', "\\`"))).unwrap_or_else(|| "Terminal".into()),
             "execute",
-            s(input, "description").map(|d| vec![text_content(d)]).unwrap_or_default(),
-            None,
-        ),
-        "BashOutput" => ("Tail Logs".into(), "execute", vec![], None),
-        "KillShell" => ("Kill Process".into(), "execute", vec![], None),
-        // The adapter titles Claude's native Read "Read File", and its own
-        // `mcp__acp__Read` (which Claude used under Axel) "Read <path> (a - b)".
-        // Native Read replaces that one here, so it keeps its title.
-        "Read" => {
-            let offset = input.get("offset").and_then(Value::as_u64);
-            let range = match (input.get("limit").and_then(Value::as_u64), offset) {
-                (Some(limit), _) if limit > 0 => format!(" ({} - {})", offset.unwrap_or(0) + 1, offset.unwrap_or(0) + limit),
-                (_, Some(o)) if o > 0 => format!(" (from line {})", o + 1),
-                _ => String::new(),
-            };
-            (
-                format!("Read {}{range}", s(input, "file_path").unwrap_or("File")),
-                "read",
-                vec![],
-                Some(s(input, "file_path").map(|p| vec![json!({ "path": p, "line": offset.unwrap_or(0) })]).unwrap_or_default()),
-            )
-        }
-        "LS" => (
-            format!(
-                "List the {} directory's contents",
-                s(input, "path").map(|p| format!("`{p}`")).unwrap_or_else(|| "current".into())
-            ),
+        )
+        .content(text_of(input, "description")),
+        "BashOutput" => ToolInfo::new("Tail Logs", "execute"),
+        "KillShell" => ToolInfo::new("Kill Process", "execute"),
+        "Read" => read_info(input),
+        "LS" => ToolInfo::new(
+            format!("List the {} directory's contents", s(input, "path").map(|p| format!("`{p}`")).unwrap_or_else(|| "current".into())),
             "search",
-            vec![],
-            Some(vec![]),
-        ),
-        "Edit" => {
-            let p = s(input, "file_path");
-            (
-                p.map(|p| format!("Edit `{p}`")).unwrap_or_else(|| "Edit".into()),
-                "edit",
-                p.map(|p| {
-                    vec![json!({
-                        "type": "diff",
-                        "path": p,
-                        "oldText": input.get("old_string").cloned().unwrap_or(Value::Null),
-                        "newText": s(input, "new_string").unwrap_or(""),
-                    })]
-                })
-                .unwrap_or_default(),
-                p.map(|p| vec![json!({ "path": p })]),
-            )
-        }
+        )
+        .locations(vec![]),
+        "Edit" => edit_info(input),
         "Write" => {
             let p = s(input, "file_path");
-            (
-                p.map(|p| format!("Write {p}")).unwrap_or_else(|| "Write".into()),
-                "edit",
-                p.map(|p| vec![json!({ "type": "diff", "path": p, "oldText": null, "newText": input.get("content").cloned().unwrap_or(Value::Null) })])
-                    .unwrap_or_default(),
-                Some(p.map(|p| vec![json!({ "path": p })]).unwrap_or_default()),
-            )
+            ToolInfo::new(p.map(|p| format!("Write {p}")).unwrap_or_else(|| "Write".into()), "edit")
+                .content(
+                    p.map(|p| vec![json!({ "type": "diff", "path": p, "oldText": null, "newText": input.get("content").cloned().unwrap_or(Value::Null) })])
+                        .unwrap_or_default(),
+                )
+                .locations(path_location(p))
         }
         "Glob" => {
             let mut label = "Find".to_string();
-            if let Some(p) = s(input, "path") {
-                label += &format!(" `{p}`");
+            for key in ["path", "pattern"] {
+                if let Some(v) = s(input, key) {
+                    label += &format!(" `{v}`");
+                }
             }
-            if let Some(p) = s(input, "pattern") {
-                label += &format!(" `{p}`");
-            }
-            (label, "search", vec![], Some(s(input, "path").map(|p| vec![json!({ "path": p })]).unwrap_or_default()))
+            ToolInfo::new(label, "search").locations(path_location(s(input, "path")))
         }
-        "Grep" => (grep_label(input), "search", vec![], None),
-        "WebFetch" => (
-            s(input, "url").map(|u| format!("Fetch {u}")).unwrap_or_else(|| "Fetch".into()),
-            "fetch",
-            s(input, "prompt").map(|p| vec![text_content(p)]).unwrap_or_default(),
-            None,
-        ),
-        "WebSearch" => {
-            let mut label = format!("\"{}\"", s(input, "query").unwrap_or("undefined"));
-            let list = |k: &str| -> Option<String> {
-                let a = input.get(k)?.as_array()?;
-                (!a.is_empty()).then(|| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
-            };
-            if let Some(a) = list("allowed_domains") {
-                label += &format!(" (allowed: {a})");
-            }
-            if let Some(b) = list("blocked_domains") {
-                label += &format!(" (blocked: {b})");
-            }
-            (label, "fetch", vec![], None)
-        }
-        "TodoWrite" => (
-            match input.get("todos").and_then(Value::as_array) {
-                Some(todos) => format!(
-                    "Update TODOs: {}",
-                    todos.iter().map(|t| s(t, "content").unwrap_or("undefined")).collect::<Vec<_>>().join(", ")
-                ),
-                None => "Update TODOs".into(),
-            },
-            "think",
-            vec![],
-            None,
-        ),
-        "ExitPlanMode" => (
-            "Ready to code?".into(),
-            "switch_mode",
-            s(input, "plan").map(|p| vec![text_content(p)]).unwrap_or_default(),
-            None,
-        ),
+        "Grep" => ToolInfo::new(grep_label(input), "search"),
+        "WebFetch" => ToolInfo::new(s(input, "url").map(|u| format!("Fetch {u}")).unwrap_or_else(|| "Fetch".into()), "fetch")
+            .content(text_of(input, "prompt")),
+        "WebSearch" => ToolInfo::new(web_search_label(input), "fetch"),
+        "TodoWrite" => ToolInfo::new(todo_title(input), "think"),
+        "ExitPlanMode" => ToolInfo::new("Ready to code?", "switch_mode").content(text_of(input, "plan")),
         "Other" => {
             let output = serde_json::to_string_pretty(input).unwrap_or_else(|_| "{}".into());
-            (name.to_string(), "other", vec![text_content(&format!("```json\n{output}```"))], None)
+            ToolInfo::new(name, "other").content(vec![text_content(&format!("```json\n{output}```"))])
         }
-        _ => (if name.is_empty() { "Unknown Tool".into() } else { name.to_string() }, "other", vec![], None),
+        _ => ToolInfo::new(if name.is_empty() { "Unknown Tool" } else { name }, "other"),
     };
-    out.insert("title".into(), Value::String(title));
-    out.insert("kind".into(), Value::String(kind.into()));
-    out.insert("content".into(), Value::Array(content));
-    if let Some(l) = locations {
-        out.insert("locations".into(), Value::Array(l));
+    info.into_map()
+}
+
+/// What [`tool_info`] says about a tool use, before it is JSON.
+struct ToolInfo {
+    title: String,
+    kind: &'static str,
+    content: Vec<Value>,
+    /// `None` leaves `locations` out; `Some(vec![])` sends an empty list.
+    locations: Option<Vec<Value>>,
+}
+
+impl ToolInfo {
+    fn new(title: impl Into<String>, kind: &'static str) -> Self {
+        ToolInfo { title: title.into(), kind, content: Vec::new(), locations: None }
     }
-    out
+
+    fn content(mut self, content: Vec<Value>) -> Self {
+        self.content = content;
+        self
+    }
+
+    fn locations(mut self, locations: Vec<Value>) -> Self {
+        self.locations = Some(locations);
+        self
+    }
+
+    fn into_map(self) -> Map<String, Value> {
+        let mut out = Map::new();
+        out.insert("title".into(), Value::String(self.title));
+        out.insert("kind".into(), Value::String(self.kind.into()));
+        out.insert("content".into(), Value::Array(self.content));
+        if let Some(l) = self.locations {
+            out.insert("locations".into(), Value::Array(l));
+        }
+        out
+    }
+}
+
+/// `input[key]` as the tool call's text content, when it is there.
+fn text_of(input: &Value, key: &str) -> Vec<Value> {
+    s(input, key).map(|t| vec![text_content(t)]).unwrap_or_default()
+}
+
+/// The one location a path names, or none.
+fn path_location(path: Option<&str>) -> Vec<Value> {
+    path.map(|p| vec![json!({ "path": p })]).unwrap_or_default()
+}
+
+/// `<verb> <notebook_path>`, or the bare verb without a path.
+fn notebook_info(input: &Value, verb: &str, kind: &'static str) -> ToolInfo {
+    let title = s(input, "notebook_path").map(|p| format!("{verb} {p}")).unwrap_or_else(|| verb.to_string());
+    ToolInfo::new(title, kind)
+}
+
+/// The adapter titles Claude's native Read "Read File", and its own
+/// `mcp__acp__Read` (which Claude used under Axel) "Read <path> (a - b)".
+/// Native Read replaces that one here, so it keeps its title.
+fn read_info(input: &Value) -> ToolInfo {
+    let offset = input.get("offset").and_then(Value::as_u64);
+    let start = offset.unwrap_or(0);
+    // Saturating: the numbers come from the model, and are only shown.
+    let range = match (input.get("limit").and_then(Value::as_u64), offset) {
+        (Some(limit), _) if limit > 0 => format!(" ({} - {})", start.saturating_add(1), start.saturating_add(limit)),
+        (_, Some(o)) if o > 0 => format!(" (from line {})", o.saturating_add(1)),
+        _ => String::new(),
+    };
+    let path = s(input, "file_path");
+    ToolInfo::new(format!("Read {}{range}", path.unwrap_or("File")), "read")
+        .locations(path.map(|p| vec![json!({ "path": p, "line": start })]).unwrap_or_default())
+}
+
+/// An Edit: a diff of the replaced text, located at its file when it names one.
+fn edit_info(input: &Value) -> ToolInfo {
+    let Some(p) = s(input, "file_path") else { return ToolInfo::new("Edit", "edit") };
+    ToolInfo::new(format!("Edit `{p}`"), "edit")
+        .content(vec![json!({
+            "type": "diff",
+            "path": p,
+            "oldText": input.get("old_string").cloned().unwrap_or(Value::Null),
+            "newText": s(input, "new_string").unwrap_or(""),
+        })])
+        .locations(vec![json!({ "path": p })])
+}
+
+/// `"query" (allowed: a, b) (blocked: c)`.
+fn web_search_label(input: &Value) -> String {
+    let mut label = format!("\"{}\"", s(input, "query").unwrap_or("undefined"));
+    let list = |k: &str| -> Option<String> {
+        let a = input.get(k)?.as_array()?;
+        (!a.is_empty()).then(|| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
+    };
+    if let Some(a) = list("allowed_domains") {
+        label += &format!(" (allowed: {a})");
+    }
+    if let Some(b) = list("blocked_domains") {
+        label += &format!(" (blocked: {b})");
+    }
+    label
+}
+
+/// `Update TODOs: a, b`.
+fn todo_title(input: &Value) -> String {
+    match input.get("todos").and_then(Value::as_array) {
+        Some(todos) => format!("Update TODOs: {}", todos.iter().map(|t| s(t, "content").unwrap_or("undefined")).collect::<Vec<_>>().join(", ")),
+        None => "Update TODOs".into(),
+    }
 }
 
 fn grep_label(input: &Value) -> String {
