@@ -16,7 +16,7 @@ use axel_inbox::Envelope;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::schema::PROJECTION_TABLES;
-use crate::wire::{self, kind, tag};
+use crate::wire::{self, ParticipantAction, ProjectAction, kind, tag};
 use crate::{
     Appended, Error, ParticipantRole, SessionState, StatusState, Store,
     USAGE_SAMPLE_RETENTION_SECS, now,
@@ -490,12 +490,12 @@ fn apply_participant_change<'a>(roster: &mut Roster<'a>, e: &'a Envelope) {
         .participants
         .get(&e.from)
         .is_some_and(|p| p.role == ParticipantRole::Owner);
-    let self_remove = op.op == "remove" && target == e.from;
+    let self_remove = op.op == ParticipantAction::Remove && target == e.from;
     if !(signer_is_owner || self_remove) {
         return;
     }
-    match op.op.as_str() {
-        "add" => {
+    match op.op {
+        ParticipantAction::Add => {
             roster.participants.insert(
                 target.to_string(),
                 PartRow {
@@ -503,10 +503,9 @@ fn apply_participant_change<'a>(roster: &mut Roster<'a>, e: &'a Envelope) {
                 },
             );
         }
-        "remove" => {
+        ParticipantAction::Remove => {
             roster.participants.remove(target);
         }
-        _ => return,
     }
     roster.valid_changes.insert(e.id.as_str());
 }
@@ -702,8 +701,8 @@ fn apply_thread_project(
             "thread.project without repo_key or path_hint".into(),
         ));
     };
-    match op.op.as_str() {
-        "attach" => {
+    match op.op {
+        ProjectAction::Attach => {
             conn.execute(
                 "INSERT OR REPLACE INTO thread_projects (thread_id, key, repo_key, path_hint, workspace_kind, branch, worktree_path, added_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -719,16 +718,11 @@ fn apply_thread_project(
                 ],
             )?;
         }
-        "detach" => {
+        ProjectAction::Detach => {
             conn.execute(
                 "DELETE FROM thread_projects WHERE thread_id = ?1 AND (key = ?2 OR repo_key = ?2 OR path_hint = ?2)",
                 params![thread_id, key],
             )?;
-        }
-        other => {
-            return Ok(Applied::Rejected(format!(
-                "unknown thread.project op {other:?}"
-            )));
         }
     }
     Ok(Applied::Ok)
@@ -746,7 +740,7 @@ fn apply_thread_participant(
         Err(r) => return Ok(r),
     };
     let target = e.first_tag(tag::MENTION).unwrap_or_default();
-    if op.op == "add" {
+    if op.op == ParticipantAction::Add {
         conn.execute(
             "INSERT OR REPLACE INTO thread_participants (thread_id, pubkey, role, added_by, added_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![thread_id, target, op.role.unwrap_or(ParticipantRole::Member).as_str(), e.from, at],

@@ -6,9 +6,9 @@ use axel_inbox::Envelope;
 use rusqlite::{OptionalExtension, Row, ToSql, params, params_from_iter};
 
 use crate::log::{EVENT_COLS, row_envelope};
-use crate::wire::kind;
-use crate::{TurnMark, 
-    Error, Harness, INBOX_SCOPE, Participant, Session, SessionFilter, Status, Store, Thread,
+use crate::wire::{self, ParticipantAction, kind, tag};
+use crate::{TurnMark,
+    Error, Harness, INBOX_SCOPE, Participant, ParticipantRole, Session, SessionFilter, Status, Store, Thread,
     ThreadFilter, ThreadProject, ThreadSummary, ThreadWorkspace, Turn, TurnSummary, Usage,
     UsageSample, UsageTotals, UsageWindows, SessionContext, LimitWindow, PlanLimit,
 };
@@ -117,18 +117,27 @@ impl Store {
         let mut roster: std::collections::BTreeSet<String> = self.distinct(
             "SELECT DISTINCT agent_pubkey FROM sessions WHERE thread_id = ?1", thread_id
         )?.into_iter().collect();
-        let mut st = self.conn.prepare("SELECT kind, tags_json, content FROM events WHERE thread_id = ?1 AND kind IN (?2, ?3) AND applied_at IS NOT NULL AND rejected_reason IS NULL ORDER BY created_at, id")?;
-        let events = st.query_map(rusqlite::params![thread_id, crate::wire::kind::THREAD_PARTICIPANT, crate::wire::kind::SESSION_START], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        let mut statement = self.conn.prepare("SELECT kind, tags_json, content FROM events WHERE thread_id = ?1 AND kind IN (?2, ?3) AND applied_at IS NOT NULL AND rejected_reason IS NULL ORDER BY created_at, id")?;
+        let events = statement.query_map(rusqlite::params![thread_id, kind::THREAD_PARTICIPANT, kind::SESSION_START], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
         for event in events {
-            let (kind, tags, content) = event?;
+            let (event_kind, tags, content) = event?;
             let tags: Vec<Vec<String>> = serde_json::from_str(&tags)?;
-            let Some(target) = tags.iter().find(|t| t.first().is_some_and(|s| s == "p")).and_then(|t| t.get(1)) else { continue };
-            if kind == crate::wire::kind::SESSION_START as i64 {
+            let Some(target) = tags.iter().find(|t| t.first().is_some_and(|s| s == tag::MENTION)).and_then(|t| t.get(1)) else { continue };
+            if event_kind == kind::SESSION_START {
                 roster.insert(target.clone());
-            } else {
-                let op: serde_json::Value = serde_json::from_str(&content)?;
-                if op["op"] == "remove" { roster.remove(target); }
-                else if op["role"] == "agent" { roster.insert(target.clone()); }
+                continue;
+            }
+            // Only applied changes are read, and applying one parsed it.
+            let change: wire::ParticipantOp = serde_json::from_str(&content)?;
+            match change.op {
+                ParticipantAction::Remove => {
+                    roster.remove(target);
+                }
+                ParticipantAction::Add => {
+                    if change.role == Some(ParticipantRole::Agent) {
+                        roster.insert(target.clone());
+                    }
+                }
             }
         }
         Ok(roster.into_iter().collect())
@@ -488,6 +497,23 @@ pub(crate) const THREAD_USAGE_SQL: &str = "SELECT '' AS session_id,
                  FROM effective_usage_log WHERE thread_id = ?1 GROUP BY session_id
              )";
 
+/// What [`Store::usage_windows`] sums usage by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UsageGrouping {
+    Agent,
+    Thread,
+}
+
+impl UsageGrouping {
+    /// The `effective_usage_log` column that names the group.
+    fn column(self) -> &'static str {
+        match self {
+            UsageGrouping::Agent => "agent_pubkey",
+            UsageGrouping::Thread => "thread_id",
+        }
+    }
+}
+
 impl Store {
     /// Live status of one session.
     pub fn status(&self, session_id: &str) -> Result<Option<Status>, Error> {
@@ -554,15 +580,16 @@ impl Store {
 
     /// What each agent spent, most recent spender first.
     pub fn usage_by_agent(&self, now: i64) -> Result<Vec<UsageWindows>, Error> {
-        self.usage_windows("agent_pubkey", now, None)
+        self.usage_windows(UsageGrouping::Agent, now, None)
     }
 
     /// What each thread spent, most recent first, at most `limit` of them.
     pub fn usage_by_thread(&self, now: i64, limit: usize) -> Result<Vec<UsageWindows>, Error> {
-        self.usage_windows("thread_id", now, Some(limit))
+        self.usage_windows(UsageGrouping::Thread, now, Some(limit))
     }
 
-    fn usage_windows(&self, key: &str, now: i64, limit: Option<usize>) -> Result<Vec<UsageWindows>, Error> {
+    fn usage_windows(&self, grouping: UsageGrouping, now: i64, limit: Option<usize>) -> Result<Vec<UsageWindows>, Error> {
+        let key = grouping.column();
         // One pass: each window is a sum over the rows inside it.
         let sums = |w: &str| {
             ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "turns", "cost_usd_est"]

@@ -71,11 +71,20 @@ pub struct ThreadUpdate {
     pub state: Option<ThreadState>,
 }
 
+/// What a kind 102 envelope does to the thread's project set.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectAction {
+    #[default]
+    Attach,
+    Detach,
+}
+
 /// kind 102 content.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadProjectOp {
-    /// `attach | detach`
-    pub op: String,
+    /// `attach | detach`; any other text makes the content malformed.
+    pub op: ProjectAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,11 +108,20 @@ impl ThreadProjectOp {
     }
 }
 
+/// What a kind 103 envelope does to the thread's participant set.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ParticipantAction {
+    #[default]
+    Add,
+    Remove,
+}
+
 /// kind 103 content.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ParticipantOp {
-    /// `add | remove`
-    pub op: String,
+    /// `add | remove`; any other text makes the content malformed.
+    pub op: ParticipantAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<ParticipantRole>,
 }

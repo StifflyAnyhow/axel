@@ -172,7 +172,7 @@ impl Store {
     ) -> Result<(), Error> {
         self.require_thread(thread_id)?;
         let op = wire::ThreadProjectOp {
-            op: "attach".into(),
+            op: wire::ProjectAction::Attach,
             repo_key: repo_key.map(str::to_string),
             path_hint: Some(path_hint.to_string_lossy().into_owned()),
             workspace_kind: Some(ws.kind),
@@ -201,7 +201,7 @@ impl Store {
     ) -> Result<(), Error> {
         self.require_thread(thread_id)?;
         let op = wire::ThreadProjectOp {
-            op: "detach".into(),
+            op: wire::ProjectAction::Detach,
             repo_key: Some(repo_key_or_path.to_string()),
             path_hint: Some(repo_key_or_path.to_string()),
             ..Default::default()
@@ -226,7 +226,7 @@ impl Store {
     ) -> Result<(), Error> {
         self.require_thread(thread_id)?;
         let content = serde_json::to_string(&wire::ParticipantOp {
-            op: "add".into(),
+            op: wire::ParticipantAction::Add,
             role: Some(role),
         })?;
         let env = self.build(
@@ -248,7 +248,7 @@ impl Store {
     ) -> Result<(), Error> {
         self.require_thread(thread_id)?;
         let content = serde_json::to_string(&wire::ParticipantOp {
-            op: "remove".into(),
+            op: wire::ParticipantAction::Remove,
             role: None,
         })?;
         let env = self.build(
