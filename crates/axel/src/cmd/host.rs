@@ -106,13 +106,39 @@ fn ssh(target: &str, remote_cmd: &str, stdin: &[u8]) -> Result<Vec<u8>> {
         .stderr(Stdio::piped())
         .spawn()
         .context("running ssh")?;
-    child.stdin.take().unwrap().write_all(stdin)?;
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        bail!("ssh {target}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    child.stdin.take().expect("stdin is piped above").write_all(stdin)?;
+    // stderr drains on its own thread so a chatty remote can't block stdout.
+    let mut stderr = child.stderr.take().expect("stderr is piped above");
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        // An unreadable stderr only loses the error's detail.  Past the
+        // limit it is drained unread, so the remote never blocks on it.
+        let _ = (&mut stderr).take(SSH_STDERR_BYTES_MAX).read_to_end(&mut buf);
+        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        buf
+    });
+    let mut stdout = Vec::new();
+    child.stdout.take().expect("stdout is piped above").take(RPC_MESSAGE_BYTES_MAX + 1).read_to_end(&mut stdout)?;
+    if u64::try_from(stdout.len()).unwrap_or(u64::MAX) > RPC_MESSAGE_BYTES_MAX {
+        // Already failing; whether the kill lands changes nothing.
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!("ssh {target}: reply larger than {RPC_MESSAGE_BYTES_MAX} bytes");
     }
-    Ok(out.stdout)
+    let status = child.wait()?;
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if !status.success() {
+        bail!("ssh {target}: {}", String::from_utf8_lossy(&stderr).trim());
+    }
+    Ok(stdout)
 }
+
+/// The most one RPC request or reply may be.  The largest carry a batch of
+/// [`BATCH`] events, or a session's Claude transcript and attachments, which
+/// run to tens of megabytes for long sessions; past this it is a broken peer.
+const RPC_MESSAGE_BYTES_MAX: u64 = 256 * 1024 * 1024;
+/// The most of ssh's stderr kept for an error message.
+const SSH_STDERR_BYTES_MAX: u64 = 64 * 1024;
 
 /// `axel …` on the host, with a usable PATH and the file keystore (the
 /// macOS keychain can't be unlocked from an SSH session).
@@ -312,33 +338,27 @@ fn call(host: &Environment, req: &Request) -> Result<Response> {
 /// `axel host rpc` (on the host): one request on stdin, one reply on stdout.
 pub fn rpc_serve() -> Result<()> {
     let mut input = Vec::new();
-    std::io::stdin().read_to_end(&mut input)?;
-    let resp = match serde_json::from_slice::<Request>(&input) {
-        Ok(req) => handle(req).unwrap_or_else(|e| Response::Error { message: format!("{e:#}") }),
-        Err(e) => Response::Error { message: format!("bad request: {e}") },
+    std::io::stdin().take(RPC_MESSAGE_BYTES_MAX + 1).read_to_end(&mut input)?;
+    let resp = if u64::try_from(input.len()).unwrap_or(u64::MAX) > RPC_MESSAGE_BYTES_MAX {
+        Response::Error { message: format!("request larger than {RPC_MESSAGE_BYTES_MAX} bytes") }
+    } else {
+        rpc_reply(&input)
     };
     println!("{}", serde_json::to_string(&resp)?);
     Ok(())
 }
 
+fn rpc_reply(input: &[u8]) -> Response {
+    match serde_json::from_slice::<Request>(input) {
+        Ok(req) => handle(req).unwrap_or_else(|e| Response::Error { message: format!("{e:#}") }),
+        Err(e) => Response::Error { message: format!("bad request: {e}") },
+    }
+}
+
 fn handle(req: Request) -> Result<Response> {
     let ctx = Ctx::open()?;
     Ok(match req {
-        Request::Hello => {
-            let env = ctx.store.local_environment()?;
-            // The Claude adapter is built into axel; node only matters to install Claude Code.
-            let mut missing: Vec<String> = ["git", "claude"].into_iter().filter(|p| launch::which(p).is_none()).map(String::from).collect();
-            if missing.iter().any(|m| m == "claude") && launch::which("node").is_none() {
-                missing.push("node".into());
-            }
-            Response::Hello {
-                environment_id: env.id,
-                label: env.label,
-                host_pubkey: ctx.owner()?.public().to_base58(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                missing,
-            }
-        }
+        Request::Hello => hello(&ctx)?,
         Request::PushEvents { events } => {
             let mut applied = 0;
             for e in &events {
@@ -367,17 +387,7 @@ fn handle(req: Request) -> Result<Response> {
             Response::JobKey { pubkey: kp.public().to_base58() }
         }
         Request::StartJob { job } => Response::Started { session_id: start_job(&ctx, &job)? },
-        Request::SessionCommand { session_id, mut cmd, files } => {
-            let s = ctx.store.get_session(&session_id)?.with_context(|| format!("no session {session_id}"))?;
-            if s.state == axel_store::SessionState::Paused { return Ok(Response::Reply { reply: socket::Reply::Error { message: "this agent is paused; resume it in thread controls".into() } }); }
-            if let socket::Command::Prompt { attachments, .. } = &mut cmd
-                && !files.is_empty()
-            {
-                *attachments = unpack_files(&paths::home().join("attachments").join(&session_id), &files)?;
-            }
-            let sock = s.socket_path.context("its session host isn't running")?;
-            Response::Reply { reply: socket::send(&sock, &cmd).context("its session host is unreachable")? }
-        }
+        Request::SessionCommand { session_id, cmd, files } => session_command(&ctx, &session_id, cmd, &files)?,
         Request::PauseSession { session_id, paused } => {
             let session = ctx.store.get_session(&session_id)?.context("no such session")?;
             if paused { super::process_control::pause(&ctx, &session)?; }
@@ -388,6 +398,7 @@ fn handle(req: Request) -> Result<Response> {
             if let Some(session) = ctx.store.get_session(&session_id)?
                 && session.state == axel_store::SessionState::Paused
             { super::process_control::resume(&ctx, &session)?; }
+            // A host that doesn't answer has already stopped, which is what was asked.
             if let Some(sock) = ctx.store.get_session(&session_id)?.and_then(|s| s.socket_path) {
                 let _ = socket::send(&sock, &socket::Command::Stop);
             }
@@ -403,6 +414,39 @@ fn handle(req: Request) -> Result<Response> {
             Response::Transcript { transcript }
         }
     })
+}
+
+/// Who this host is, and what it lacks to run agents.
+fn hello(ctx: &Ctx) -> Result<Response> {
+    let env = ctx.store.local_environment()?;
+    // The Claude adapter is built into axel; node only matters to install Claude Code.
+    let mut missing: Vec<String> = ["git", "claude"].into_iter().filter(|p| launch::which(p).is_none()).map(String::from).collect();
+    if missing.iter().any(|m| m == "claude") && launch::which("node").is_none() {
+        missing.push("node".into());
+    }
+    Ok(Response::Hello {
+        environment_id: env.id,
+        label: env.label,
+        host_pubkey: ctx.owner()?.public().to_base58(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        missing,
+    })
+}
+
+/// Hand a composer command to a session running here, with its attachments
+/// unpacked next to it.
+fn session_command(ctx: &Ctx, session_id: &str, mut cmd: socket::Command, files: &[FileBlob]) -> Result<Response> {
+    let s = ctx.store.get_session(session_id)?.with_context(|| format!("no session {session_id}"))?;
+    if s.state == axel_store::SessionState::Paused {
+        return Ok(Response::Reply { reply: socket::Reply::Error { message: "this agent is paused; resume it in thread controls".into() } });
+    }
+    if let socket::Command::Prompt { attachments, .. } = &mut cmd
+        && !files.is_empty()
+    {
+        *attachments = unpack_files(&paths::home().join("attachments").join(session_id), files)?;
+    }
+    let sock = s.socket_path.context("its session host isn't running")?;
+    Ok(Response::Reply { reply: socket::send(&sock, &cmd).context("its session host is unreachable")? })
 }
 
 // ================================================================== setup
@@ -649,34 +693,51 @@ fn follow_host(ctx: &Ctx, host: &Environment) -> Result<()> {
     };
     let mut last_git = std::time::Instant::now() - std::time::Duration::from_secs(3600);
     let mut idle_since: Option<std::time::Instant> = None;
-    let mut backoff = 2u64;
+    let mut backoff_secs = FOLLOW_INTERVAL_SECS;
     let mut states: std::collections::HashMap<String, SessionState> = Default::default();
+    // Bounded by the host's sessions: it returns once none has been live for
+    // FOLLOW_IDLE_EXIT_SECS.
     loop {
         let live = live_sessions_on(ctx, host)?;
         let changed = live.iter().any(|s| states.get(&s.id).is_some_and(|old| *old != s.state)) || live.len() < states.len();
-        let git_due = changed || last_git.elapsed().as_secs() >= 30;
+        let git_due = changed || last_git.elapsed().as_secs() >= FOLLOW_GIT_INTERVAL_SECS;
         match sync_host(ctx, host, git_due) {
             Ok(_) => {
-                backoff = 2;
+                backoff_secs = FOLLOW_INTERVAL_SECS;
                 if git_due {
                     last_git = std::time::Instant::now();
                 }
             }
-            Err(_) => backoff = (backoff * 2).min(60),
+            Err(e) => {
+                // The follower's output is its log; the round is retried after a pause.
+                backoff_secs = backoff_secs.saturating_mul(2).min(FOLLOW_BACKOFF_SECS_MAX);
+                eprintln!("{}: sync failed ({e:#}); retrying in {backoff_secs}s", host.label);
+            }
         }
         states = live_sessions_on(ctx, host)?.into_iter().map(|s| (s.id, s.state)).collect();
         if states.is_empty() {
             let since = *idle_since.get_or_insert_with(std::time::Instant::now);
-            if since.elapsed().as_secs() >= 60 {
+            if since.elapsed().as_secs() >= FOLLOW_IDLE_EXIT_SECS {
+                // The last round; what it misses, the next `axel sync` brings.
                 let _ = sync_host(ctx, host, true);
                 return Ok(());
             }
         } else {
             idle_since = None;
         }
-        std::thread::sleep(std::time::Duration::from_secs(backoff));
+        std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
     }
 }
+
+/// Seconds between a follower's rounds: often enough that thread views stream.
+const FOLLOW_INTERVAL_SECS: u64 = 2;
+/// Seconds between a follower's git fetches when nothing changed.
+const FOLLOW_GIT_INTERVAL_SECS: u64 = 30;
+/// The longest pause between failed rounds: a laptop waking from sleep
+/// catches up within a minute.
+const FOLLOW_BACKOFF_SECS_MAX: u64 = 60;
+/// A follower exits this long after the host's last live session ends.
+const FOLLOW_IDLE_EXIT_SECS: u64 = 60;
 
 /// One follower per host: a pid file under `~/.axel/run`.
 struct FollowLock(PathBuf);
@@ -688,7 +749,7 @@ impl FollowLock {
         let path = dir.join(format!("sync-{host_id}.pid"));
         if let Ok(pid) = std::fs::read_to_string(&path)
             && let Ok(pid) = pid.trim().parse::<i32>()
-            && pid != std::process::id() as i32
+            && i32::try_from(std::process::id()) != Ok(pid)
             // SAFETY: signal 0 only checks that the process exists.
             && unsafe { libc::kill(pid, 0) } == 0
         {
@@ -701,6 +762,7 @@ impl FollowLock {
 
 impl Drop for FollowLock {
     fn drop(&mut self) {
+        // A pid file left behind names a dead process, which `take` ignores.
         let _ = std::fs::remove_file(&self.0);
     }
 }
@@ -709,7 +771,8 @@ impl Drop for FollowLock {
 pub fn ensure_follower(host: &Environment) {
     let Ok(exe) = std::env::current_exe() else { return };
     let log = paths::home().join("logs").join(format!("sync-{}.log", host.label));
-    let _ = std::fs::create_dir_all(log.parent().unwrap());
+    // Without a log file the follower still runs, its output dropped.
+    let _ = std::fs::create_dir_all(log.parent().expect("joined onto the logs directory above"));
     let out = std::fs::File::create(&log).ok();
     let mut cmd = Command::new(exe);
     cmd.args(["sync", &host.label, "--follow"]).stdin(Stdio::null());
@@ -723,6 +786,7 @@ pub fn ensure_follower(host: &Environment) {
     }
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
+    // Without a follower, the next `axel sync` or UI start syncs instead.
     let _ = cmd.spawn();
 }
 
@@ -844,30 +908,17 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
         call(host, &Request::PushEvents { events: chunk.to_vec() })?;
     }
 
-    // The code: where a moved session worked, else the thread's project.
-    let moved_from = carry.as_ref().and_then(|c| c.work_dir.clone()).filter(|d| d.join(".git").exists() || git(d, &["rev-parse", "--git-dir"]).is_ok());
-    let workspace = match moved_from.or(local_project_dir(ctx, &thread.id)?) {
-        Some(dir) if git(&dir, &["rev-parse", "--git-dir"]).is_ok() => {
-            let mut ws = push_workspace(host, &dir, &thread, &agent.name)?;
-            ws.reset = carry.is_some();
-            if ws.reset && dir.starts_with(paths::worktrees_dir()) {
-                // A worktree Axel made for a session that moved back: its
-                // work now continues on the host, so it goes back to clean
-                // (kept under refs/axel/sent/…) and can take the work again
-                // when it returns.
-                git(&dir, &["update-ref", &format!("refs/axel/sent/{}", ws.branch), &ws.start])?;
-                git(&dir, &["reset", "--quiet", "--hard"])?;
-                git(&dir, &["clean", "--quiet", "-fd"])?;
-            }
-            Some(ws)
-        }
-        Some(dir) => bail!("{} isn't a git repository; remote agents need git to carry the code", dir.display()),
-        None => None,
-    };
+    let workspace = send_workspace(ctx, host, &thread, &agent.name, carry.as_ref())?;
 
     let Response::JobKey { pubkey: job_key } = call(host, &Request::JobKey)? else { bail!("unexpected reply") };
-    let now = axel_tui::util::now_secs() as u64;
-    let delegation = axel_identity::delegate(&agent_kp, &job_key.parse()?, &thread.id, now.saturating_sub(300), now + DELEGATION_SECS)?;
+    let now_secs = u64::try_from(axel_tui::util::now_secs()).context("the clock is before 1970")?;
+    let delegation = axel_identity::delegate(
+        &agent_kp,
+        &job_key.parse()?,
+        &thread.id,
+        now_secs.saturating_sub(DELEGATION_CLOCK_SKEW_SECS),
+        now_secs.saturating_add(DELEGATION_SECS),
+    )?;
     let from = super::policy::caller_agent()
         .filter(|pk| *pk != agent.pubkey)
         .map(|pk| socket::Sender::new(pk.clone(), super::policy::name_of(ctx, &pk)));
@@ -897,9 +948,36 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
     let Response::Started { session_id } = call(host, &Request::StartJob { job: Box::new(job) })? else {
         bail!("unexpected reply");
     };
+    // A first sync is a head start; the follower started next syncs anyway.
     let _ = sync_host(ctx, host, false);
     ensure_follower(host);
     Ok(session_id)
+}
+
+/// How far back a delegation's validity starts, for a host whose clock runs
+/// a little behind ours.
+const DELEGATION_CLOCK_SKEW_SECS: u64 = 300;
+
+/// Push the code a job works on to `host`: where a moved session worked,
+/// else the thread's project.  None for a thread without a project.
+fn send_workspace(ctx: &Ctx, host: &Environment, thread: &axel_store::Thread, agent_name: &str, carry: Option<&Carry>) -> Result<Option<JobWorkspace>> {
+    let moved_from = carry.and_then(|c| c.work_dir.clone()).filter(|d| d.join(".git").exists() || git(d, &["rev-parse", "--git-dir"]).is_ok());
+    let Some(dir) = moved_from.or(local_project_dir(ctx, &thread.id)?) else { return Ok(None) };
+    if git(&dir, &["rev-parse", "--git-dir"]).is_err() {
+        bail!("{} isn't a git repository; remote agents need git to carry the code", dir.display());
+    }
+    let mut ws = push_workspace(host, &dir, thread, agent_name)?;
+    ws.reset = carry.is_some();
+    if ws.reset && dir.starts_with(paths::worktrees_dir()) {
+        // A worktree Axel made for a session that moved back: its
+        // work now continues on the host, so it goes back to clean
+        // (kept under refs/axel/sent/…) and can take the work again
+        // when it returns.
+        git(&dir, &["update-ref", &format!("refs/axel/sent/{}", ws.branch), &ws.start])?;
+        git(&dir, &["reset", "--quiet", "--hard"])?;
+        git(&dir, &["clean", "--quiet", "-fd"])?;
+    }
+    Ok(Some(ws))
 }
 
 /// Start a new thread whose first agent runs on `host`: the thread and its
@@ -943,75 +1021,88 @@ pub fn move_session(ctx: &Ctx, session_id: &str, to: &str) -> Result<(String, St
         bail!("only Claude sessions can move: Axel carries their conversation file");
     }
     let native = s.harness_session_id.clone().context("this session hasn't started its conversation yet; there's nothing to carry")?;
-    let here = ctx.store.local_environment()?;
     match (host_of(ctx, &s)?, placement(ctx, &agent.pubkey, Some(to))?) {
         (None, Placement::Here) => bail!("{} already runs here", agent.name),
         (Some(h), Placement::Host(d)) if h.id == d.id => bail!("{} already runs on {}", agent.name, h.label),
         (Some(h), Placement::Host(d)) => bail!("{} runs on {}; bring it here first (`--to local`), then send it to {}", agent.name, h.label, d.label),
-        (None, Placement::Host(dest)) => {
-            if super::claude_profile::ClaudeProfile::load(&agent.pubkey)?.is_some() {
-                bail!("{} has a machine-local Claude config directory and must run locally", agent.name);
-            }
-            stop_local(ctx, &s);
-            ctx.store.end_session(&ctx.owner()?, &s.id, Some(&format!("moved to {}", dest.label)))?;
-            let transcript = wait_for_transcript(&native, s.transcript_path.as_deref())?;
-            let work_dir = transcript_cwd(&transcript.jsonl);
-            let id = start_remote(ctx, &dest, &s.thread_id, &agent.name, MOVED_THERE, &[], Some(Carry { transcript, work_dir }))?;
-            Ok((id, dest.label))
-        }
-        (Some(from), Placement::Here) => {
-            call(&from, &Request::StopSession { session_id: s.id.clone() })?;
-            ctx.store.end_session(&ctx.owner()?, &s.id, Some(&format!("moved to {}", here.label)))?;
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-            let Response::Transcript { transcript } = call(&from, &Request::Transcript { session_id: s.id.clone() })? else {
-                bail!("unexpected reply")
-            };
-            let transcript = transcript.with_context(|| format!("{} has no conversation file for this session", from.label))?;
-            sync_host(ctx, &from, true)?;
-            let thread = ctx.store.get_thread(&s.thread_id)?.context("thread vanished")?;
-            let work_dir = match local_project_dir(ctx, &thread.id)? {
-                Some(dir) if git(&dir, &["rev-parse", "--git-dir"]).is_ok() => checkout_returned(&dir, &from, &job_branch(&thread, &agent.name))?,
-                Some(dir) => dir,
-                None => scratch_dir(ctx, &thread.id)?,
-            };
-            write_transcript(&work_dir, &transcript)?;
-            let prompt = format!(
-                "You were moved back to the owner's machine. Your conversation so far is above. You now work in {}, with the work you did on {} \
-                 (committed and uncommitted). Continue the task where you left off.",
-                work_dir.display(),
-                from.label
-            );
-            let req = axel_tui::LaunchRequest {
-                title: thread.title.clone(),
-                projects: vec![],
-                agent_pubkey: agent.pubkey.clone(),
-                workspace: axel_store::WorkspaceKind::InPlace,
-                branch: None,
-                thread_id: Some(thread.id.clone()),
-                attachments: vec![],
-            };
-            let opts = launch::LaunchOptions {
-                target: launch::Target::NewWindow,
-                runtime: Some(axel_store::SessionRuntime::Managed),
-                prompt: Some(prompt),
-                attachments: vec![],
-                work_dir: Some(work_dir),
-                resume: Some(transcript.native_id),
-            };
-            let id = match launch::launch(ctx, req, opts)? {
-                launch::Launched::Managed { session_id, host_spec: Some(spec), .. } => {
-                    launch::spawn_detached(&spec, &session_id)?;
-                    session_id
-                }
-                launch::Launched::Managed { session_id, .. } => session_id,
-                _ => bail!("{} can't run as a managed session here (is its ACP adapter installed?)", agent.name),
-            };
-            Ok((id, here.label))
-        }
+        (None, Placement::Host(dest)) => move_to_host(ctx, &s, &agent, &native, dest),
+        (Some(from), Placement::Here) => move_here(ctx, &s, &agent, from),
     }
 }
 
-/// Stop a session running on this machine, and close its Rex pane.
+/// How long a host is given to let go of a stopped session's conversation
+/// file before we ask for it: Claude flushes it as it exits.
+const MOVE_HERE_SETTLE_MS: u64 = 1500;
+
+/// A session running here goes to `dest`, with its conversation and code.
+fn move_to_host(ctx: &Ctx, s: &axel_store::Session, agent: &axel_store::Agent, native: &str, dest: Environment) -> Result<(String, String)> {
+    if super::claude_profile::ClaudeProfile::load(&agent.pubkey)?.is_some() {
+        bail!("{} has a machine-local Claude config directory and must run locally", agent.name);
+    }
+    stop_local(ctx, s);
+    ctx.store.end_session(&ctx.owner()?, &s.id, Some(&format!("moved to {}", dest.label)))?;
+    let transcript = wait_for_transcript(native, s.transcript_path.as_deref())?;
+    let work_dir = transcript_cwd(&transcript.jsonl);
+    let id = start_remote(ctx, &dest, &s.thread_id, &agent.name, MOVED_THERE, &[], Some(Carry { transcript, work_dir }))?;
+    Ok((id, dest.label))
+}
+
+/// A session running on `from` comes back here, with its conversation and
+/// the work it did there.
+fn move_here(ctx: &Ctx, s: &axel_store::Session, agent: &axel_store::Agent, from: Environment) -> Result<(String, String)> {
+    let here = ctx.store.local_environment()?;
+    call(&from, &Request::StopSession { session_id: s.id.clone() })?;
+    ctx.store.end_session(&ctx.owner()?, &s.id, Some(&format!("moved to {}", here.label)))?;
+    std::thread::sleep(std::time::Duration::from_millis(MOVE_HERE_SETTLE_MS));
+    let Response::Transcript { transcript } = call(&from, &Request::Transcript { session_id: s.id.clone() })? else {
+        bail!("unexpected reply")
+    };
+    let transcript = transcript.with_context(|| format!("{} has no conversation file for this session", from.label))?;
+    sync_host(ctx, &from, true)?;
+    let thread = ctx.store.get_thread(&s.thread_id)?.context("thread vanished")?;
+    let work_dir = match local_project_dir(ctx, &thread.id)? {
+        Some(dir) if git(&dir, &["rev-parse", "--git-dir"]).is_ok() => checkout_returned(&dir, &from, &job_branch(&thread, &agent.name))?,
+        Some(dir) => dir,
+        None => scratch_dir(ctx, &thread.id)?,
+    };
+    write_transcript(&work_dir, &transcript)?;
+    let prompt = format!(
+        "You were moved back to the owner's machine. Your conversation so far is above. You now work in {}, with the work you did on {} \
+         (committed and uncommitted). Continue the task where you left off.",
+        work_dir.display(),
+        from.label
+    );
+    let req = axel_tui::LaunchRequest {
+        title: thread.title.clone(),
+        projects: vec![],
+        agent_pubkey: agent.pubkey.clone(),
+        workspace: axel_store::WorkspaceKind::InPlace,
+        branch: None,
+        thread_id: Some(thread.id.clone()),
+        attachments: vec![],
+    };
+    let opts = launch::LaunchOptions {
+        target: launch::Target::NewWindow,
+        runtime: Some(axel_store::SessionRuntime::Managed),
+        prompt: Some(prompt),
+        attachments: vec![],
+        work_dir: Some(work_dir),
+        resume: Some(transcript.native_id),
+    };
+    let id = match launch::launch(ctx, req, opts)? {
+        launch::Launched::Managed { session_id, host_spec: Some(spec), .. } => {
+            launch::spawn_detached(&spec, &session_id)?;
+            session_id
+        }
+        launch::Launched::Managed { session_id, .. } => session_id,
+        _ => bail!("{} can't run as a managed session here (is its ACP adapter installed?)", agent.name),
+    };
+    Ok((id, here.label))
+}
+
+/// Stop a session running on this machine, and close its Rex pane.  Each
+/// step is best effort: the caller ends the session's row regardless, and a
+/// host that doesn't answer or a pane already closed has nothing left to stop.
 fn stop_local(ctx: &Ctx, s: &axel_store::Session) {
     if s.state == axel_store::SessionState::Paused { let _ = super::process_control::resume(ctx, s); }
     if let Some(sock) = &s.socket_path {
@@ -1022,19 +1113,22 @@ fn stop_local(ctx: &Ctx, s: &axel_store::Session) {
     }
 }
 
+/// How often, and how far apart, we look for a stopped session's
+/// conversation file to stop changing: three seconds in all, longer than
+/// Claude takes to flush it on exit.
+const TRANSCRIPT_POLLS_MAX: u32 = 10;
+const TRANSCRIPT_POLL_MS: u64 = 300;
+
 /// The conversation file of a session that was just stopped, once Claude
 /// has let go of it.
 fn wait_for_transcript(native: &str, hint: Option<&str>) -> Result<Transcript> {
     let mut last = None;
-    for _ in 0..10 {
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let t = read_transcript(native, hint)?;
-        if let (Some(a), Some(b)) = (&t, &last)
-            && same_transcript(a, b)
-        {
-            return Ok(t.unwrap());
+    for _ in 0..TRANSCRIPT_POLLS_MAX {
+        std::thread::sleep(std::time::Duration::from_millis(TRANSCRIPT_POLL_MS));
+        match (read_transcript(native, hint)?, last.take()) {
+            (Some(now), Some(before)) if same_transcript(&now, &before) => return Ok(now),
+            (now, _) => last = now,
         }
-        last = t;
     }
     last.with_context(|| format!("can't find Claude's conversation file {native}.jsonl"))
 }
@@ -1214,7 +1308,7 @@ fn repo_name(dir: &Path) -> String {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             dir.hash(&mut h);
-            format!("local__{}-{:08x}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), h.finish() as u32)
+            format!("local__{}-{:08x}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), h.finish() & u64::from(u32::MAX))
         }
     }
 }
@@ -1229,7 +1323,7 @@ fn push_workspace(host: &Environment, dir: &Path, thread: &axel_store::Thread, a
     let Response::Repo { path } = call(host, &Request::PrepareRepo { repo: repo.clone() })? else { bail!("unexpected reply") };
     let start = snapshot_commit(dir, "axel: working state handed to a remote agent")?;
     let target = host.ssh_target.as_deref().unwrap_or(&host.label);
-    let start_ref = format!("refs/axel/start/{}-{agent}", &thread.id[..12]);
+    let start_ref = format!("refs/axel/start/{}-{agent}", id_prefix(&thread.id));
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -1326,7 +1420,15 @@ fn repo_dir(repo: &str) -> Result<PathBuf> {
 }
 
 fn job_worktree(thread_id: &str, agent: &str) -> PathBuf {
-    paths::home().join("worktrees").join(format!("{}-{agent}", &thread_id[..12.min(thread_id.len())]))
+    paths::home().join("worktrees").join(format!("{}-{agent}", id_prefix(thread_id)))
+}
+
+/// Characters of a thread id that name its directories and refs on a host.
+const ID_PREFIX_CHARS: usize = 12;
+
+/// The first [`ID_PREFIX_CHARS`] of an id (all of it when shorter).
+fn id_prefix(id: &str) -> &str {
+    id.get(..ID_PREFIX_CHARS).unwrap_or(id)
 }
 
 /// Record a job's agent, its peers, and its effort and policy on this host.
@@ -1346,48 +1448,11 @@ fn record_job_agent(ctx: &Ctx, job: &Job) -> Result<()> {
 /// Run a job on this host: learn the agent, hold its delegation, check out
 /// its branch, and start a managed session in the `axel` Rex session.
 fn start_job(ctx: &Ctx, job: &Job) -> Result<String> {
-    ctx.store.get_thread(&job.thread_id)?.context("the thread hasn't arrived here yet")?;
-    let key: axel_identity::PublicKey = job.job_key.parse()?;
-    ctx.keystore.agent(&key)?.context("that job key wasn't made here")?;
-    let deleg = axel_identity::Delegation::from_tag(&job.delegation)?;
-    let now = axel_tui::util::now_secs() as u64;
-    deleg.verify_for(&key, &job.thread_id, axel_store::kind::SESSION_START, now)?;
-    if deleg.delegator.to_base58() != job.agent.pubkey {
-        bail!("the delegation is from another agent");
-    }
-    ctx.store.put_delegation(&job.job_key, &job.delegation, job.agent.auth_tag.as_deref())?;
+    accept_delegation(ctx, job)?;
     record_job_agent(ctx, job)?;
+    let work_dir = job_work_dir(job)?;
 
-    let work_dir = match &job.workspace {
-        Some(ws) => {
-            let repo = repo_dir(&ws.repo)?;
-            let wt = job_worktree(&job.thread_id, &job.agent.name);
-            if !wt.exists() {
-                std::fs::create_dir_all(wt.parent().unwrap())?;
-                let exists = git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", ws.branch)]).is_ok();
-                let wt_s = wt.to_string_lossy().into_owned();
-                if exists {
-                    git(&repo, &["worktree", "add", "--quiet", &wt_s, &ws.branch])?;
-                } else {
-                    git(&repo, &["worktree", "add", "--quiet", "-b", &ws.branch, &wt_s, &ws.start])?;
-                }
-            }
-            if ws.reset {
-                // A moved session: the laptop has its newest work.
-                git(&wt, &["checkout", "--quiet", &ws.branch])?;
-                git(&wt, &["reset", "--quiet", "--hard", &ws.start])?;
-                git(&wt, &["clean", "--quiet", "-fd"])?;
-            }
-            wt
-        }
-        None => {
-            let d = paths::home().join("scratch").join(&job.thread_id[..12.min(job.thread_id.len())]);
-            std::fs::create_dir_all(&d)?;
-            d
-        }
-    };
-
-    let attachments = unpack_files(&paths::home().join("attachments").join(&job.thread_id[..12.min(job.thread_id.len())]), &job.attachments)?;
+    let attachments = unpack_files(&paths::home().join("attachments").join(id_prefix(&job.thread_id)), &job.attachments)?;
     let resume = match &job.resume {
         Some(t) => {
             write_transcript(&work_dir, t)?;
@@ -1427,10 +1492,57 @@ fn start_job(ctx: &Ctx, job: &Job) -> Result<String> {
         spec.env.push(("AXEL_PROMPT_FROM".into(), f.pubkey.clone()));
     }
     let label = format!("{} · {}", job.agent.name, axel_tui::util::ellipsize(&job.title, 30));
+    // Without Rex (or when it refuses) the session host runs detached:
+    // out of sight on the host, but working and syncing all the same.
     if run_in_rex(&spec, &work_dir, &label).is_err() {
         launch::spawn_detached(&spec, &session_id)?;
     }
     Ok(session_id)
+}
+
+/// Check a job's delegation (made here, for this thread, from its agent,
+/// valid now) and hold it, so the job key can sign for the agent.
+fn accept_delegation(ctx: &Ctx, job: &Job) -> Result<()> {
+    ctx.store.get_thread(&job.thread_id)?.context("the thread hasn't arrived here yet")?;
+    let key: axel_identity::PublicKey = job.job_key.parse()?;
+    ctx.keystore.agent(&key)?.context("that job key wasn't made here")?;
+    let deleg = axel_identity::Delegation::from_tag(&job.delegation)?;
+    let now_secs = u64::try_from(axel_tui::util::now_secs()).context("the clock is before 1970")?;
+    deleg.verify_for(&key, &job.thread_id, axel_store::kind::SESSION_START, now_secs)?;
+    if deleg.delegator.to_base58() != job.agent.pubkey {
+        bail!("the delegation is from another agent");
+    }
+    ctx.store.put_delegation(&job.job_key, &job.delegation, job.agent.auth_tag.as_deref())?;
+    Ok(())
+}
+
+/// Where a job works: its branch checked out in a worktree of the host's
+/// copy of the repo, or a scratch directory.
+fn job_work_dir(job: &Job) -> Result<PathBuf> {
+    let Some(ws) = &job.workspace else {
+        let d = paths::home().join("scratch").join(id_prefix(&job.thread_id));
+        std::fs::create_dir_all(&d)?;
+        return Ok(d);
+    };
+    let repo = repo_dir(&ws.repo)?;
+    let wt = job_worktree(&job.thread_id, &job.agent.name);
+    if !wt.exists() {
+        std::fs::create_dir_all(wt.parent().expect("joined onto the worktrees directory"))?;
+        let exists = git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", ws.branch)]).is_ok();
+        let wt_s = wt.to_string_lossy().into_owned();
+        if exists {
+            git(&repo, &["worktree", "add", "--quiet", &wt_s, &ws.branch])?;
+        } else {
+            git(&repo, &["worktree", "add", "--quiet", "-b", &ws.branch, &wt_s, &ws.start])?;
+        }
+    }
+    if ws.reset {
+        // A moved session: the laptop has its newest work.
+        git(&wt, &["checkout", "--quiet", &ws.branch])?;
+        git(&wt, &["reset", "--quiet", "--hard", &ws.start])?;
+        git(&wt, &["clean", "--quiet", "-fd"])?;
+    }
+    Ok(wt)
 }
 
 /// The host's Rex CLI, if Rex is installed.
@@ -1468,7 +1580,7 @@ fn run_in_rex(spec: &axel_config::launch::LaunchSpec, cwd: &Path, label: &str) -
 /// Each job worktree of `thread_id`: its branch head, and a snapshot of its
 /// uncommitted work under `refs/axel/result/<branch>`.
 fn snapshot_branches(thread_id: &str) -> Result<Vec<RemoteBranch>> {
-    let prefix = format!("{}-", &thread_id[..12.min(thread_id.len())]);
+    let prefix = format!("{}-", id_prefix(thread_id));
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(paths::home().join("worktrees")) else { return Ok(out) };
     for e in entries.flatten() {
