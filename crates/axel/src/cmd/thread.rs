@@ -12,40 +12,9 @@ pub fn run(cmd: ThreadCommand) -> Result<()> {
     let ctx = Ctx::open()?;
     match cmd {
         ThreadCommand::New { title, agent, projects, scratch, worktree, no_launch, runtime, host } => {
-            let title = title.join(" ");
-            if title.trim().is_empty() {
-                bail!("give the thread a title: what are we building?");
-            }
-            let a = ctx.store.agent_by_name(&agent)?.with_context(|| format!("no agent named {agent:?}"))?;
-            let projects = if scratch { vec![] } else if projects.is_empty() { vec![std::env::current_dir()?] } else { projects };
-            let (workspace, branch) = workspace_args(worktree);
-            if no_launch {
-                let t = record_thread(&ctx, &title, &projects)?;
-                println!("{}", t.id);
-                return Ok(());
-            }
-            if let super::host::Placement::Host(h) = super::host::placement(&ctx, &a.pubkey, host.as_deref())? {
-                let (thread, session) = super::host::new_thread_remote(&ctx, &h.label, &title, &projects, &a.name, &[])?;
-                println!("thread {thread}\nsession {session} on {}\nopen the thread: axel thread open {}", h.label, &thread[..12]);
-                return Ok(());
-            }
-            let req = LaunchRequest { title, projects, agent_pubkey: a.pubkey, workspace, branch, thread_id: None, attachments: vec![] };
-            let opts = launch::LaunchOptions { target: launch::Target::NewWindow, runtime: runtime.map(rt), prompt: None, attachments: vec![], work_dir: None, resume: None };
-            report(launch::launch(&ctx, req, opts)?)
+            new_thread(&ctx, NewThread { title: title.join(" "), agent, projects, scratch, worktree, no_launch, runtime, host })
         }
-        ThreadCommand::Spawn { thread, agent, prompt, runtime, host } => {
-            let t = resolve(&ctx, &thread)?;
-            let a = ctx.store.agent_by_name(&agent)?.with_context(|| format!("no agent named {agent:?}"))?;
-            if let super::host::Placement::Host(h) = super::host::placement(&ctx, &a.pubkey, host.as_deref())? {
-                let prompt = prompt.unwrap_or_else(|| t.intent.clone());
-                let session = super::host::launch_remote(&ctx, &h.label, &t.id, &a.name, &prompt, &[])?;
-                println!("thread {}\nsession {session} on {}", t.id, h.label);
-                return Ok(());
-            }
-            let req = LaunchRequest { title: t.title.clone(), projects: vec![], agent_pubkey: a.pubkey, workspace: WorkspaceKind::InPlace, branch: None, thread_id: Some(t.id), attachments: vec![] };
-            let opts = launch::LaunchOptions { target: launch::Target::NewWindow, runtime: runtime.map(rt), prompt, attachments: vec![], work_dir: None, resume: None };
-            report(launch::launch(&ctx, req, opts)?)
-        }
+        ThreadCommand::Spawn { thread, agent, prompt, runtime, host } => spawn(&ctx, &thread, &agent, prompt, runtime, host.as_deref()),
         ThreadCommand::Split { thread } => {
             let t = resolve(&ctx, &thread)?;
             drop(ctx);
@@ -94,129 +63,201 @@ pub fn run(cmd: ThreadCommand) -> Result<()> {
             drop(ctx);
             super::ui::open_here(&t.id)
         }
-        ThreadCommand::Resume { thread, agent } => {
-            let t = resolve(&ctx, &thread)?;
-            let last = ctx
-                .store
-                .list_sessions(SessionFilter { thread_id: Some(t.id.clone()), limit: Some(1), ..Default::default() })?
-                .into_iter()
-                .next()
-                .context("this thread has no session to resume")?;
-            let agent_pk = match agent {
-                Some(n) => ctx.store.agent_by_name(&n)?.with_context(|| format!("no agent named {n:?}"))?.pubkey,
-                None => last.agent_pubkey.clone(),
-            };
-            // Resuming is a spawn whose harness gets `--resume <id>`; the launch
-            // code reads AXEL_RESUME from the request's environment hint.
-            if let Some(hs) = &last.harness_session_id {
-                // SAFETY: single-threaded CLI; set before launch reads it.
-                unsafe { std::env::set_var("AXEL_RESUME", hs) };
-            } else {
-                eprintln!("axel: last session has no harness session id yet; starting fresh on the same thread");
-            }
-            let req = LaunchRequest { title: t.title.clone(), projects: vec![], agent_pubkey: agent_pk, workspace: WorkspaceKind::InPlace, branch: None, thread_id: Some(t.id), attachments: vec![] };
-            report(launch::launch(&ctx, req, launch::LaunchOptions::default())?)
-        }
-        ThreadCommand::Attach { thread, project, worktree } => {
-            let t = resolve(&ctx, &thread)?;
-            let owner = ctx.owner()?;
-            let env = ctx.store.local_environment()?;
-            let path = std::fs::canonicalize(&project).unwrap_or(project);
-            let key = launch::repo_key(&path);
-            ctx.store.upsert_project(&env.id, &path, key.as_deref())?;
-            let (kind, branch) = workspace_args(worktree);
-            let ws = match kind {
-                WorkspaceKind::Worktree => {
-                    let repo = axel_config::git::repo_root(&path).context("not a git repository")?;
-                    let branch = branch.unwrap_or_else(|| format!("axel/{}", axel_tui::slugify(&t.title)));
-                    let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
-                    let dest = crate::paths::worktrees_dir().join(name).join(branch.replace('/', "-"));
-                    let wt = axel_config::git::ensure_worktree(&repo, &branch, &dest)?;
-                    ThreadWorkspace { kind, branch: Some(branch), worktree_path: Some(wt) }
-                }
-                _ => ThreadWorkspace { kind: WorkspaceKind::InPlace, branch: axel_config::git::current_branch(&path), worktree_path: None },
-            };
-            ctx.store.attach_project(&owner, &t.id, key.as_deref(), &path, &ws)?;
-            println!("attached {} to {}", path.display(), t.title);
-            Ok(())
-        }
-        ThreadCommand::Ls { json, all } => {
-            super::reconcile::run(&ctx).ok();
-            let states = if all { vec![ThreadState::Open, ThreadState::Done, ThreadState::Archived] } else { vec![ThreadState::Open] };
-            let states = Some(states);
-            let rows = ctx.store.thread_summaries(ThreadFilter { states, limit: Some(100), ..Default::default() })?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&rows)?);
-                return Ok(());
-            }
-            let agents = ctx.store.list_agents()?;
-            for r in rows {
-                let names: Vec<String> = r.agents.iter().map(|pk| agents.iter().find(|a| &a.pubkey == pk).map(|a| a.name.clone()).unwrap_or_else(|| pk[..8].to_string())).collect();
-                let live = r.live.as_ref().map(|s| s.state.as_str()).unwrap_or("-");
-                let projects: Vec<String> = r.projects.iter().map(|p| p.path_hint.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).collect();
-                println!(
-                    "{}  {:<8} {:<8} {:<20} {:<24} {:>2}s {:>7}  {}",
-                    &r.thread.id[..12],
-                    r.thread.state,
-                    live,
-                    truncate(&names.join(","), 20),
-                    truncate(&if projects.is_empty() { "scratch".into() } else { projects.join(",") }, 24),
-                    r.sessions_total,
-                    fmt_tokens(r.usage.input_tokens + r.usage.output_tokens),
-                    r.thread.title
-                );
-            }
-            Ok(())
-        }
-        ThreadCommand::Show { thread } => {
-            let t = resolve(&ctx, &thread)?;
-            let s = ctx.store.thread_summary(&t.id)?.context("thread vanished")?;
-            println!("{}", serde_json::to_string_pretty(&s)?);
-            let sessions = ctx.store.list_sessions(SessionFilter { thread_id: Some(t.id.clone()), ..Default::default() })?;
-            println!("sessions:");
-            for se in sessions {
-                println!("  {}  {:<8} agent {}  env {}  harness {}  resume {}", se.id, se.state, &se.agent_pubkey[..8], se.environment_label, se.harness, se.harness_session_id.as_deref().unwrap_or("-"));
-            }
-            let msgs = ctx.store.thread_messages(&t.id)?;
-            println!("messages: {}", msgs.len());
-            for m in msgs.iter().rev().take(10).rev() {
-                println!("  {:<18} {}", axel_inbox::kind::name(m.kind), m.content.lines().next().unwrap_or(""));
-            }
-            Ok(())
-        }
+        ThreadCommand::Resume { thread, agent } => resume(&ctx, &thread, agent),
+        ThreadCommand::Attach { thread, project, worktree } => attach(&ctx, &thread, project, worktree),
+        ThreadCommand::Ls { json, all } => list(&ctx, json, all),
+        ThreadCommand::Show { thread } => show(&ctx, &thread),
         ThreadCommand::Stop { thread } => {
             let t = resolve(&ctx, &thread)?;
             let n = stop_thread(&ctx, &t.id)?;
             println!("ended {n} session(s) on {}", t.title);
             Ok(())
         }
-        ThreadCommand::Done { thread } => {
-            let t = resolve(&ctx, &thread)?;
-            set_state(&ctx, &t.id, ThreadOp::Settle)?;
-            println!("settled: {}", t.title);
-            Ok(())
-        }
-        ThreadCommand::Reopen { thread } => {
-            let t = resolve(&ctx, &thread)?;
-            set_state(&ctx, &t.id, ThreadOp::Reopen)?;
-            println!("reopened: {}", t.title);
-            Ok(())
-        }
-        ThreadCommand::Archive { thread } => {
-            let t = resolve(&ctx, &thread)?;
-            set_state(&ctx, &t.id, ThreadOp::Archive)?;
-            println!("archived: {}", t.title);
-            Ok(())
-        }
-        ThreadCommand::Delete { thread } => {
-            let t = resolve(&ctx, &thread)?;
-            set_state(&ctx, &t.id, ThreadOp::Delete)?;
-            println!("deleted: {}", t.title);
-            Ok(())
-        }
+        ThreadCommand::Done { thread } => change_state(&ctx, &thread, ThreadOp::Settle, "settled"),
+        ThreadCommand::Reopen { thread } => change_state(&ctx, &thread, ThreadOp::Reopen, "reopened"),
+        ThreadCommand::Archive { thread } => change_state(&ctx, &thread, ThreadOp::Archive, "archived"),
+        ThreadCommand::Delete { thread } => change_state(&ctx, &thread, ThreadOp::Delete, "deleted"),
     }
 }
 
+/// Characters of a thread id shown where a short one is enough to find it.
+const THREAD_ID_SHORT_CHARS: usize = 12;
+/// Characters of an agent's pubkey shown when its name is unknown.
+const PUBKEY_SHORT_CHARS: usize = 8;
+/// Most threads `axel thread ls` lists.
+const LIST_THREADS_MAX: usize = 100;
+/// Most recent messages `axel thread show` prints.
+const SHOW_MESSAGES_MAX: usize = 10;
+
+/// The first `chars` characters of an id (all of it when shorter).
+fn short_id(id: &str, chars: usize) -> &str {
+    id.char_indices().nth(chars).map_or(id, |(end, _)| &id[..end])
+}
+
+/// `axel thread new`'s arguments.
+struct NewThread {
+    title: String,
+    agent: String,
+    projects: Vec<std::path::PathBuf>,
+    scratch: bool,
+    worktree: Option<String>,
+    no_launch: bool,
+    runtime: Option<RuntimeArg>,
+    host: Option<String>,
+}
+
+fn new_thread(ctx: &Ctx, args: NewThread) -> Result<()> {
+    let NewThread { title, agent, projects, scratch, worktree, no_launch, runtime, host } = args;
+    if title.trim().is_empty() {
+        bail!("give the thread a title: what are we building?");
+    }
+    let a = ctx.store.agent_by_name(&agent)?.with_context(|| format!("no agent named {agent:?}"))?;
+    let projects = if scratch { vec![] } else if projects.is_empty() { vec![std::env::current_dir()?] } else { projects };
+    let (workspace, branch) = workspace_args(worktree);
+    if no_launch {
+        let t = record_thread(ctx, &title, &projects)?;
+        println!("{}", t.id);
+        return Ok(());
+    }
+    if let super::host::Placement::Host(h) = super::host::placement(ctx, &a.pubkey, host.as_deref())? {
+        let (thread, session) = super::host::new_thread_remote(ctx, &h.label, &title, &projects, &a.name, &[])?;
+        println!("thread {thread}\nsession {session} on {}\nopen the thread: axel thread open {}", h.label, short_id(&thread, THREAD_ID_SHORT_CHARS));
+        return Ok(());
+    }
+    let req = LaunchRequest { title, projects, agent_pubkey: a.pubkey, workspace, branch, thread_id: None, attachments: vec![] };
+    let opts = launch::LaunchOptions { target: launch::Target::NewWindow, runtime: runtime.map(rt), prompt: None, attachments: vec![], work_dir: None, resume: None };
+    report(launch::launch(ctx, req, opts)?)
+}
+
+fn spawn(ctx: &Ctx, thread: &str, agent: &str, prompt: Option<String>, runtime: Option<RuntimeArg>, host: Option<&str>) -> Result<()> {
+    let t = resolve(ctx, thread)?;
+    let a = ctx.store.agent_by_name(agent)?.with_context(|| format!("no agent named {agent:?}"))?;
+    if let super::host::Placement::Host(h) = super::host::placement(ctx, &a.pubkey, host)? {
+        let prompt = prompt.unwrap_or_else(|| t.intent.clone());
+        let session = super::host::launch_remote(ctx, &h.label, &t.id, &a.name, &prompt, &[])?;
+        println!("thread {}\nsession {session} on {}", t.id, h.label);
+        return Ok(());
+    }
+    let req = LaunchRequest { title: t.title.clone(), projects: vec![], agent_pubkey: a.pubkey, workspace: WorkspaceKind::InPlace, branch: None, thread_id: Some(t.id), attachments: vec![] };
+    let opts = launch::LaunchOptions { target: launch::Target::NewWindow, runtime: runtime.map(rt), prompt, attachments: vec![], work_dir: None, resume: None };
+    report(launch::launch(ctx, req, opts)?)
+}
+
+fn resume(ctx: &Ctx, thread: &str, agent: Option<String>) -> Result<()> {
+    let t = resolve(ctx, thread)?;
+    let last = ctx
+        .store
+        .list_sessions(SessionFilter { thread_id: Some(t.id.clone()), limit: Some(1), ..Default::default() })?
+        .into_iter()
+        .next()
+        .context("this thread has no session to resume")?;
+    let agent_pk = match agent {
+        Some(n) => ctx.store.agent_by_name(&n)?.with_context(|| format!("no agent named {n:?}"))?.pubkey,
+        None => last.agent_pubkey.clone(),
+    };
+    // Resuming is a spawn whose harness gets `--resume <id>`; the launch
+    // code reads AXEL_RESUME from the request's environment hint.
+    if let Some(hs) = &last.harness_session_id {
+        // SAFETY: single-threaded CLI; set before launch reads it.
+        unsafe { std::env::set_var("AXEL_RESUME", hs) };
+    } else {
+        eprintln!("axel: last session has no harness session id yet; starting fresh on the same thread");
+    }
+    let req = LaunchRequest { title: t.title.clone(), projects: vec![], agent_pubkey: agent_pk, workspace: WorkspaceKind::InPlace, branch: None, thread_id: Some(t.id), attachments: vec![] };
+    report(launch::launch(ctx, req, launch::LaunchOptions::default())?)
+}
+
+fn attach(ctx: &Ctx, thread: &str, project: std::path::PathBuf, worktree: Option<String>) -> Result<()> {
+    let t = resolve(ctx, thread)?;
+    let owner = ctx.owner()?;
+    let env = ctx.store.local_environment()?;
+    // A path that can't be canonicalized is still the user's choice; keep it as given.
+    let path = std::fs::canonicalize(&project).unwrap_or(project);
+    let key = launch::repo_key(&path);
+    ctx.store.upsert_project(&env.id, &path, key.as_deref())?;
+    let (kind, branch) = workspace_args(worktree);
+    let ws = match kind {
+        WorkspaceKind::Worktree => {
+            let repo = axel_config::git::repo_root(&path).context("not a git repository")?;
+            let branch = branch.unwrap_or_else(|| format!("axel/{}", axel_tui::slugify(&t.title)));
+            let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
+            let dest = crate::paths::worktrees_dir().join(name).join(branch.replace('/', "-"));
+            let wt = axel_config::git::ensure_worktree(&repo, &branch, &dest)?;
+            ThreadWorkspace { kind, branch: Some(branch), worktree_path: Some(wt) }
+        }
+        _ => ThreadWorkspace { kind: WorkspaceKind::InPlace, branch: axel_config::git::current_branch(&path), worktree_path: None },
+    };
+    ctx.store.attach_project(&owner, &t.id, key.as_deref(), &path, &ws)?;
+    println!("attached {} to {}", path.display(), t.title);
+    Ok(())
+}
+
+fn list(ctx: &Ctx, json: bool, all: bool) -> Result<()> {
+    // Reconciling only freshens session states; a stale row still lists.
+    super::reconcile::run(ctx).ok();
+    let states = if all { vec![ThreadState::Open, ThreadState::Done, ThreadState::Archived] } else { vec![ThreadState::Open] };
+    let states = Some(states);
+    let rows = ctx.store.thread_summaries(ThreadFilter { states, limit: Some(LIST_THREADS_MAX), ..Default::default() })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    let agents = ctx.store.list_agents()?;
+    for r in rows {
+        let names: Vec<String> = r
+            .agents
+            .iter()
+            .map(|pk| agents.iter().find(|a| &a.pubkey == pk).map(|a| a.name.clone()).unwrap_or_else(|| short_id(pk, PUBKEY_SHORT_CHARS).to_string()))
+            .collect();
+        let live = r.live.as_ref().map(|s| s.state.as_str()).unwrap_or("-");
+        let projects: Vec<String> = r.projects.iter().map(|p| p.path_hint.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).collect();
+        println!(
+            "{}  {:<8} {:<8} {:<20} {:<24} {:>2}s {:>7}  {}",
+            short_id(&r.thread.id, THREAD_ID_SHORT_CHARS),
+            r.thread.state,
+            live,
+            truncate(&names.join(","), 20),
+            truncate(&if projects.is_empty() { "scratch".into() } else { projects.join(",") }, 24),
+            r.sessions_total,
+            fmt_tokens(r.usage.input_tokens.saturating_add(r.usage.output_tokens)),
+            r.thread.title
+        );
+    }
+    Ok(())
+}
+
+fn show(ctx: &Ctx, thread: &str) -> Result<()> {
+    let t = resolve(ctx, thread)?;
+    let s = ctx.store.thread_summary(&t.id)?.context("thread vanished")?;
+    println!("{}", serde_json::to_string_pretty(&s)?);
+    let sessions = ctx.store.list_sessions(SessionFilter { thread_id: Some(t.id.clone()), ..Default::default() })?;
+    println!("sessions:");
+    for se in sessions {
+        println!(
+            "  {}  {:<8} agent {}  env {}  harness {}  resume {}",
+            se.id,
+            se.state,
+            short_id(&se.agent_pubkey, PUBKEY_SHORT_CHARS),
+            se.environment_label,
+            se.harness,
+            se.harness_session_id.as_deref().unwrap_or("-")
+        );
+    }
+    let msgs = ctx.store.thread_messages(&t.id)?;
+    println!("messages: {}", msgs.len());
+    for m in msgs.iter().rev().take(SHOW_MESSAGES_MAX).rev() {
+        println!("  {:<18} {}", axel_inbox::kind::name(m.kind), m.content.lines().next().unwrap_or(""));
+    }
+    Ok(())
+}
+
+/// Settle, reopen, archive or delete the thread, and say so (`done` is the past tense).
+fn change_state(ctx: &Ctx, thread: &str, op: ThreadOp, done: &str) -> Result<()> {
+    let t = resolve(ctx, thread)?;
+    set_state(ctx, &t.id, op)?;
+    println!("{done}: {}", t.title);
+    Ok(())
+}
 /// End every live session on a thread (closing their panes; remote ones
 /// through their host).  Returns how many ended.
 pub fn stop_thread(ctx: &Ctx, thread_id: &str) -> Result<usize> {
@@ -251,14 +292,18 @@ fn stop_sessions(ctx: &Ctx, thread_id: &str, agent_pubkey: Option<&str>, reason:
         // A frozen host cannot answer Stop until it and its tools wake up.
         if s.state == axel_store::SessionState::Paused { super::process_control::resume(ctx, s)?; }
         // Hosts without a pane (detached, or started outside Rex) only stop when asked.
+        // A host that doesn't answer has already gone: ending the row is what counts.
         if let Some(sock) = &s.socket_path {
             let _ = axel_acp::socket::send(sock, &axel_acp::socket::Command::Stop);
         }
         ctx.store.end_session(&owner, &s.id, Some(reason))?;
+        // The pane may already be closed by hand; nothing is left to close then.
         if let (Some(rex), Some(block)) = (&ctx.rex, s.rex_block_id.as_deref()) {
             rex.api_call("block.close", serde_json::json!({"block_id": block})).ok();
         }
     }
+    // The sessions have ended here already; a host we can't reach now learns
+    // of it at its next sync.
     for h in &hosts {
         let _ = super::host::sync_host(ctx, h, true);
     }
@@ -280,6 +325,7 @@ pub fn set_state(ctx: &Ctx, thread_id: &str, op: ThreadOp) -> Result<()> {
     ctx.store.update_thread(&ctx.owner()?, thread_id, None, Some(state))?;
     if matches!(op, ThreadOp::Archive | ThreadOp::Delete) {
         // Old checkpoints go with it (this thread's a week from now; others due).
+        // Collecting is housekeeping: what it misses now, the next run takes.
         let _ = super::gc::run(ctx, true);
     }
     Ok(())
@@ -292,7 +338,7 @@ pub fn record_thread(ctx: &Ctx, title: &str, projects: &[std::path::PathBuf]) ->
     let env = ctx.store.local_environment()?;
     let t = ctx.store.create_thread(&owner, &axel_tui::util::title_line(title), title, None)?;
     for p in projects {
-        let path = std::fs::canonicalize(p).unwrap_or(p.clone());
+        let path = std::fs::canonicalize(p).unwrap_or(p.clone()); // kept as given when it can't be resolved
         let key = launch::repo_key(&path);
         ctx.store.upsert_project(&env.id, &path, key.as_deref())?;
         let ws = ThreadWorkspace { kind: WorkspaceKind::InPlace, branch: axel_config::git::current_branch(&path), worktree_path: None };
@@ -310,7 +356,7 @@ pub(super) fn resolve(ctx: &Ctx, id_or_prefix: &str) -> Result<Thread> {
     let matches: Vec<Thread> = all.into_iter().filter(|t| t.id.starts_with(id_or_prefix) || t.title.to_lowercase().contains(&id_or_prefix.to_lowercase())).collect();
     match matches.len() {
         0 => bail!("no thread matches {id_or_prefix}"),
-        1 => Ok(matches.into_iter().next().unwrap()),
+        1 => Ok(matches.into_iter().next().expect("one match, checked by the arm")),
         n => bail!("{n} threads match {id_or_prefix}; be more specific"),
     }
 }
@@ -336,11 +382,11 @@ fn report(l: launch::Launched) -> Result<()> {
             println!("thread {thread_id}\nsession {session_id}");
             match (host_window, host_spec) {
                 (Some(w), _) => {
-                    println!("host in Rex window {w}\nopen the thread: axel thread open {}", &thread_id[..12]);
+                    println!("host in Rex window {w}\nopen the thread: axel thread open {}", short_id(&thread_id, THREAD_ID_SHORT_CHARS));
                     Ok(())
                 }
                 (None, Some(spec)) => {
-                    eprintln!("hosting here; open the thread elsewhere: axel thread open {}", &thread_id[..12]);
+                    eprintln!("hosting here; open the thread elsewhere: axel thread open {}", short_id(&thread_id, THREAD_ID_SHORT_CHARS));
                     launch::exec_inline(spec)
                 }
                 (None, None) => Ok(()),
