@@ -58,12 +58,13 @@ pub fn install() -> Result<PathBuf> {
     if app.exists() {
         std::fs::remove_dir_all(&app).with_context(|| format!("replacing {}", app.display()))?;
     }
-    std::fs::create_dir_all(app.parent().unwrap())?;
-    std::fs::create_dir_all(log_path().parent().unwrap())?;
+    std::fs::create_dir_all(app.parent().expect("the app path is inside a directory"))?;
+    std::fs::create_dir_all(log_path().parent().expect("log_path joins onto the logs directory"))?;
     run(Command::new("osacompile").arg("-o").arg(&app).arg("-e").arg(applet_source(&exe, &log_path())), "osacompile")?;
     let plist = app.join("Contents/Info.plist");
     let pb = |cmd: &str| run(Command::new("/usr/libexec/PlistBuddy").arg("-c").arg(cmd).arg(&plist), "PlistBuddy");
-    // osacompile's applets have no identifier of their own.
+    // osacompile's applets have no identifier of their own.  Each `Delete`
+    // fails when the key isn't there, which is fine: the `Add` after it is checked.
     let _ = pb("Delete :CFBundleIdentifier");
     pb(&format!("Add :CFBundleIdentifier string {BUNDLE_ID}"))?;
     let _ = pb("Delete :CFBundleURLTypes");
@@ -85,6 +86,7 @@ pub fn install() -> Result<PathBuf> {
 pub fn ensure_installed() {
     if cfg!(target_os = "macos") && !installed() {
         std::thread::spawn(|| {
+            // Links stay unhandled until it works; `axel links install` says why.
             let _ = install();
         });
     }
@@ -235,6 +237,7 @@ pub fn show_tools(thread_id: &str, fold: &str) -> Result<()> {
     // width it settles on, and again whenever it's resized.
     let mut width = settled_width();
     use std::io::Write;
+    // Flushing stdout can only fail when the pane is already gone.
     print!("{}", render(width));
     let _ = std::io::stdout().flush();
     while let Some(w) = wait_for_close_or_resize() {
@@ -1420,7 +1423,6 @@ fn grep_view(cmd: &str, output: &str, width: usize, links: &Linker) -> Option<St
                 cells.push((if matched { ':' } else { '-' }, Some("2")));
                 // …and past the code's own indent.
                 gutter_at = Some(cells.len() + text.chars().take_while(|c| *c == ' ').count());
-                let _ = sep;
                 let file = path.or(one_file);
                 let mut code: Vec<Cell> = match file {
                     Some(f) => colour_lines(text, Lang::File(f)).into_iter().next().unwrap_or_default(),
@@ -1601,6 +1603,7 @@ fn wrap_linked(text: &str, url: Option<&str>, width: usize, indent: &str, style:
         loop {
             let room = width.saturating_sub(pfx.chars().count()).max(10);
             let mut take = room.min(chars.len() - i);
+            debug_assert!(take > 0 || chars.is_empty(), "each round takes a character, so the loop ends");
             // Break after the last space that fits, unless that leaves the line
             // mostly empty (a long path or token breaks where it must).
             if i + take < chars.len()
@@ -1676,6 +1679,8 @@ fn output_text(v: Option<&serde_json::Value>) -> String {
 pub(super) fn wait_for_close_or_resize() -> Option<usize> {
     use crossterm::event::{Event, KeyCode, KeyEventKind, poll, read};
     use std::time::Duration;
+    // Without raw mode keys echo into the output; closing still works.  The
+    // pane closes right after, taking its terminal mode with it.
     let _ = crossterm::terminal::enable_raw_mode();
     let mut resized: Option<u16> = None;
     let result = loop {

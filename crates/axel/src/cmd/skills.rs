@@ -149,6 +149,7 @@ fn show_diff(old: &[PathBuf], new: &[PathBuf]) {
             continue;
         };
         // `git diff --no-index` exits 1 when the trees differ; that's the point.
+        // Its output is the report; a git that can't run only loses the detail.
         let _ = Command::new("git").args(["diff", "--no-index", "--stat", color]).arg(old_dir).arg(new_dir).status();
         let _ = Command::new("git").args(["diff", "--no-index", color]).arg(old_dir).arg(new_dir).status();
     }
