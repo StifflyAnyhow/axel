@@ -385,24 +385,8 @@ impl DiffView {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Some(Outcome::Close);
         }
-        if let Some(buf) = &mut self.input {
-            match key.code {
-                KeyCode::Esc => self.input = None,
-                KeyCode::Enter => {
-                    let note = self.input.take().unwrap_or_default();
-                    if !note.trim().is_empty()
-                        && let Some(d) = self.draft_at_cursor(note.trim().to_string())
-                    {
-                        self.drafts.push(d);
-                    }
-                    self.mark = None;
-                }
-                KeyCode::Backspace => {
-                    buf.pop();
-                }
-                KeyCode::Char(c) => buf.push(c),
-                _ => {}
-            }
+        if self.input.is_some() {
+            self.note_key(key.code);
             return None;
         }
         if self.confirm_undo {
@@ -419,48 +403,22 @@ impl DiffView {
                 self.horizontal = self.horizontal.saturating_add(8).min(max);
             }
             KeyCode::Home => self.horizontal = 0,
-            KeyCode::Tab if self.layout() == Layout::SideBySide => {
-                self.side = if self.side == Side::Old { Side::New } else { Side::Old };
-                if let Some(row) = self.rows().get(self.cursor_row()) {
-                    self.cursor = match self.side { Side::Old => row.left, Side::New => row.right }.or(row.full).unwrap_or_else(|| row.first());
-                }
-                self.mark = None;
-            }
+            KeyCode::Tab if self.layout() == Layout::SideBySide => self.switch_side(),
             KeyCode::Char('k') => self.move_cursor(-1),
             KeyCode::Char('j') => self.move_cursor(1),
             KeyCode::PageUp => self.move_cursor(-(self.page as isize)),
             KeyCode::PageDown | KeyCode::Char(' ') => self.move_cursor(self.page as isize),
-            KeyCode::Char('g') => self.move_cursor(-(self.data.patches.iter().map(|p| p.lines.len() + 1).sum::<usize>() as isize)),
-            KeyCode::Char('G') => self.move_cursor(self.data.patches.iter().map(|p| p.lines.len() + 1).sum::<usize>() as isize),
+            KeyCode::Char('g') => self.move_cursor(-self.all_rows()),
+            KeyCode::Char('G') => self.move_cursor(self.all_rows()),
             KeyCode::Char('v') => self.mark = if self.mark.is_some() { None } else { Some(self.cursor) },
             KeyCode::Char('s') => { self.layout = Some(self.layout().other()); self.follow_cursor = true; self.jump_file = false; },
-            KeyCode::Char('n') | KeyCode::Char('p') => {
-                let next = key.code == KeyCode::Char('n');
-                let hunks: Vec<_> = self.file_order().into_iter().flat_map(|file| {
-                    self.lines_for(file).iter().enumerate().filter(|(_, l)| l.kind == LineKind::Hunk).map(move |(i, _)| (file, i))
-                }).collect();
-                let order = self.file_order();
-                let position = |file| order.iter().position(|&f| f == file).unwrap_or(0);
-                let current = (position(self.file), self.cursor);
-                let eligible = |&(file, i): &(usize, usize)| self.mark.is_none() || (file == self.file && i != self.cursor);
-                let target = if next { hunks.iter().copied().filter(eligible).find(|&(file, i)| (position(file), i) > current) }
-                    else { hunks.iter().rev().copied().filter(eligible).find(|&(file, i)| (position(file), i) < current) };
-                if let Some((file, i)) = target { self.file = file; self.cursor = i; self.follow_cursor = true; self.jump_file = false; }
-            }
+            KeyCode::Char('n') | KeyCode::Char('p') => self.jump_hunk(key.code == KeyCode::Char('n')),
             KeyCode::Char('c') => {
                 if !self.lines().is_empty() {
                     self.input = Some(String::new());
                 }
             }
-            KeyCode::Char('d') => {
-                // Drop the draft under the cursor.
-                if let Some(path) = self.data.files.get(self.file).map(|f| f.path.clone())
-                    && let Some(line) = self.lines().get(self.cursor).cloned()
-                    && let Some(i) = self.drafts.iter().position(|d| d.path == path && covers(d, &line))
-                {
-                    self.drafts.remove(i);
-                }
-            }
+            KeyCode::Char('d') => self.drop_draft_at_cursor(),
             KeyCode::Enter => {
                 if !self.drafts.is_empty() {
                     return Some(Outcome::Send(review_message(self.data.turn, &self.drafts)));
@@ -481,6 +439,67 @@ impl DiffView {
             _ => {}
         }
         None
+    }
+
+    /// A key while typing a note: Enter keeps it as a draft on the marked lines.
+    fn note_key(&mut self, code: KeyCode) {
+        let Some(buf) = &mut self.input else { return };
+        match code {
+            KeyCode::Esc => self.input = None,
+            KeyCode::Enter => {
+                let note = self.input.take().unwrap_or_default();
+                if !note.trim().is_empty()
+                    && let Some(d) = self.draft_at_cursor(note.trim().to_string())
+                {
+                    self.drafts.push(d);
+                }
+                self.mark = None;
+            }
+            KeyCode::Backspace => {
+                buf.pop();
+            }
+            KeyCode::Char(c) => buf.push(c),
+            _ => {}
+        }
+    }
+
+    /// Side by side, Tab moves the cursor to the other side of its row.
+    fn switch_side(&mut self) {
+        self.side = if self.side == Side::Old { Side::New } else { Side::Old };
+        if let Some(row) = self.rows().get(self.cursor_row()) {
+            self.cursor = match self.side { Side::Old => row.left, Side::New => row.right }.or(row.full).unwrap_or_else(|| row.first());
+        }
+        self.mark = None;
+    }
+
+    /// Every row of every file, a header each: a move this far reaches either end.
+    fn all_rows(&self) -> isize {
+        let rows: usize = self.data.patches.iter().map(|p| p.lines.len() + 1).sum();
+        isize::try_from(rows).unwrap_or(isize::MAX)
+    }
+
+    /// `n`/`p`: to the next or previous hunk across files; while marking, only
+    /// within the marked file.
+    fn jump_hunk(&mut self, next: bool) {
+        let hunks: Vec<_> = self.file_order().into_iter().flat_map(|file| {
+            self.lines_for(file).iter().enumerate().filter(|(_, l)| l.kind == LineKind::Hunk).map(move |(i, _)| (file, i))
+        }).collect();
+        let order = self.file_order();
+        let position = |file| order.iter().position(|&f| f == file).unwrap_or(0);
+        let current = (position(self.file), self.cursor);
+        let eligible = |&(file, i): &(usize, usize)| self.mark.is_none() || (file == self.file && i != self.cursor);
+        let target = if next { hunks.iter().copied().filter(eligible).find(|&(file, i)| (position(file), i) > current) }
+            else { hunks.iter().rev().copied().filter(eligible).find(|&(file, i)| (position(file), i) < current) };
+        if let Some((file, i)) = target { self.file = file; self.cursor = i; self.follow_cursor = true; self.jump_file = false; }
+    }
+
+    fn drop_draft_at_cursor(&mut self) {
+        if let Some(path) = self.data.files.get(self.file).map(|f| f.path.clone())
+            && let Some(line) = self.lines().get(self.cursor).cloned()
+            && let Some(i) = self.drafts.iter().position(|d| d.path == path && covers(d, &line))
+        {
+            self.drafts.remove(i);
+        }
     }
 }
 

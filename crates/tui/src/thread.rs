@@ -651,19 +651,11 @@ impl ThreadView {
                 };
             }
             KeyCode::Up if self.focus == Focus::Composer => {
-                if key.modifiers.contains(KeyModifiers::SUPER) {
-                    self.composer.text_start();
-                } else if !self.composer.screen_line(self.composer_width, true) {
-                    self.history_step(true);
-                }
+                self.composer_vertical(key, true);
                 return ThreadAction::None;
             }
             KeyCode::Down if self.focus == Focus::Composer => {
-                if key.modifiers.contains(KeyModifiers::SUPER) {
-                    self.composer.text_end();
-                } else if !self.composer.screen_line(self.composer_width, false) {
-                    self.history_step(false);
-                }
+                self.composer_vertical(key, false);
                 return ThreadAction::None;
             }
             KeyCode::Up if self.focus != Focus::Queue => return self.move_cursor(-1),
@@ -673,30 +665,7 @@ impl ThreadView {
             // Shift+Tab cycles the live session's runtime mode (Claude Code's binding).
             KeyCode::BackTab => return self.cycle_mode(),
             KeyCode::Tab => {
-                // Composer → attachments → queue → timeline, skipping empty stops.
-                let order = [Focus::Composer, Focus::Attachments, Focus::Queue, Focus::Timeline];
-                let has_queue = !self.queued().is_empty();
-                let compose_only = self.compose_only;
-                let available = |f: Focus| match f {
-                    Focus::Attachments => !self.attachments.is_empty(),
-                    Focus::Queue => has_queue,
-                    Focus::Timeline => !compose_only,
-                    Focus::Composer => true,
-                };
-                let cur = order.iter().position(|f| *f == self.focus).unwrap_or(0);
-                let mut i = cur;
-                loop {
-                    i = (i + 1) % order.len();
-                    if available(order[i]) {
-                        break;
-                    }
-                }
-                self.focus = order[i];
-                if compose_only && self.focus == Focus::Composer && !has_queue && self.attachments.is_empty() {
-                    self.set_status("nothing to browse · scroll the message pane or click a tool-call link");
-                }
-                self.attach_sel = self.attach_sel.min(self.attachments.len().saturating_sub(1));
-                self.clamp_queue_sel();
+                self.next_focus();
                 return ThreadAction::None;
             }
             KeyCode::Char(' ') if shift && self.focus == Focus::Timeline => {
@@ -711,6 +680,38 @@ impl ThreadView {
             Focus::Queue => self.key_queue(key),
             Focus::Timeline => self.key_timeline(key),
         }
+    }
+
+    /// ↑/↓ in the composer: between its lines, and past the first or last
+    /// (or while browsing) through prompt history; with ⌘, to the start or end.
+    fn composer_vertical(&mut self, key: KeyEvent, up: bool) {
+        if key.modifiers.contains(KeyModifiers::SUPER) {
+            if up { self.composer.text_start() } else { self.composer.text_end() }
+        } else if !self.composer.screen_line(self.composer_width, up) {
+            self.history_step(up);
+        }
+    }
+
+    /// Tab: composer → attachments → queue → timeline, skipping empty stops.
+    fn next_focus(&mut self) {
+        let order = [Focus::Composer, Focus::Attachments, Focus::Queue, Focus::Timeline];
+        let has_queue = !self.queued().is_empty();
+        let compose_only = self.compose_only;
+        let available = |f: Focus| match f {
+            Focus::Attachments => !self.attachments.is_empty(),
+            Focus::Queue => has_queue,
+            Focus::Timeline => !compose_only,
+            Focus::Composer => true,
+        };
+        let cur = order.iter().position(|f| *f == self.focus).unwrap_or(0);
+        // Bounded: the composer is always available, so a lap finds a stop.
+        let i = (1..=order.len()).map(|step| (cur + step) % order.len()).find(|&i| available(order[i])).expect("the composer is always available");
+        self.focus = order[i];
+        if compose_only && self.focus == Focus::Composer && !has_queue && self.attachments.is_empty() {
+            self.set_status("nothing to browse · scroll the message pane or click a tool-call link");
+        }
+        self.attach_sel = self.attach_sel.min(self.attachments.len().saturating_sub(1));
+        self.clamp_queue_sel();
     }
 
     fn key_queue(&mut self, key: KeyEvent) -> ThreadAction {
