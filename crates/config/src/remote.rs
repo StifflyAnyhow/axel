@@ -21,6 +21,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, GitHubSkills, SKILL_FILE, Skill, SkillSource, WorkspaceConfig, config::read_text};
 
+/// How many directories deep [`skill_files`] looks into a checkout. Skill repos put a
+/// skill two or three levels down (`skills/<name>/SKILL.md`,
+/// `.claude/skills/<name>/SKILL.md`); 16 is far past that and still a fixed bound.
+const CHECKOUT_DEPTH_MAX: usize = 16;
+
 /// File name of the lock, next to `AXEL.md`.
 pub const AXEL_LOCK: &str = "AXEL.lock";
 
@@ -167,7 +172,7 @@ fn git(dir: Option<&Path>, args: &[&str]) -> Result<String, Error> {
 /// are a repo's own tooling, so they count only when nothing else matches.
 pub fn skill_files(checkout: &Path, skill: Option<&str>) -> Vec<PathBuf> {
     let mut all = Vec::new();
-    walk(checkout, &mut all);
+    walk(checkout, 0, &mut all);
     let hidden = |p: &Path| {
         p.strip_prefix(checkout).unwrap_or(p).components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
     };
@@ -195,17 +200,23 @@ pub fn skill_files(checkout: &Path, skill: Option<&str>) -> Vec<PathBuf> {
     files
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Collect the `SKILL.md` files under `dir`, at most [`CHECKOUT_DEPTH_MAX`] levels
+/// down. Directory symlinks are not followed: a checkout is someone else's tree, and
+/// a link to `/` or back to its own parent would walk the whole disk or never end.
+/// An entry that can't be read is skipped; the walk is a best-effort search.
+fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
-    let mut entries: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    entries.sort();
-    for path in entries {
+    let mut entries: Vec<(PathBuf, fs::FileType)> =
+        entries.filter_map(|e| e.ok()).filter_map(|e| Some((e.path(), e.file_type().ok()?))).collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (path, file_type) in entries {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if path.is_dir() {
-            if name != ".git" && name != "node_modules" {
-                walk(&path, out);
+        // `DirEntry::file_type` doesn't follow symlinks, so a linked directory isn't one.
+        if file_type.is_dir() {
+            if name != ".git" && name != "node_modules" && depth < CHECKOUT_DEPTH_MAX {
+                walk(&path, depth + 1, out);
             }
-        } else if name == SKILL_FILE {
+        } else if name == SKILL_FILE && !path.is_dir() {
             out.push(path);
         }
     }
@@ -382,6 +393,30 @@ mod tests {
         assert_eq!(names(skill_files(c, Some("internal"))), [".agents/skills/internal/SKILL.md"], "hidden only as a fallback");
         assert!(skill_files(c, Some("nope")).is_empty());
         assert_eq!(names(skill_files(c, None)).len(), 3, "a whole repo leaves out hidden dirs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_walk_stays_inside_the_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside/secret");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join(SKILL_FILE), "# not this repo's\n").unwrap();
+        let c = root.path().join("checkout");
+        fs::create_dir_all(c.join("skills/real")).unwrap();
+        fs::write(c.join("skills/real").join(SKILL_FILE), "# real\n").unwrap();
+        // A link out of the checkout, and two back into it (a loop that branches).
+        std::os::unix::fs::symlink(root.path().join("outside"), c.join("escape")).unwrap();
+        std::os::unix::fs::symlink(&c, c.join("skills/loop-a")).unwrap();
+        std::os::unix::fs::symlink(&c, c.join("skills/loop-b")).unwrap();
+        let found: Vec<String> = skill_files(&c, None).iter().map(|p| p.strip_prefix(&c).unwrap().display().to_string()).collect();
+        assert_eq!(found, ["skills/real/SKILL.md"]);
+
+        // Deeper than the limit is not searched.
+        let deep: PathBuf = std::iter::repeat_n("d", CHECKOUT_DEPTH_MAX + 1).collect();
+        fs::create_dir_all(c.join(&deep)).unwrap();
+        fs::write(c.join(&deep).join(SKILL_FILE), "# too deep\n").unwrap();
+        assert_eq!(skill_files(&c, None).len(), 1);
     }
 
     #[test]
