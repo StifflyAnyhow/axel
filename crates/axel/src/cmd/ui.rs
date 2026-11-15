@@ -1,4 +1,9 @@
 //! The launcher: a floating centered pane inside Rex, or inline elsewhere.
+//!
+//! Layout calls to Rex (focus, resize, label, close a pane) are best effort
+//! throughout, and their errors are dropped on purpose: a pane left unfocused,
+//! unlabelled or at Rex's own size still works, and the user can fix it by
+//! hand.  Calls that open the panes a command exists for are errors.
 
 use anyhow::{Context, Result};
 use axel_tui::{Deps, Outcome, Screen, SendCommand, SendReply};
@@ -185,26 +190,15 @@ fn floating_layers(rex: &axel_rex::Rex, labels: &[&str]) -> Result<Vec<String>> 
 /// when running inside a Rex floating layer, close that layer last.
 pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<()> {
     let ctx = Ctx::open()?;
-    let owner = ctx.owner()?;
-    let owner_pk = owner.public().to_string();
+    // The owner key is created on first use; have it before the TUI signs anything.
+    ctx.owner()?;
+    // Reconciling only freshens session states; the TUI still opens on stale ones.
     super::reconcile::run(&ctx).ok();
     // Remote hosts still working for us (e.g. after a reboot) resume syncing.
     super::host::resume_followers(&ctx);
 
-    let initial = match (screen, thread) {
-        (Some(ScreenArg::Thread), Some(id)) => {
-            let id = resolve_thread_id(&ctx, &id)?;
-            if let Some(rex) = &ctx.rex {
-                let block = rex.env().block.clone();
-                label_block_with_thread(&ctx, rex, &block, &id);
-            }
-            Screen::Thread(id)
-        }
-        (Some(ScreenArg::Thread), None) => anyhow::bail!("--screen thread needs --thread ID"),
-        (other, _) => initial_screen(other)?,
-    };
+    let initial = resolve_initial(&ctx, screen, thread)?;
     if initial == Screen::Usage { super::usage::start_reconciliation(); }
-    let _ = &owner_pk;
 
     let cwd = std::env::current_dir().context("reading current directory")?;
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
@@ -225,26 +219,20 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
     };
     let open_thread_ref: Option<&axel_tui::OpenThreadFn> = if ctx.rex.is_some() { Some(&open_thread) } else { None };
     // The prompt and the recent threads under it hand focus to each other.
-    let peer = ctx.rex.as_ref().and_then(|rex| {
-        let me = rex.env().block.clone();
-        let label = match block_label(rex, &me).as_deref() {
-            Some(PROMPT_LABEL) => THREADS_LABEL,
-            Some(THREADS_LABEL) => PROMPT_LABEL,
-            _ => return None,
-        };
-        sibling_block(rex, &me, label).map(|peer| (me, peer, label == THREADS_LABEL))
-    });
+    let peer = prompt_peer(&ctx);
     let focus_peer = || {
-        if let (Some(rex), Some((_, peer, _))) = (&ctx.rex, &peer) {
-            let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": peer }));
+        if let (Some(rex), Some(peer)) = (&ctx.rex, &peer) {
+            // Focus is a convenience: when Rex refuses, the user clicks.
+            let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": peer.other }));
         }
     };
     let fit_prompt = |size: axel_tui::PromptSize| {
-        if let (Some(rex), Some((me, threads, true))) = (&ctx.rex, &peer) {
+        if let (Some(rex), Some(Peer { me, other: threads, i_am_prompt: true })) = (&ctx.rex, &peer) {
             let ratio = match size {
                 axel_tui::PromptSize::Form => PROMPT_RATIO_EXPANDED,
                 axel_tui::PromptSize::Rows(want) => prompt_ratio(rex, me, threads, want),
             };
+            // A pane Rex won't resize keeps its size; the prompt still works in it.
             let _ = rex.api_call(
                 "session.resize_pane",
                 serde_json::json!({ "direction": "vertical", "before_block_id": me, "after_block_id": threads, "ratio": ratio }),
@@ -253,13 +241,8 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
     };
     let manage_thread = |tid: &str, op: axel_tui::ThreadOp| -> Result<()> { super::thread::set_state(&ctx, tid, op) };
     let focus_peer_ref: Option<&dyn Fn()> = if peer.is_some() { Some(&focus_peer) } else { None };
-    let fit_prompt_ref: Option<&dyn Fn(axel_tui::PromptSize)> = if matches!(peer, Some((_, _, true))) { Some(&fit_prompt) } else { None };
-    // A launch turns the prompt into the agent or thread pane: the threads pane goes.
-    let close_threads_pane = || {
-        if let (Some(rex), Some((_, threads, true))) = (&ctx.rex, &peer) {
-            let _ = rex.api_call("block.close", serde_json::json!({ "block_id": threads }));
-        }
-    };
+    let is_prompt = peer.as_ref().is_some_and(|p| p.i_am_prompt);
+    let fit_prompt_ref: Option<&dyn Fn(axel_tui::PromptSize)> = if is_prompt { Some(&fit_prompt) } else { None };
     let deps = Deps {
         store: &ctx.store,
         keystore: &ctx.keystore,
@@ -275,24 +258,69 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
         open_controls: None,
         open_terminal: None,
     };
-    match axel_tui::run(deps, initial)? {
+    let outcome = axel_tui::run(deps, initial)?;
+    finish(&ctx, outcome, peer.as_ref())
+}
+
+/// The screen `axel ui` opens on; a thread's pane is labelled with it.
+fn resolve_initial(ctx: &Ctx, screen: Option<ScreenArg>, thread: Option<String>) -> Result<Screen> {
+    match (screen, thread) {
+        (Some(ScreenArg::Thread), Some(id)) => {
+            let id = resolve_thread_id(ctx, &id)?;
+            if let Some(rex) = &ctx.rex {
+                let block = rex.env().block.clone();
+                label_block_with_thread(ctx, rex, &block, &id);
+            }
+            Ok(Screen::Thread(id))
+        }
+        (Some(ScreenArg::Thread), None) => anyhow::bail!("--screen thread needs --thread ID"),
+        (other, _) => initial_screen(other),
+    }
+}
+
+/// The launcher's other pane: the threads pane for the prompt, the prompt
+/// for the threads pane.
+struct Peer {
+    me: String,
+    other: String,
+    /// This pane is the prompt (and `other` the threads under it).
+    i_am_prompt: bool,
+}
+
+fn prompt_peer(ctx: &Ctx) -> Option<Peer> {
+    let rex = ctx.rex.as_ref()?;
+    let me = rex.env().block.clone();
+    let label = match block_label(rex, &me).as_deref() {
+        Some(PROMPT_LABEL) => THREADS_LABEL,
+        Some(THREADS_LABEL) => PROMPT_LABEL,
+        _ => return None,
+    };
+    let other = sibling_block(rex, &me, label)?;
+    Some(Peer { me, other, i_am_prompt: label == THREADS_LABEL })
+}
+
+/// Act on how the TUI ended.
+fn finish(ctx: &Ctx, outcome: Outcome, peer: Option<&Peer>) -> Result<()> {
+    match outcome {
         Outcome::Quit => {
-            close_own_layer(&ctx);
+            close_own_layer(ctx);
             Ok(())
         }
         Outcome::FocusSession(session_id) => {
             if let (Some(rex), Some(session)) = (&ctx.rex, ctx.store.get_session(&session_id)?)
                 && let Some(w) = session.rex_window_id.as_deref()
             {
+                // A window closed meanwhile can't be focused; the launcher closes regardless.
                 rex.focus_window(w).ok();
             }
-            close_own_layer(&ctx);
+            close_own_layer(ctx);
             Ok(())
         }
         Outcome::OpenLog(session_id) => {
             if let (Some(rex), Some(session)) = (&ctx.rex, ctx.store.get_session(&session_id)?)
                 && let Some(w) = session.rex_window_id.as_deref()
             {
+                // As above: a window closed meanwhile simply isn't focused.
                 rex.focus_window(w).ok();
             } else {
                 eprintln!("axel: log at {}", super::session::log_path(&session_id).display());
@@ -300,41 +328,51 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
             Ok(())
         }
         Outcome::Launch(req) => {
-            close_threads_pane();
-            // An agent that runs on a host: the thread is recorded here, the
-            // agent starts there, and this pane becomes the thread view.
-            if let super::host::Placement::Host(h) = super::host::placement(&ctx, &req.agent_pubkey, None)? {
-                let agent = ctx.store.agent_by_pubkey(&req.agent_pubkey)?.context("agent vanished")?;
-                let (thread_id, _) = super::host::new_thread_remote(&ctx, &h.label, &req.title, &req.projects, &agent.name, &req.attachments)?;
-                return open_thread_here(&ctx, &thread_id);
+            // A launch turns the prompt into the agent or thread pane: the threads pane goes.
+            if let (Some(rex), Some(Peer { other: threads, i_am_prompt: true, .. })) = (&ctx.rex, peer) {
+                // Left open, it is only clutter the user closes by hand.
+                let _ = rex.api_call("block.close", serde_json::json!({ "block_id": threads }));
             }
-            // Inside Rex the launcher pane becomes the agent pane (pane runtime)
-            // or the thread view (managed runtime).
-            let opts = launch::LaunchOptions { target: launch::Target::Here, ..Default::default() };
-            match launch::launch(&ctx, req, opts)? {
-                launch::Launched::Managed { thread_id, host_spec: Some(spec), .. } => {
-                    // Outside Rex: this terminal becomes the host; the view is `axel thread open`.
-                    eprintln!("axel: hosting managed session; open the thread with `axel thread open {thread_id}`");
-                    launch::exec_inline(spec)
+            launch_from_launcher(ctx, req)
+        }
+    }
+}
+
+/// Launch what the launcher asked for, turning this pane into its view.
+fn launch_from_launcher(ctx: &Ctx, req: axel_tui::LaunchRequest) -> Result<()> {
+    // An agent that runs on a host: the thread is recorded here, the
+    // agent starts there, and this pane becomes the thread view.
+    if let super::host::Placement::Host(h) = super::host::placement(ctx, &req.agent_pubkey, None)? {
+        let agent = ctx.store.agent_by_pubkey(&req.agent_pubkey)?.context("agent vanished")?;
+        let (thread_id, _) = super::host::new_thread_remote(ctx, &h.label, &req.title, &req.projects, &agent.name, &req.attachments)?;
+        return open_thread_here(ctx, &thread_id);
+    }
+    // Inside Rex the launcher pane becomes the agent pane (pane runtime)
+    // or the thread view (managed runtime).
+    let opts = launch::LaunchOptions { target: launch::Target::Here, ..Default::default() };
+    match launch::launch(ctx, req, opts)? {
+        launch::Launched::Managed { thread_id, host_spec: Some(spec), .. } => {
+            // Outside Rex: this terminal becomes the host; the view is `axel thread open`.
+            eprintln!("axel: hosting managed session; open the thread with `axel thread open {thread_id}`");
+            launch::exec_inline(spec)
+        }
+        launch::Launched::Managed { thread_id, .. } => open_thread_here(ctx, &thread_id),
+        launch::Launched::RexWindow { window_id, .. } => {
+            eprintln!("axel: launched in Rex window {window_id}");
+            close_own_layer(ctx);
+            Ok(())
+        }
+        launch::Launched::Inline { spec, label, thread_id, .. } => {
+            if let Some(rex) = &ctx.rex {
+                let block = rex.env().block.clone();
+                // Growing and labelling the pane are cosmetic; the agent starts either way.
+                if let Ok(Some(layer)) = layer_of_block(rex, &block) {
+                    rex.resize_layer(&layer, DASHBOARD_BOUNDS).ok();
                 }
-                launch::Launched::Managed { thread_id, .. } => open_thread_here(&ctx, &thread_id),
-                launch::Launched::RexWindow { window_id, .. } => {
-                    eprintln!("axel: launched in Rex window {window_id}");
-                    close_own_layer(&ctx);
-                    Ok(())
-                }
-                launch::Launched::Inline { spec, label, thread_id, .. } => {
-                    if let Some(rex) = &ctx.rex {
-                        let block = rex.env().block.clone();
-                        if let Ok(Some(layer)) = layer_of_block(rex, &block) {
-                            rex.resize_layer(&layer, DASHBOARD_BOUNDS).ok();
-                        }
-                        rex.set_block_label(&block, &label).ok();
-                        name_window_after_thread(&ctx, rex, &thread_id);
-                    }
-                    launch::exec_inline(spec)
-                }
+                rex.set_block_label(&block, &label).ok();
+                name_window_after_thread(ctx, rex, &thread_id);
             }
+            launch::exec_inline(spec)
         }
     }
 }
@@ -786,6 +824,7 @@ fn follow_window_label(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) {
                 rex.set_block_label(&block, &label).ok();
             }
         }
+        // Its output ended, so it has most likely exited already; killing is a backstop.
         let _ = child.kill();
     });
 }
@@ -1167,6 +1206,7 @@ fn fit_log(line: &str) {
     use std::io::Write;
     let path = crate::paths::home().join("logs").join("compose-fit.log");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        // A diagnostic log: a line lost to a full disk changes nothing.
         let _ = writeln!(f, "{} {line}", chrono::Local::now().format("%H:%M:%S%.3f"));
     }
 }
@@ -1244,7 +1284,8 @@ pub(super) fn send_to_session(ctx: &Ctx, session_id: &str, cmd: SendCommand) -> 
     let reply = if remote {
         super::host::relay(ctx, &session, &cmd)
     } else {
-        match axel_acp::socket::send(sock.as_deref().unwrap(), &cmd) {
+        let sock = sock.as_deref().expect("a local session without a socket returned early above");
+        match axel_acp::socket::send(sock, &cmd) {
             // Its host is gone (its pane closed, a crash): the session is over.
             // A message brings the agent back, resuming its conversation.
             Err(e) if host_gone(&e) => {
@@ -1278,6 +1319,7 @@ fn host_gone(e: &std::io::Error) -> bool {
 /// Mark a session whose host has died as ended.
 fn end_dead_session(ctx: &Ctx, session: &axel_store::Session) {
     if let Ok(owner) = ctx.owner() {
+        // Left unended, the next reconcile ends it: its host is gone either way.
         let _ = ctx.store.end_session(&owner, &session.id, Some("its session host had stopped"));
     }
 }
@@ -1380,7 +1422,7 @@ pub fn resolve_thread_id(ctx: &Ctx, id_or_prefix: &str) -> Result<String> {
     let hits: Vec<_> = all.into_iter().filter(|t| t.id.starts_with(id_or_prefix) || t.title.to_lowercase().contains(&id_or_prefix.to_lowercase())).collect();
     match hits.len() {
         0 => anyhow::bail!("no thread matches {id_or_prefix}"),
-        1 => Ok(hits.into_iter().next().unwrap().id),
+        1 => Ok(hits.into_iter().next().expect("one hit, checked by the arm").id),
         n => anyhow::bail!("{n} threads match {id_or_prefix}; be more specific"),
     }
 }
