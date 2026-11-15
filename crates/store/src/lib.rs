@@ -62,7 +62,15 @@ pub use wire::kind;
 pub const INBOX_SCOPE: &str = "inbox";
 
 /// How long `usage_samples` rows are kept, in seconds.
-pub const USAGE_SAMPLE_RETENTION_SECS: i64 = 24 * 60 * 60;
+pub const USAGE_SAMPLE_RETENTION_SECS: i64 = SECONDS_PER_DAY;
+
+pub(crate) const SECONDS_PER_HOUR: i64 = 60 * 60;
+pub(crate) const SECONDS_PER_DAY: i64 = 24 * SECONDS_PER_HOUR;
+
+/// How long a connection waits on another process's write lock before
+/// failing with `SQLITE_BUSY`.  Writes are single small transactions, so
+/// five seconds only runs out when something holds the lock abnormally.
+const BUSY_TIMEOUT_MS: u64 = 5_000;
 
 /// Current Unix time in seconds.
 pub(crate) fn now() -> i64 {
@@ -158,7 +166,7 @@ impl Store {
     }
 
     fn init(mut conn: Connection, on_disk: bool) -> Result<Store, Error> {
-        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         if on_disk {
             // Returns the resulting mode; "wal" on success, something else on
             // filesystems that cannot do WAL — not an error for us.

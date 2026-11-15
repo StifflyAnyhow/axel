@@ -90,7 +90,11 @@ impl Store {
         let rows = st.query_map(params![cursor, sql_limit(limit)], |r| {
             Ok((r.get::<_, i64>("seq")?, row_envelope(r)?))
         })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let events: Vec<(i64, Envelope)> = rows.collect::<Result<_, _>>()?;
+        debug_assert!(events.len() <= limit);
+        debug_assert!(events.first().is_none_or(|(seq, _)| *seq > cursor));
+        debug_assert!(events.windows(2).all(|w| w[0].0 < w[1].0), "seq is strictly increasing");
+        Ok(events)
     }
 
     /// Every envelope of a thread (projected or rejected) in replay order.
@@ -167,12 +171,23 @@ impl Store {
         for thread_id in &threads {
             replay_thread(&tx, thread_id, Some(&offsets))?;
         }
+        // Every event was either projected or rejected by the passes above.
+        debug_assert_eq!(
+            tx.query_row(
+                "SELECT COUNT(*) FROM events WHERE applied_at IS NULL AND rejected_reason IS NULL",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?,
+            0
+        );
         tx.commit()?;
         Ok(())
     }
 }
 
 fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
+    // Only `Store::append` calls this, after checking id and signature.
+    debug_assert!(env.verify().is_ok(), "an envelope is verified before it is stored");
     // Refused before storing, like a bad signature: a `created_at` past
     // `i64::MAX` would be stored negative and replay before everything.
     let created_at = sql_integer(env.created_at, "envelope created_at")?;
@@ -216,6 +231,12 @@ fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
         project_plain(conn, env)?;
     }
     let (projected, rejected_reason) = event_state(conn, &env.id)?;
+    // Each branch above settles the new event one way or the other.
+    assert!(
+        projected != rejected_reason.is_some(),
+        "event {} is exactly one of projected or rejected",
+        env.id
+    );
     Ok(Appended {
         inserted: true,
         projected,
@@ -232,18 +253,20 @@ fn event_state(conn: &Connection, id: &str) -> Result<(bool, Option<String>), Er
 }
 
 fn mark_applied(conn: &Connection, id: &str) -> Result<(), Error> {
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE events SET applied_at = ?2, rejected_reason = NULL WHERE id = ?1",
         params![id, now()],
     )?;
+    assert_eq!(updated, 1, "only a stored event is applied: {id}");
     Ok(())
 }
 
 fn mark_rejected(conn: &Connection, id: &str, reason: &str) -> Result<(), Error> {
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE events SET applied_at = NULL, rejected_reason = ?2 WHERE id = ?1",
         params![id, reason],
     )?;
+    assert_eq!(updated, 1, "only a stored event is rejected: {id}");
     Ok(())
 }
 
@@ -306,7 +329,7 @@ fn index_tags(conn: &Connection, env: &Envelope) -> Result<(), Error> {
 /// Pass-1 view of a participant: only the role matters for authorization;
 /// the full row is written by `apply`.
 #[derive(Clone, Copy, Debug)]
-struct PartRow {
+struct ParticipantRow {
     role: ParticipantRole,
 }
 
@@ -320,6 +343,8 @@ fn load_own_agents(conn: &Connection) -> Result<HashMap<String, Option<AuthTag>>
     })?;
     for row in rows {
         let (pubkey, auth_json) = row?;
+        // An attestation that does not parse or verify counts as none: the
+        // agent then has to be a participant itself, so this fails closed.
         let tag = auth_json
             .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
             .and_then(|t| AuthTag::from_tag(&t).ok())
@@ -371,6 +396,8 @@ fn delegation_problem(env: &Envelope, thread_id: &str) -> Option<String> {
 /// envelope or from this replica's agent registry, if the attestation verifies
 /// and its conditions permit this envelope.
 fn attested_owner(env: &Envelope, own_agents: &HashMap<String, Option<AuthTag>>) -> Option<String> {
+    // Every failure below (a bad key, a malformed `auth` tag, conditions
+    // that don't parse) means "no owner vouches", which fails closed.
     let agent = PublicKey::from_base58(author(env)).ok()?;
     let permits = |t: &AuthTag| {
         verify_attestation(t, &agent).is_ok()
@@ -397,7 +424,7 @@ fn attested_owner(env: &Envelope, own_agents: &HashMap<String, Option<AuthTag>>)
 /// Why `env` may not be projected on this thread, or `None` when it may.
 fn authorize(
     env: &Envelope,
-    participants: &BTreeMap<String, PartRow>,
+    participants: &BTreeMap<String, ParticipantRow>,
     own_agents: &HashMap<String, Option<AuthTag>>,
 ) -> Option<String> {
     let who = author(env);
@@ -432,9 +459,18 @@ pub(crate) fn replay_thread(
         let rows = st.query_map([thread_id], row_envelope)?;
         rows.collect::<Result<_, _>>()?
     };
+    debug_assert!(
+        events.windows(2).all(|w| (w[0].created_at, &w[0].id) < (w[1].created_at, &w[1].id)),
+        "replay order is (created_at, id), with no duplicate id"
+    );
+    debug_assert!(events.iter().all(|e| thread_id_of(e).as_deref() == Some(thread_id)));
+    let snapshot: LocalSessionState;
     let saved_offsets = match offsets {
-        Some(o) => o.clone(),
-        None => snapshot_offsets(conn, Some(thread_id))?,
+        Some(saved) => saved,
+        None => {
+            snapshot = snapshot_offsets(conn, Some(thread_id))?;
+            &snapshot
+        }
     };
     clear_thread(conn, thread_id)?;
     let own_agents = load_own_agents(conn)?;
@@ -446,13 +482,13 @@ pub(crate) fn replay_thread(
         return Ok(());
     };
     authorize_and_apply(conn, &events, thread_id, &roster, &own_agents)?;
-    restore_local_session_state(conn, &saved_offsets)
+    restore_local_session_state(conn, saved_offsets)
 }
 
 /// Pass 1 of a replay: the participant set, from the root and the
 /// participant changes its owners (or a leaving participant) signed.
 struct Roster<'a> {
-    participants: BTreeMap<String, PartRow>,
+    participants: BTreeMap<String, ParticipantRow>,
     /// Ids of the participant changes that took effect.
     valid_changes: HashSet<&'a str>,
 }
@@ -469,7 +505,7 @@ fn participant_roster<'a>(events: &'a [Envelope], thread_id: &str) -> Option<Ros
         if e.kind == kind::THREAD_CREATE && e.id == thread_id {
             roster.participants.insert(
                 e.from.clone(),
-                PartRow {
+                ParticipantRow {
                     role: ParticipantRole::Owner,
                 },
             );
@@ -501,7 +537,7 @@ fn apply_participant_change<'a>(roster: &mut Roster<'a>, e: &'a Envelope) {
         ParticipantAction::Add => {
             roster.participants.insert(
                 target.to_string(),
-                PartRow {
+                ParticipantRow {
                     role: op.role.unwrap_or(ParticipantRole::Member),
                 },
             );
@@ -608,6 +644,7 @@ fn parse<T: serde::de::DeserializeOwned>(env: &Envelope) -> Result<T, Applied> {
 /// Apply one authorized envelope to the projections: the kind decides which
 /// rows it writes, then every kind indexes its tags and bumps the thread.
 fn apply(conn: &Connection, e: &Envelope, thread_id: &str) -> Result<Applied, Error> {
+    debug_assert_eq!(thread_id_of(e).as_deref(), Some(thread_id));
     let at = i64::try_from(e.created_at)
         .expect("replayed events are read back from an i64 column");
     let applied = match e.kind {
@@ -743,7 +780,9 @@ fn apply_thread_participant(
         Ok(o) => o,
         Err(r) => return Ok(r),
     };
-    let target = e.first_tag(tag::MENTION).unwrap_or_default();
+    let target = e
+        .first_tag(tag::MENTION)
+        .expect("pass 1 only accepts a participant change that names its target");
     if op.op == ParticipantAction::Add {
         conn.execute(
             "INSERT OR REPLACE INTO thread_participants (thread_id, pubkey, role, added_by, added_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -842,6 +881,8 @@ fn apply_session_end(
         Ok(id) => id,
         Err(r) => return Ok(r),
     };
+    // The content only carries an optional reason: a malformed one still
+    // ends the session, without a reason.
     let end: wire::SessionEnd = parse(e).unwrap_or_default();
     conn.execute(
         "UPDATE sessions SET state = 'ended', ended_at = ?2, ended_reason = ?3 WHERE id = ?1 AND thread_id = ?4",
@@ -876,7 +917,7 @@ fn apply_turn(conn: &Connection, e: &Envelope, thread_id: &str, at: i64) -> Resu
             turn.files_edited,
             turn.duration_ms,
             turn.stop_reason,
-            turn.changes.as_ref().and_then(|c| serde_json::to_string(c).ok()),
+            turn.changes.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     Ok(Applied::Ok)

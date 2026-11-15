@@ -52,6 +52,7 @@ impl Store {
             [&item.session_id],
             |r| r.get(0),
         )?;
+        assert!(seq >= 1, "item seq counts from 1");
         let out = ConversationItem {
             id: new_id(),
             session_id: item.session_id.clone(),

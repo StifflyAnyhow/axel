@@ -28,7 +28,7 @@ fn hostname() -> String {
     "local".to_string()
 }
 
-fn row_environment(r: &Row<'_>) -> rusqlite::Result<Environment> {
+pub(crate) fn row_environment(r: &Row<'_>) -> rusqlite::Result<Environment> {
     Ok(Environment {
         id: r.get("id")?,
         label: r.get("label")?,
@@ -40,7 +40,7 @@ fn row_environment(r: &Row<'_>) -> rusqlite::Result<Environment> {
     })
 }
 
-const ENV_COLS: &str = "id, label, rex_host_id, is_local, created_at, ssh_target, host_pubkey";
+pub(crate) const ENV_COLS: &str = "id, label, rex_host_id, is_local, created_at, ssh_target, host_pubkey";
 
 impl Store {
     /// The environment row for this machine, created on first call with the

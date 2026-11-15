@@ -15,6 +15,11 @@ use crate::{TurnMark,
     Thread, ThreadState, ThreadWorkspace, TurnSummary, Usage, UsageDelta, new_id, now, sql_integer,
 };
 
+/// The most characters of assistant prose a shared turn carries: enough for
+/// the head of a reply, and it keeps a kind-40 envelope a few kilobytes
+/// (the bound `TurnSummary::assistant_text` documents).
+const ASSISTANT_TEXT_CHARS_MAX: usize = 2000;
+
 fn tag2(a: &str, b: &str) -> Vec<String> {
     vec![a.to_string(), b.to_string()]
 }
@@ -436,7 +441,7 @@ impl Store {
 
     /// Share a completed turn of a managed session (kind 40).  Only the
     /// summary travels; conversation items stay on this machine.  The
-    /// assistant text is cut to 2000 characters.
+    /// assistant text is cut to 2000 characters (`ASSISTANT_TEXT_CHARS_MAX`).
     pub fn record_turn(
         &self,
         signer: &Keypair,
@@ -445,8 +450,8 @@ impl Store {
     ) -> Result<(), Error> {
         let session = self.require_session(session_id)?;
         let mut summary = t.clone();
-        if summary.assistant_text.chars().count() > 2000 {
-            summary.assistant_text = summary.assistant_text.chars().take(2000).collect();
+        if summary.assistant_text.chars().count() > ASSISTANT_TEXT_CHARS_MAX {
+            summary.assistant_text = summary.assistant_text.chars().take(ASSISTANT_TEXT_CHARS_MAX).collect();
         }
         let env = self.build(
             signer,

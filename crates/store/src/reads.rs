@@ -11,7 +11,7 @@ use crate::{TurnMark,
     Error, Harness, INBOX_SCOPE, Participant, ParticipantRole, Session, SessionFilter, Status, Store, Thread,
     ThreadFilter, ThreadProject, ThreadSummary, ThreadWorkspace, Turn, TurnSummary, Usage,
     UsageSample, UsageTotals, UsageWindows, SessionContext, LimitWindow, PlanLimit,
-    get_integer, sql_integer, sql_limit,
+    SECONDS_PER_DAY, SECONDS_PER_HOUR, get_integer, sql_integer, sql_limit,
 };
 
 fn conv<E: std::error::Error + Send + Sync + 'static>(e: E) -> rusqlite::Error {
@@ -242,22 +242,29 @@ impl Store {
         })?;
         let mut out: Vec<ThreadProject> = rows.collect::<Result<_, _>>()?;
         if let Some(env) = local_env {
-            for tp in &mut out {
-                tp.local_project_id = match &tp.repo_key {
-                    Some(k) => self.project_by_repo_key(&env, k)?.map(|p| p.id),
-                    None => None,
-                }
-                .or(self
-                    .conn
-                    .query_row(
-                        "SELECT id FROM projects WHERE environment_id = ?1 AND path = ?2",
-                        params![env, tp.path_hint.to_string_lossy()],
-                        |r| r.get(0),
-                    )
-                    .optional()?);
+            for project in &mut out {
+                project.local_project_id = self.local_project_for(&env, project)?;
             }
         }
         Ok(out)
+    }
+
+    /// This replica's `projects.id` for an attached project: by repository
+    /// first, else by its path.
+    fn local_project_for(&self, env: &str, project: &ThreadProject) -> Result<Option<String>, Error> {
+        if let Some(key) = &project.repo_key
+            && let Some(found) = self.project_by_repo_key(env, key)?
+        {
+            return Ok(Some(found.id));
+        }
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM projects WHERE environment_id = ?1 AND path = ?2",
+                params![env, project.path_hint.to_string_lossy()],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// Who may act on a thread, owners first, then by join time.
@@ -294,6 +301,8 @@ fn row_session(r: &Row<'_>) -> rusqlite::Result<Session> {
         environment_label: r.get("environment_label")?,
         project_repo_key: r.get("project_repo_key")?,
         harness: Harness::parse(&r.get::<_, String>("harness")?),
+        // Text another build wrote reads as the default mode / runtime, the
+        // same leniency `wire::SessionStart` applies to the envelope.
         runtime_mode: r
             .get::<_, String>("runtime_mode")?
             .parse()
@@ -389,6 +398,8 @@ impl Store {
                     files_edited: r.get("files_edited")?,
                     duration_ms: r.get("duration_ms")?,
                     stop_reason: r.get("stop_reason")?,
+                    // A shape this build can't read shows as "no changes
+                    // recorded" rather than hiding the whole turn.
                     changes: r.get::<_, Option<String>>("changes_json")?.and_then(|j| serde_json::from_str(&j).ok()),
                 },
             })
@@ -411,6 +422,8 @@ impl Store {
                 before_tree: r.get("before_tree")?,
                 last_after_tree: r.get("last_after_tree")?,
                 user_text: r.get("user_text")?,
+                // Only marks files as authored in the turn's changes; an
+                // unreadable list loses that hint, not the hook's turn.
                 authored: serde_json::from_str(&r.get::<_, String>("authored_json")?).unwrap_or_default(),
                 tool_calls: r.get("tool_calls")?,
                 started_at: r.get("started_at")?,
@@ -607,7 +620,7 @@ impl Store {
         );
         let mut st = self.conn.prepare(&sql)?;
         let limit = limit.map(sql_limit).unwrap_or(-1);
-        let rows = st.query_map(params![now - 3600, now - 86_400, limit], |r| {
+        let rows = st.query_map(params![now - SECONDS_PER_HOUR, now - SECONDS_PER_DAY, limit], |r| {
             let totals = |at: usize| -> rusqlite::Result<UsageTotals> {
                 Ok(UsageTotals {
                     input_tokens: r.get(at)?,

@@ -29,12 +29,16 @@ pub fn estimate(model: Option<&str>, input: i64, output: i64, cache_read: i64, c
     (input as f64 * i + output as f64 * o + cache_read as f64 * cr + cache_write as f64 * cw) / 1_000_000.0
 }
 
+/// Prompt tokens past which OpenAI bills a call at its long-context rates
+/// (the 272k threshold on its price list).
+const LONG_CONTEXT_PROMPT_TOKENS: i64 = 272_000;
+
 /// Estimate one call, where prompt size determines supported long-context rates.
 /// `cache_write_1h` is a subset of `cache_write`, not additional tokens.
 pub fn estimate_call(model: Option<&str>, input: i64, output: i64, cache_read: i64, cache_write: i64, cache_write_1h: i64) -> f64 {
     let m = model.unwrap_or("").to_ascii_lowercase();
     let (mut i, mut o, mut cr, mut cw) = per_million(model);
-    let long = input.saturating_add(cache_read).saturating_add(cache_write) > 272_000;
+    let long = input.saturating_add(cache_read).saturating_add(cache_write) > LONG_CONTEXT_PROMPT_TOKENS;
     if long && ["gpt-6", "gpt-5.6", "gpt-5.4", "gpt-5.5"].iter().any(|s| m.contains(s)) {
         i *= 2.0; o *= 1.5; cr *= 2.0; cw *= 2.0;
     }

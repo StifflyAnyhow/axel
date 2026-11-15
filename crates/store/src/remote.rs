@@ -9,6 +9,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::items::{ITEM_COLS, row_item};
+use crate::local::{ENV_COLS, row_environment};
 use crate::log::{EVENT_COLS, row_envelope};
 use crate::{ConversationItem, Environment, Error, Store, now, sql_limit};
 
@@ -47,20 +48,6 @@ impl SyncStream {
             SyncStream::ItemsIn => "items_in",
         }
     }
-}
-
-const ENV_COLS: &str = "id, label, rex_host_id, is_local, created_at, ssh_target, host_pubkey";
-
-fn row_env(r: &rusqlite::Row<'_>) -> rusqlite::Result<Environment> {
-    Ok(Environment {
-        id: r.get("id")?,
-        label: r.get("label")?,
-        rex_host_id: r.get("rex_host_id")?,
-        is_local: r.get::<_, i64>("is_local")? != 0,
-        created_at: r.get("created_at")?,
-        ssh_target: r.get("ssh_target")?,
-        host_pubkey: r.get("host_pubkey")?,
-    })
 }
 
 impl Store {
@@ -112,7 +99,7 @@ impl Store {
     pub fn environment(&self, id: &str) -> Result<Option<Environment>, Error> {
         Ok(self
             .conn
-            .query_row(&format!("SELECT {ENV_COLS} FROM environments WHERE id = ?1"), [id], row_env)
+            .query_row(&format!("SELECT {ENV_COLS} FROM environments WHERE id = ?1"), [id], row_environment)
             .optional()?)
     }
 
@@ -123,7 +110,7 @@ impl Store {
             .query_row(
                 &format!("SELECT {ENV_COLS} FROM environments WHERE is_local = 0 AND label = ?1"),
                 [label],
-                row_env,
+                row_environment,
             )
             .optional()?)
     }
@@ -131,7 +118,7 @@ impl Store {
     /// Every remote host, by label.
     pub fn hosts(&self) -> Result<Vec<Environment>, Error> {
         let mut st = self.conn.prepare(&format!("SELECT {ENV_COLS} FROM environments WHERE is_local = 0 ORDER BY label"))?;
-        let rows = st.query_map([], row_env)?;
+        let rows = st.query_map([], row_environment)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 

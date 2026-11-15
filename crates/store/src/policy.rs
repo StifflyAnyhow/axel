@@ -18,10 +18,22 @@
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, RuntimeMode, Store, now};
+use crate::{Error, RuntimeMode, SECONDS_PER_DAY, Store, now};
 
 /// How deep a summon chain may go by default (owner → a → b → c).
 pub const DEFAULT_MAX_DEPTH: u32 = 3;
+
+/// The most `session_links` a chain walk follows.  Far past any depth a
+/// policy would allow (`DEFAULT_MAX_DEPTH` is 3), so it only stops a link
+/// table that a bug or a hand edit turned into a cycle.
+const SUMMON_CHAIN_LINKS_MAX: usize = 64;
+
+/// The depth of a session summoned from one at `parent_depth`.
+fn child_depth(parent_depth: u32) -> Result<u32, Error> {
+    parent_depth
+        .checked_add(1)
+        .ok_or_else(|| Error::Corrupt(format!("summon depth {parent_depth} has no successor")))
+}
 
 /// Which agents an agent may message or summon.  The owner is always reachable.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,7 +171,9 @@ pub fn local_day_start() -> i64 {
         .and_hms_opt(0, 0, 0)
         .and_then(|d| d.and_local_timezone(chrono::Local).earliest())
         .map(|d| d.timestamp())
-        .unwrap_or_else(|| now.timestamp() - 86_400)
+        // Local midnight can be skipped by a DST change; a day back is then
+        // a near enough start for a daily spending window.
+        .unwrap_or_else(|| now.timestamp() - SECONDS_PER_DAY)
 }
 
 impl Store {
@@ -198,7 +212,7 @@ impl Store {
 
     /// Record that `child` was summoned from `parent`; returns the child's depth.
     pub fn link_session(&self, child: &str, parent: &str) -> Result<u32, Error> {
-        let depth = self.session_depth(parent)? + 1;
+        let depth = child_depth(self.session_depth(parent)?)?;
         self.conn.execute(
             "INSERT OR REPLACE INTO session_links (session_id, parent_session_id, depth) VALUES (?1, ?2, ?3)",
             params![child, parent, depth],
@@ -218,14 +232,14 @@ impl Store {
     /// Agent pubkeys of a session and its ancestors, root first.
     pub fn summon_chain(&self, session_id: &str) -> Result<Vec<String>, Error> {
         let mut chain = Vec::new();
-        let mut cur = Some(session_id.to_string());
+        let mut current = Some(session_id.to_string());
         // Bounded walk: a corrupt link table can't hang us.
-        for _ in 0..64 {
-            let Some(id) = cur.take() else { break };
-            if let Some(s) = self.get_session(&id)? {
-                chain.push(s.agent_pubkey);
+        for _ in 0..SUMMON_CHAIN_LINKS_MAX {
+            let Some(id) = current.take() else { break };
+            if let Some(session) = self.get_session(&id)? {
+                chain.push(session.agent_pubkey);
             }
-            cur = self
+            current = self
                 .conn
                 .query_row("SELECT parent_session_id FROM session_links WHERE session_id = ?1", [&id], |r| r.get(0))
                 .optional()?;
@@ -277,7 +291,7 @@ impl Store {
         if !reach_granted && !from_policy.reach.allows(target) {
             return Ok(SummonCheck::Refused(Refusal::NotReachable { from, to: target.to_string() }));
         }
-        let depth = self.session_depth(caller)? + 1;
+        let depth = child_depth(self.session_depth(caller)?)?;
         if depth > from_policy.budget.max_depth {
             return Ok(SummonCheck::Refused(Refusal::TooDeep { agent: from, depth, max: from_policy.budget.max_depth }));
         }
