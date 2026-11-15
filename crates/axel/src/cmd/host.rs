@@ -593,13 +593,18 @@ pub struct SyncReport {
     pub branches: Vec<String>,
 }
 
+/// The most batches one sync moves in each direction: a million events or
+/// items.  Each batch's cursor is saved as it lands, so a sync that stops
+/// here (a host that never runs dry is a broken one) resumes from there.
+const SYNC_BATCHES_MAX: usize = 2000;
+
 /// Exchange envelopes and items with `host`; with `with_git`, also fetch the
 /// job branches of shared threads.
 pub fn sync_host(ctx: &Ctx, host: &Environment, with_git: bool) -> Result<SyncReport> {
     let mut report = SyncReport::default();
     let shared = ctx.store.shared_threads(&host.id)?;
     let mut cursor = ctx.store.peer_cursor(&host.id, SyncStream::EventsOut)?;
-    loop {
+    for _ in 0..SYNC_BATCHES_MAX {
         let batch = ctx.store.thread_events_since(cursor, Some(&shared), BATCH)?;
         let Some((last, _)) = batch.last() else { break };
         let last = *last;
@@ -614,7 +619,7 @@ pub fn sync_host(ctx: &Ctx, host: &Environment, with_git: bool) -> Result<SyncRe
     }
     let mut cursor = ctx.store.peer_cursor(&host.id, SyncStream::EventsIn)?;
     let mut notes = Vec::new();
-    loop {
+    for _ in 0..SYNC_BATCHES_MAX {
         let Response::Events { events } = call(host, &Request::PullEvents { cursor })? else { bail!("unexpected reply") };
         let n = events.len();
         for (seq, e) in &events {
@@ -633,7 +638,7 @@ pub fn sync_host(ctx: &Ctx, host: &Environment, with_git: bool) -> Result<SyncRe
         }
     }
     let mut cursor = ctx.store.peer_cursor(&host.id, SyncStream::ItemsIn)?;
-    loop {
+    for _ in 0..SYNC_BATCHES_MAX {
         let Response::Items { changes } = call(host, &Request::PullItems { cursor })? else { bail!("unexpected reply") };
         let n = changes.len();
         for c in &changes {
