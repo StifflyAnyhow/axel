@@ -10,7 +10,7 @@ use std::{
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, SkillSource, config::expand_tilde, config::split_frontmatter, remote::SkillRoot};
+use crate::{Error, SkillSource, config::expand_tilde, config::read_text, config::split_frontmatter, remote::SkillRoot};
 
 /// File name for the directory form of a skill.
 pub const SKILL_FILE: &str = "SKILL.md";
@@ -51,7 +51,9 @@ impl Skill {
 
     /// Parse a skill file. Malformed frontmatter is treated as plain body.
     pub fn from_file(path: &Path) -> Result<Skill, Error> {
-        let text = fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+        let text = read_text(path).map_err(|e| Error::io(path, e))?;
+        // Unterminated or unparsable frontmatter isn't an error here: the skill is
+        // still usable, named after its path and described by its body.
         let (yaml, body) = split_frontmatter(&text).unwrap_or((None, text.as_str()));
         let frontmatter = yaml
             .filter(|y| !y.trim().is_empty())
@@ -78,7 +80,8 @@ impl Skill {
 
     /// The skill's markdown with frontmatter removed.
     pub fn body(&self) -> Result<String, Error> {
-        let text = fs::read_to_string(&self.path).map_err(|e| Error::io(&self.path, e))?;
+        let text = read_text(&self.path).map_err(|e| Error::io(&self.path, e))?;
+        // As in `from_file`: frontmatter that doesn't close is part of the body.
         let (_, body) = split_frontmatter(&text).unwrap_or((None, text.as_str()));
         Ok(body.trim().to_string())
     }

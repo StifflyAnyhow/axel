@@ -92,7 +92,9 @@ pub fn branch_exists(repo: &Path, branch: &str) -> bool {
     .is_ok()
 }
 
-/// `remote/branch` for the first remote that has `branch`.
+/// `remote/branch` for the first remote that has `branch`. A failed lookup reads as
+/// "no remote has it": the worktree then gets a new branch, and git itself refuses
+/// later if that clashes.
 fn remote_branch(repo: &Path, branch: &str) -> Option<String> {
     run_git(
         repo,
@@ -135,6 +137,10 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<(PathBuf, String)>, Error> {
     Ok(worktrees)
 }
 
+/// The longest branch [`suggest_branch`] makes, in characters: long enough to keep a
+/// title's gist, short enough to read in a prompt and to keep worktree paths short.
+const BRANCH_CHARS_MAX: usize = 60;
+
 /// Turn a thread title into a branch name: `Fix the Login Bug!` -> `fix-the-login-bug`.
 pub fn suggest_branch(title: &str) -> String {
     let mut out = String::new();
@@ -159,7 +165,7 @@ pub fn suggest_branch(title: &str) -> String {
     } else {
         trimmed
             .chars()
-            .take(60)
+            .take(BRANCH_CHARS_MAX)
             .collect::<String>()
             .trim_end_matches('-')
             .to_string()
@@ -218,14 +224,27 @@ pub fn ensure_worktree(repo: &Path, branch: &str, dest: &Path) -> Result<PathBuf
         worktrees = list_worktrees(&root)?;
     }
 
-    if let Some((path, b)) = worktrees.iter().find(|(p, _)| same_path(p, &dest)) {
+    check_dest_is_free(&worktrees, &dest)?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+    }
+    add_worktree(&root, branch, &dest)?;
+    link_manifest(&root, &dest);
+    Ok(dest)
+}
+
+/// Refuse a `dest` that is already a worktree, or a directory with something in it.
+fn check_dest_is_free(worktrees: &[(PathBuf, String)], dest: &Path) -> Result<(), Error> {
+    if let Some((path, b)) = worktrees.iter().find(|(p, _)| same_path(p, dest)) {
         return Err(Error::Git(format!(
             "{} is already a worktree on branch `{b}`",
             path.display()
         )));
     }
     if dest.exists() {
-        let empty = fs::read_dir(&dest)
+        // A directory that can't be listed counts as not empty: never build on top of
+        // what we can't see.
+        let empty = fs::read_dir(dest)
             .map(|mut d| d.next().is_none())
             .unwrap_or(false);
         if !empty {
@@ -235,14 +254,16 @@ pub fn ensure_worktree(repo: &Path, branch: &str, dest: &Path) -> Result<PathBuf
             )));
         }
     }
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
-    }
+    Ok(())
+}
 
+/// `git worktree add` at `dest`: on the local `branch` when it exists, else tracking
+/// a remote branch of that name, else on a new branch forked from `HEAD`.
+fn add_worktree(root: &Path, branch: &str, dest: &Path) -> Result<(), Error> {
     let dest_arg = dest.as_os_str();
-    if branch_exists(&root, branch) {
+    if branch_exists(root, branch) {
         run_git(
-            &root,
+            root,
             [
                 OsStr::new("worktree"),
                 OsStr::new("add"),
@@ -250,9 +271,9 @@ pub fn ensure_worktree(repo: &Path, branch: &str, dest: &Path) -> Result<PathBuf
                 OsStr::new(branch),
             ],
         )?;
-    } else if let Some(remote) = remote_branch(&root, branch) {
+    } else if let Some(remote) = remote_branch(root, branch) {
         run_git(
-            &root,
+            root,
             [
                 OsStr::new("worktree"),
                 OsStr::new("add"),
@@ -265,7 +286,7 @@ pub fn ensure_worktree(repo: &Path, branch: &str, dest: &Path) -> Result<PathBuf
         )?;
     } else {
         run_git(
-            &root,
+            root,
             [
                 OsStr::new("worktree"),
                 OsStr::new("add"),
@@ -276,18 +297,23 @@ pub fn ensure_worktree(repo: &Path, branch: &str, dest: &Path) -> Result<PathBuf
             ],
         )?;
     }
+    Ok(())
+}
 
+/// Symlink the repo's `AXEL.md` into the worktree at `dest` when it has none (the
+/// manifest is often untracked).
+fn link_manifest(root: &Path, dest: &Path) {
     let main_manifest = root.join(AXEL_MD);
     let worktree_manifest = dest.join(AXEL_MD);
     if main_manifest.is_file()
         && !worktree_manifest.exists()
         && !crate::drivers::is_symlink(&worktree_manifest)
     {
+        // Best effort: the worktree works without it, agents just don't get the
+        // project context until someone adds one.
         #[cfg(unix)]
         let _ = std::os::unix::fs::symlink(&main_manifest, &worktree_manifest);
     }
-
-    Ok(dest)
 }
 
 /// Remove a worktree. With `force`, discard uncommitted changes in it.

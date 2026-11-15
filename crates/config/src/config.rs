@@ -22,6 +22,33 @@ use crate::Error;
 /// File name of the workspace manifest.
 pub const AXEL_MD: &str = "AXEL.md";
 
+/// The largest `AXEL.md`, `AXEL.lock` or skill file read. Real ones are a few KiB;
+/// 4 MiB is far past any of them and keeps a stray or hostile file (a remote skill
+/// repo is someone else's) from being read whole into memory.
+pub(crate) const TEXT_FILE_BYTES_MAX: u64 = 4 * 1024 * 1024;
+
+/// The longest base58 text of a 32-byte key: 32 bytes need at most 44 base58 digits.
+const PUBKEY_BASE58_CHARS_MAX: usize = 44;
+
+/// Read `path` as UTF-8, refusing a file past [`TEXT_FILE_BYTES_MAX`] with an
+/// `InvalidData` error. Other errors (`NotFound` in particular) come back as they are.
+pub(crate) fn read_text(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+
+    let file = fs::File::open(path)?;
+    let mut text = String::new();
+    // One byte past the limit tells "exactly at the limit" from "over it".
+    file.take(TEXT_FILE_BYTES_MAX + 1).read_to_string(&mut text)?;
+    let is_too_big = u64::try_from(text.len()).map_or(true, |read_bytes| read_bytes > TEXT_FILE_BYTES_MAX);
+    if is_too_big {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("larger than {TEXT_FILE_BYTES_MAX} bytes"),
+        ));
+    }
+    Ok(text)
+}
+
 // =============================================================================
 // Harness
 // =============================================================================
@@ -406,10 +433,12 @@ fn one_or_many<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>
 /// address). Ported from Axel v1.
 pub fn is_base58_pubkey(value: &str) -> bool {
     const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    if value.is_empty() || value.len() > 44 {
+    if value.is_empty() || value.len() > PUBKEY_BASE58_CHARS_MAX {
         return false;
     }
 
+    // The low byte of `carry`; the mask makes the conversion exact.
+    let low_byte = |carry: u32| u8::try_from(carry & 0xff).expect("masked to one byte");
     let mut bytes = vec![0_u8];
     for character in value.bytes() {
         let Some(digit) = ALPHABET
@@ -419,14 +448,15 @@ pub fn is_base58_pubkey(value: &str) -> bool {
             return false;
         };
 
-        let mut carry = digit as u32;
+        // At most 57 + 255 * 58, far inside u32.
+        let mut carry = u32::try_from(digit).expect("a base58 digit is below 58");
         for byte in bytes.iter_mut().rev() {
-            carry += (*byte as u32) * 58;
-            *byte = (carry & 0xff) as u8;
+            carry += u32::from(*byte) * 58;
+            *byte = low_byte(carry);
             carry >>= 8;
         }
         while carry > 0 {
-            bytes.insert(0, (carry & 0xff) as u8);
+            bytes.insert(0, low_byte(carry));
             carry >>= 8;
         }
     }
@@ -650,7 +680,7 @@ impl WorkspaceConfig {
     /// Read a manifest at an explicit path, resolving relative skill sources against
     /// its directory.
     pub fn load_file(path: &Path) -> Result<WorkspaceConfig, Error> {
-        let text = fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+        let text = read_text(path).map_err(|e| Error::io(path, e))?;
         let base = path.parent().filter(|p| !p.as_os_str().is_empty());
         let mut config = Self::parse_in(&text, base).map_err(|e| e.at(path))?;
         config.path = Some(path.to_path_buf());
@@ -809,6 +839,20 @@ pub fn split_frontmatter(text: &str) -> Result<(Option<&str>, &str), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_files_are_read_up_to_the_limit_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let limit = usize::try_from(TEXT_FILE_BYTES_MAX).unwrap();
+        let at_limit = dir.path().join("at-limit.md");
+        fs::write(&at_limit, "x".repeat(limit)).unwrap();
+        assert_eq!(read_text(&at_limit).unwrap().len(), limit);
+        let over = dir.path().join("over.md");
+        fs::write(&over, "x".repeat(limit + 1)).unwrap();
+        assert_eq!(read_text(&over).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        let missing = dir.path().join("missing.md");
+        assert_eq!(read_text(&missing).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn agent_profiles_still_deserialize() {

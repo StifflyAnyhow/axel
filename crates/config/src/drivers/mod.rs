@@ -135,6 +135,8 @@ pub(crate) fn install_nested(dir: &Path, skills: &[Skill]) -> Result<(), Error> 
             Some(skill_dir) => {
                 // An earlier install linked only the file: replace that with the dir link.
                 if !is_symlink(&slot) && remove_symlink(&slot.join(crate::skills::SKILL_FILE))? {
+                    // Only empties go; a slot still holding the user's own files stays,
+                    // and `place_symlink` below then leaves it alone.
                     let _ = fs::remove_dir(&slot);
                 }
                 if let Some(parent) = slot.parent() {
@@ -161,6 +163,8 @@ pub(crate) fn cleanup_nested(dir: &Path) -> Result<(), Error> {
             continue;
         }
         if path.is_dir() && remove_symlink(&path.join(crate::skills::SKILL_FILE))? {
+            // Only an empty directory is removed: one still holding the user's own
+            // files is meant to stay.
             let _ = fs::remove_dir(&path);
         }
     }

@@ -19,7 +19,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, GitHubSkills, SKILL_FILE, Skill, SkillSource, WorkspaceConfig};
+use crate::{Error, GitHubSkills, SKILL_FILE, Skill, SkillSource, WorkspaceConfig, config::read_text};
 
 /// File name of the lock, next to `AXEL.md`.
 pub const AXEL_LOCK: &str = "AXEL.lock";
@@ -37,7 +37,7 @@ impl Lock {
     /// Read `dir/AXEL.lock`; empty when it doesn't exist.
     pub fn load(dir: &Path) -> Result<Lock, Error> {
         let path = dir.join(AXEL_LOCK);
-        match fs::read_to_string(&path) {
+        match read_text(&path) {
             Ok(text) if text.trim().is_empty() => Ok(Lock::default()),
             Ok(text) => serde_norway::from_str(&text).map_err(|e| Error::from(e).at(&path)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Lock::default()),
@@ -101,11 +101,17 @@ impl Fetcher {
     fn fetch(&self, g: &GitHubSkills, what: &str) -> Result<(String, PathBuf), Error> {
         let parent = self.repo_dir(g);
         fs::create_dir_all(&parent).map_err(|e| Error::io(&parent, e))?;
+        // Only has to differ from other fetches in flight: the pid tells processes
+        // apart, the clock fetches within one (a clock before 1970 still gives a pid).
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let tmp = parent.join(format!(".fetch-{}-{nanos}", std::process::id()));
+        // git takes the path as text; an empty one would init the current directory.
+        let tmp_text = tmp
+            .to_str()
+            .ok_or_else(|| Error::Git(format!("the skills cache path {} is not UTF-8", tmp.display())))?;
         let result = (|| {
             let url = format!("{}/{}/{}.git", self.base_url, g.owner, g.repo);
-            git(None, &["init", "-q", tmp.to_str().unwrap_or_default()])?;
+            git(None, &["init", "-q", tmp_text])?;
             git(Some(&tmp), &["fetch", "-q", "--depth", "1", &url, what]).map_err(|e| match e {
                 Error::Git(msg) => Error::Git(format!("can't fetch {url}: {msg}")),
                 other => other,
@@ -115,6 +121,8 @@ impl Fetcher {
             fs::remove_dir_all(tmp.join(".git")).map_err(|e| Error::io(&tmp, e))?;
             let dest = parent.join(&commit);
             if dest.is_dir() {
+                // Another fetch got the same commit first; ours is a duplicate. A
+                // leftover `.fetch-*` directory is never read as a checkout.
                 let _ = fs::remove_dir_all(&tmp);
             } else {
                 fs::rename(&tmp, &dest).map_err(|e| Error::io(&dest, e))?;
@@ -122,6 +130,7 @@ impl Fetcher {
             Ok((commit, dest))
         })();
         if result.is_err() {
+            // Best effort: the fetch's own error is what the caller needs.
             let _ = fs::remove_dir_all(&tmp);
         }
         result
@@ -284,10 +293,19 @@ pub struct Update {
 /// Fetch every remote source's ref and report those that moved. Nothing is changed:
 /// apply an update by setting `lock.skills[source.key()] = to` and saving.
 pub fn check_updates(config: &WorkspaceConfig, cache: &Path) -> (Lock, Vec<Update>, Vec<String>) {
-    let lock = config.dir().map(|d| Lock::load(d).unwrap_or_default()).unwrap_or_default();
+    let mut errors = Vec::new();
+    // A lock that can't be read is reported and treated as empty, as `resolve` does:
+    // every source then shows as an update from no pin.
+    let lock = match config.dir().map(Lock::load) {
+        Some(Ok(lock)) => lock,
+        Some(Err(e)) => {
+            errors.push(format!("{e}; ignoring it"));
+            Lock::default()
+        }
+        None => Lock::default(),
+    };
     let fetcher = Fetcher::new(cache);
     let mut updates = Vec::new();
-    let mut errors = Vec::new();
     let skill_dirs = |dir: &Path, g: &GitHubSkills| -> Vec<PathBuf> {
         skill_files(dir, g.skill.as_deref()).iter().filter_map(|f| f.parent().map(Path::to_path_buf)).collect()
     };
@@ -295,7 +313,16 @@ pub fn check_updates(config: &WorkspaceConfig, cache: &Path) -> (Lock, Vec<Updat
         let from = lock.skills.get(&g.key()).cloned();
         match fetcher.latest(g) {
             Ok((to, dir)) if from.as_deref() != Some(to.as_str()) => {
-                let old = from.as_deref().and_then(|c| fetcher.checkout(g, c).ok()).map(|d| skill_dirs(&d, g)).unwrap_or_default();
+                // Without the pinned checkout the update still stands; it just can't
+                // show what the skills were.
+                let old = match from.as_deref().map(|commit| fetcher.checkout(g, commit)) {
+                    Some(Ok(old_dir)) => skill_dirs(&old_dir, g),
+                    Some(Err(e)) => {
+                        errors.push(format!("{g}: can't show the pinned skills: {e}"));
+                        Vec::new()
+                    }
+                    None => Vec::new(),
+                };
                 updates.push(Update { source: g.clone(), from, to, old, new: skill_dirs(&dir, g) });
             }
             Ok(_) => {}
