@@ -108,6 +108,7 @@ pub fn run() -> Result<Next> {
     let ctx = Ctx::open()?;
     let theme = theme();
     let term = Term::stderr();
+    // Clearing is cosmetic: on a terminal that refuses it, setup still reads fine.
     let _ = term.clear_screen();
 
     eprintln!();
@@ -118,56 +119,10 @@ pub fn run() -> Result<Next> {
     );
     eprintln!("  {}", dim("Let's check this machine and create an agent."));
 
-    // ---- this machine ---------------------------------------------------------
-    heading("This machine");
-    let rex = axel_rex::detect().is_some();
-    check(
-        rex,
-        "Rex",
-        if rex {
-            "you're in a Rex session".into()
-        } else {
-            dim("not here: Axel runs inline (superlogical.com/rex)")
-        },
-    );
-    check(
-        which("git").is_some(),
-        "git",
-        which("git")
-            .map(|p| tilde(&p))
-            .unwrap_or_else(|| "not found".into()),
-    );
-
-    // Every harness Axel knows, but only the ones on this machine are listed:
-    // the rest show up only when there's none at all.
-    let mut installed: Vec<&Harness> = Vec::new();
-    let all = Harness::BUILTIN;
-    for h in &all {
-        let Some(found) = which(h.program()) else { continue };
-        let adapter = adapter(h);
-        let managed = adapter.as_deref().and_then(which).is_some();
-        let how = match &adapter {
-            _ if managed => "· managed".to_string(),
-            // Its adapter is a separate install (Pi's, Amp's): name it.
-            Some(a) if a != h.program() => format!("· in a pane until you install its ACP adapter, {a}"),
-            _ => "· in a pane (no ACP adapter)".to_string(),
-        };
-        check(true, h.label(), format!("{}  {}", tilde(&found), dim(&how)));
-        installed.push(h);
-    }
+    let rex = check_machine();
+    let installed = installed_harnesses();
     if installed.is_empty() {
-        eprintln!();
-        eprintln!(
-            "  {}",
-            style("Axel runs your agents' own CLIs, and none is installed.").color256(DANGER)
-        );
-        eprintln!(
-            "  {}",
-            dim("Install one of them, log in once, then run `axel` again:")
-        );
-        for h in &all {
-            eprintln!("    {:<13} {}", style(h.label()).bold(), dim(h.install()));
-        }
+        explain_no_harness();
         return Ok(Next::Quit);
     }
 
@@ -190,153 +145,12 @@ pub fn run() -> Result<Next> {
         }
         eprintln!();
 
-        let taken = |n: &str| ctx.store.agent_by_name(n).ok().flatten().is_some();
-        let suggestion = NAMES
-            .iter()
-            .find(|n| !taken(n))
-            .map(|n| n.to_string())
-            .unwrap_or_default();
-        let name: String = Input::with_theme(&theme)
-            .with_prompt("Name")
-            .default(suggestion)
-            .validate_with(|s: &String| -> Result<(), String> {
-                let s = s.trim();
-                if s.is_empty()
-                    || !s
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                {
-                    Err("letters, digits, - and _ only, so it works as @name".into())
-                } else if ctx.store.agent_by_name(s).ok().flatten().is_some() {
-                    Err(format!("there's already an agent named {s}"))
-                } else {
-                    Ok(())
-                }
-            })
-            .interact_text()?;
-        let name = name.trim().to_string();
-
-        let harness = if installed.len() == 1 {
-            let h = installed[0];
-            eprintln!(
-                "  {} {} {} {}",
-                style("✓").color256(OK),
-                style("Harness").bold(),
-                dim("·"),
-                style(h.label()).fg(YOU)
-            );
-            h.clone()
-        } else {
-            let labels: Vec<String> = installed.iter().map(|h| h.label().to_string()).collect();
-            let i = Select::with_theme(&theme)
-                .with_prompt("Harness")
-                .items(&labels)
-                .default(0)
-                .interact()?;
-            installed[i].clone()
-        };
-        // Axel drives the harness's own CLI with its own login: without one,
-        // the agent can't start (Pi, say, refuses every session).
-        eprintln!(
-            "  {}",
-            dim(&format!("{} has to be logged in once: {}.", harness.label(), harness.login()))
-        );
-
-        let skills = pick_skills(&ctx, &theme)?;
-
-        let colors = AgentColor::ALL;
-        let color_items: Vec<String> = colors
-            .iter()
-            .map(|c| format!("{} {c}", style("●").color256(color_index(*c))))
-            .collect();
-        let used = ctx.store.list_agents().map(|a| a.len()).unwrap_or(0);
-        let default_color = colors
-            .iter()
-            .position(|c| *c == AgentColor::Orange)
-            .unwrap_or(0);
-        let ci = Select::with_theme(&theme)
-            .with_prompt("Colour")
-            .items(&color_items)
-            .default((default_color + used) % colors.len())
-            .interact()?;
-
-        let modes = [
-            (
-                RuntimeMode::Autopilot,
-                "autopilot",
-                "never asks; the guard still refuses irreversible commands",
-            ),
-            (
-                RuntimeMode::Edits,
-                "edits",
-                "file edits go through, anything else asks you",
-            ),
-            (
-                RuntimeMode::Supervised,
-                "supervised",
-                "asks before every action",
-            ),
-            (RuntimeMode::Plan, "plan", "read-only: looks and proposes"),
-        ];
-        let mode_items: Vec<String> = modes
-            .iter()
-            .map(|(_, n, d)| format!("{n:<11} {d}"))
-            .collect();
-        let mi = Select::with_theme(&theme)
-            .with_prompt("Mode")
-            .items(&mode_items)
-            .default(0)
-            .interact()?;
-        let mode = modes[mi].0;
-
-        let agent = super::agent::create(
-            &ctx,
-            &name,
-            harness.clone(),
-            None,
-            skills,
-            None,
-            Some(colors[ci]),
-            mode,
-        )
-        .context("creating the agent")?;
-        let key: String = agent.pubkey.chars().take(6).collect();
-        eprintln!();
-        eprintln!(
-            "  {} {} {}",
-            style("✓").color256(OK),
-            style(&agent.name).color256(color_index(colors[ci])).bold(),
-            dim(&format!("· key {key}… · attested by you"))
-        );
-
-        // Claude Code asks once per machine to accept bypass mode, which autopilot uses.
-        if harness == Harness::Claude && mode == RuntimeMode::Autopilot && !claude_bypass_accepted()
-        {
-            eprintln!();
-            let yes = Confirm::with_theme(&theme)
-                .with_prompt("Skip Claude Code's one-time autopilot prompt?")
-                .default(true)
-                .interact()?;
-            if yes {
-                match accept_claude_bypass() {
-                    Ok(path) => check(
-                        true,
-                        "Claude Code",
-                        dim(&format!("autopilot accepted in {}", tilde(&path))),
-                    ),
-                    Err(e) => check(
-                        false,
-                        "Claude Code",
-                        format!("couldn't update its settings: {e:#}"),
-                    ),
-                }
-            }
-        }
+        let agent_name = create_agent(&ctx, &theme, &installed)?;
 
         // ---- next -----------------------------------------------------------------
         eprintln!();
         let choices = [
-            format!("Open Axel and give @{} something to do", agent.name),
+            format!("Open Axel and give @{agent_name} something to do"),
             "Create another agent".to_string(),
         ];
         let pick = Select::with_theme(&theme)
@@ -353,25 +167,256 @@ pub fn run() -> Result<Next> {
             );
             continue;
         }
-        eprintln!();
-        eprintln!(
-            "  {}",
-            dim("Type what you want done in the prompt and press Enter, e.g.")
-        );
-        eprintln!(
-            "    {} {}",
-            style("›").fg(ACCENT).bold(),
-            style(format!("@{} add a health check endpoint", agent.name)).fg(YOU)
-        );
-        if !rex {
-            eprintln!(
-                "  {}",
-                dim("Inside Rex, `axel` floats over your window; here it runs inline.")
-            );
-        }
-        eprintln!();
+        print_first_steps(&agent_name, rex);
         return Ok(Next::Open);
     }
+}
+
+/// Report Rex and git; true when we run inside a Rex session.
+fn check_machine() -> bool {
+    heading("This machine");
+    let rex = axel_rex::detect().is_some();
+    check(
+        rex,
+        "Rex",
+        if rex {
+            "you're in a Rex session".into()
+        } else {
+            dim("not here: Axel runs inline (superlogical.com/rex)")
+        },
+    );
+    check(
+        which("git").is_some(),
+        "git",
+        which("git")
+            .map(|p| tilde(&p))
+            .unwrap_or_else(|| "not found".into()),
+    );
+    rex
+}
+
+/// Every harness Axel knows that is on this machine, each reported with how
+/// Axel would run it.  The rest show up only when there's none at all.
+fn installed_harnesses() -> Vec<Harness> {
+    let mut installed: Vec<Harness> = Vec::new();
+    for h in &Harness::BUILTIN {
+        let Some(found) = which(h.program()) else { continue };
+        let adapter = adapter(h);
+        let managed = adapter.as_deref().and_then(which).is_some();
+        let how = match &adapter {
+            _ if managed => "· managed".to_string(),
+            // Its adapter is a separate install (Pi's, Amp's): name it.
+            Some(a) if a != h.program() => format!("· in a pane until you install its ACP adapter, {a}"),
+            _ => "· in a pane (no ACP adapter)".to_string(),
+        };
+        check(true, h.label(), format!("{}  {}", tilde(&found), dim(&how)));
+        installed.push(h.clone());
+    }
+    installed
+}
+
+/// No harness on this machine: list them all, with how to install each.
+fn explain_no_harness() {
+    eprintln!();
+    eprintln!(
+        "  {}",
+        style("Axel runs your agents' own CLIs, and none is installed.").color256(DANGER)
+    );
+    eprintln!(
+        "  {}",
+        dim("Install one of them, log in once, then run `axel` again:")
+    );
+    for h in &Harness::BUILTIN {
+        eprintln!("    {:<13} {}", style(h.label()).bold(), dim(h.install()));
+    }
+}
+
+/// Ask for one agent's name, harness, skills, colour and mode, create it, and
+/// return its name.
+fn create_agent(ctx: &Ctx, theme: &ColorfulTheme, installed: &[Harness]) -> Result<String> {
+    assert!(!installed.is_empty(), "setup stops before asking when no harness is installed");
+    let name = ask_name(ctx, theme)?;
+    let harness = ask_harness(theme, installed)?;
+    // Axel drives the harness's own CLI with its own login: without one,
+    // the agent can't start (Pi, say, refuses every session).
+    eprintln!(
+        "  {}",
+        dim(&format!("{} has to be logged in once: {}.", harness.label(), harness.login()))
+    );
+
+    let skills = pick_skills(theme)?;
+    let color = ask_color(ctx, theme)?;
+    let mode = ask_mode(theme)?;
+
+    let agent = super::agent::create(
+        ctx,
+        &name,
+        harness.clone(),
+        None,
+        skills,
+        None,
+        Some(color),
+        mode,
+    )
+    .context("creating the agent")?;
+    let key: String = agent.pubkey.chars().take(6).collect();
+    eprintln!();
+    eprintln!(
+        "  {} {} {}",
+        style("✓").color256(OK),
+        style(&agent.name).color256(color_index(color)).bold(),
+        dim(&format!("· key {key}… · attested by you"))
+    );
+
+    // Claude Code asks once per machine to accept bypass mode, which autopilot uses.
+    if harness == Harness::Claude && mode == RuntimeMode::Autopilot && !claude_bypass_accepted()
+    {
+        offer_claude_bypass(theme)?;
+    }
+    Ok(agent.name)
+}
+
+fn ask_name(ctx: &Ctx, theme: &ColorfulTheme) -> Result<String> {
+    let taken = |n: &str| ctx.store.agent_by_name(n).ok().flatten().is_some();
+    let suggestion = NAMES
+        .iter()
+        .find(|n| !taken(n))
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    let name: String = Input::with_theme(theme)
+        .with_prompt("Name")
+        .default(suggestion)
+        .validate_with(|s: &String| -> Result<(), String> {
+            let s = s.trim();
+            if s.is_empty()
+                || !s
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                Err("letters, digits, - and _ only, so it works as @name".into())
+            } else if ctx.store.agent_by_name(s).ok().flatten().is_some() {
+                Err(format!("there's already an agent named {s}"))
+            } else {
+                Ok(())
+            }
+        })
+        .interact_text()?;
+    Ok(name.trim().to_string())
+}
+
+fn ask_harness(theme: &ColorfulTheme, installed: &[Harness]) -> Result<Harness> {
+    if let [only] = installed {
+        eprintln!(
+            "  {} {} {} {}",
+            style("✓").color256(OK),
+            style("Harness").bold(),
+            dim("·"),
+            style(only.label()).fg(YOU)
+        );
+        return Ok(only.clone());
+    }
+    let labels: Vec<String> = installed.iter().map(|h| h.label().to_string()).collect();
+    let index = Select::with_theme(theme)
+        .with_prompt("Harness")
+        .items(&labels)
+        .default(0)
+        .interact()?;
+    Ok(installed[index].clone())
+}
+
+/// The agent's colour; the default walks the palette from orange, one step
+/// per agent already made.
+fn ask_color(ctx: &Ctx, theme: &ColorfulTheme) -> Result<AgentColor> {
+    let colors = AgentColor::ALL;
+    let color_items: Vec<String> = colors
+        .iter()
+        .map(|c| format!("{} {c}", style("●").color256(color_index(*c))))
+        .collect();
+    let used = ctx.store.list_agents().map(|a| a.len()).unwrap_or(0);
+    let default_color = colors
+        .iter()
+        .position(|c| *c == AgentColor::Orange)
+        .unwrap_or(0);
+    let index = Select::with_theme(theme)
+        .with_prompt("Colour")
+        .items(&color_items)
+        .default((default_color + used) % colors.len())
+        .interact()?;
+    Ok(colors[index])
+}
+
+fn ask_mode(theme: &ColorfulTheme) -> Result<RuntimeMode> {
+    let modes = [
+        (
+            RuntimeMode::Autopilot,
+            "autopilot",
+            "never asks; the guard still refuses irreversible commands",
+        ),
+        (
+            RuntimeMode::Edits,
+            "edits",
+            "file edits go through, anything else asks you",
+        ),
+        (
+            RuntimeMode::Supervised,
+            "supervised",
+            "asks before every action",
+        ),
+        (RuntimeMode::Plan, "plan", "read-only: looks and proposes"),
+    ];
+    let mode_items: Vec<String> = modes
+        .iter()
+        .map(|(_, n, d)| format!("{n:<11} {d}"))
+        .collect();
+    let index = Select::with_theme(theme)
+        .with_prompt("Mode")
+        .items(&mode_items)
+        .default(0)
+        .interact()?;
+    Ok(modes[index].0)
+}
+
+fn offer_claude_bypass(theme: &ColorfulTheme) -> Result<()> {
+    eprintln!();
+    let yes = Confirm::with_theme(theme)
+        .with_prompt("Skip Claude Code's one-time autopilot prompt?")
+        .default(true)
+        .interact()?;
+    if yes {
+        match accept_claude_bypass() {
+            Ok(path) => check(
+                true,
+                "Claude Code",
+                dim(&format!("autopilot accepted in {}", tilde(&path))),
+            ),
+            Err(e) => check(
+                false,
+                "Claude Code",
+                format!("couldn't update its settings: {e:#}"),
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn print_first_steps(agent_name: &str, rex: bool) {
+    eprintln!();
+    eprintln!(
+        "  {}",
+        dim("Type what you want done in the prompt and press Enter, e.g.")
+    );
+    eprintln!(
+        "    {} {}",
+        style("›").fg(ACCENT).bold(),
+        style(format!("@{agent_name} add a health check endpoint")).fg(YOU)
+    );
+    if !rex {
+        eprintln!(
+            "  {}",
+            dim("Inside Rex, `axel` floats over your window; here it runs inline.")
+        );
+    }
+    eprintln!();
 }
 
 /// A path with the home directory shown as `~`.
@@ -407,8 +452,10 @@ fn color_index(c: AgentColor) -> u8 {
 
 /// Skills from `~/.config/axel/skills` to give the agent.  A few chosen ones beat
 /// all of them: each skill's description sits in every session's context.
-fn pick_skills(_ctx: &Ctx, theme: &ColorfulTheme) -> Result<Vec<String>> {
+fn pick_skills(theme: &ColorfulTheme) -> Result<Vec<String>> {
     let global = crate::paths::global_skills_dir();
+    // An unreadable skills directory is the same as an empty one here: the
+    // agent gets `*`, and launches report the directory's error themselves.
     let found = axel_config::find_all_skills(&[], Some(global.as_path())).unwrap_or_default();
     if found.is_empty() {
         eprintln!(
