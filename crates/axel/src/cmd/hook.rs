@@ -213,7 +213,7 @@ fn ask_owner(hook: &Hook, m: &Mapped, request_kind: u32) -> Result<()> {
                 serde_json::json!({
                     "hookSpecificOutput": {
                         "hookEventName": "PermissionRequest",
-                        "decision": { "behavior": decision }
+                        "decision": { "behavior": decision.as_str() }
                     }
                 })
             );
@@ -499,15 +499,44 @@ fn post_note(ctx: &Ctx, thread_id: &str, session_id: &str, kp: &axel_identity::K
     Ok(())
 }
 
-fn wait_for_reply(ctx: &Ctx, request_id: &str, timeout: Duration) -> Result<Option<&'static str>> {
+/// The owner's answer to a permission request, as Claude Code's hook output
+/// names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Decision {
+    Allow,
+    Deny,
+}
+
+impl Decision {
+    /// A reply's text: `allow` allows; anything else denies, so a garbled
+    /// answer never lets a tool through.
+    fn from_reply(content: &str) -> Decision {
+        if content.trim() == "allow" { Decision::Allow } else { Decision::Deny }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Decision::Allow => "allow",
+            Decision::Deny => "deny",
+        }
+    }
+}
+
+/// How often a waiting permission hook looks for the owner's reply.
+const REPLY_POLL_MS: u64 = 500;
+
+/// Wait up to `timeout` (bounded by `launch::HOOK_WAIT_SECS_MAX`) for the
+/// owner's reply to `request_id`.
+fn wait_for_reply(ctx: &Ctx, request_id: &str, timeout: Duration) -> Result<Option<Decision>> {
+    debug_assert!(timeout <= Duration::from_secs(launch::HOOK_WAIT_SECS_MAX), "the wait is capped where it is read");
     let start = Instant::now();
     while start.elapsed() < timeout {
         for m in ctx.store.replies_to(request_id)? {
             if m.kind == kind::PERMISSION_REPLY {
-                return Ok(Some(if m.content.trim() == "allow" { "allow" } else { "deny" }));
+                return Ok(Some(Decision::from_reply(&m.content)));
             }
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(REPLY_POLL_MS));
     }
     Ok(None)
 }
