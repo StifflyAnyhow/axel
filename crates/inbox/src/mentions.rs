@@ -126,6 +126,10 @@ pub fn match_names_to_profiles(names: &[String], profiles: &[Profile]) -> Vec<St
         .collect()
 }
 
+/// How long a 32-byte key is in base58: 44 characters for most keys, never
+/// fewer than 32 (each leading zero byte is one `1`).
+const PUBKEY_BASE58_CHARS: std::ops::RangeInclusive<usize> = 32..=44;
+
 fn is_base58_char(c: char) -> bool {
     c.is_ascii_alphanumeric() && !matches!(c, '0' | 'O' | 'I' | 'l')
 }
@@ -143,7 +147,7 @@ pub fn extract_pubkey_tokens(text: &str) -> Vec<String> {
         let token = raw
             .trim_start_matches(['@', '(', '[', '<', '"', '\''])
             .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '>', '"', '\'']);
-        if !(32..=44).contains(&token.len()) || !token.chars().all(is_base58_char) {
+        if !PUBKEY_BASE58_CHARS.contains(&token.len()) || !token.chars().all(is_base58_char) {
             continue;
         }
         let Ok(bytes) = bs58::decode(token).into_vec() else {
@@ -169,88 +173,66 @@ pub fn strip_code_regions(content: &str) -> String {
 
     while let Some(&(i, ch)) = chars.peek() {
         // Fenced code block: ``` at line start (possibly after whitespace).
-        if ch == '`' && content[i..].starts_with("```") {
-            let is_fence_start = if i == 0 {
-                true
-            } else {
-                let before = &content[..i];
-                before.ends_with('\n')
-                    || before.chars().all(|c| c.is_ascii_whitespace())
-                    || before.rsplit_once('\n').is_some_and(|(_, after_nl)| {
-                        after_nl.chars().all(|c| c.is_ascii_whitespace())
-                    })
-            };
-
-            if is_fence_start {
-                let after_fence = i + 3;
-                let rest = &content[after_fence..];
-                let line_end = rest
-                    .find('\n')
-                    .map_or(content.len(), |p| after_fence + p + 1);
-
-                let mut search_from = line_end;
-                let close_end = loop {
-                    if search_from >= content.len() {
-                        break content.len();
-                    }
-                    if let Some(pos) = content[search_from..].find("```") {
-                        let abs_pos = search_from + pos;
-                        let at_line_start = abs_pos == 0
-                            || content.as_bytes()[abs_pos - 1] == b'\n'
-                            || content[..abs_pos]
-                                .rsplit_once('\n')
-                                .is_some_and(|(_, after_nl)| {
-                                    after_nl.chars().all(|c| c.is_ascii_whitespace())
-                                });
-                        if at_line_start {
-                            let after_close = abs_pos + 3;
-                            let end = content[after_close..]
-                                .find('\n')
-                                .map_or(content.len(), |p| after_close + p + 1);
-                            break end;
-                        }
-                        search_from = abs_pos + 3;
-                    } else {
-                        break content.len();
-                    }
-                };
-
-                out.push(' ');
-                while let Some(&(ci, _)) = chars.peek() {
-                    if ci >= close_end {
-                        break;
-                    }
-                    chars.next();
-                }
-                continue;
-            }
+        if ch == '`' && content[i..].starts_with(FENCE) && starts_line(content, i) {
+            out.push(' ');
+            skip_until(&mut chars, fence_end(content, i));
+            continue;
         }
-
         // Inline code span: `…` on one line.
-        if ch == '`' {
-            let after_tick = i + 1;
-            if after_tick < content.len()
-                && let Some(rel_end) = content[after_tick..].find('`')
-            {
-                let close_pos = after_tick + rel_end;
-                if !content[after_tick..close_pos].contains('\n') {
-                    out.push(' ');
-                    while let Some(&(ci, _)) = chars.peek() {
-                        if ci > close_pos {
-                            break;
-                        }
-                        chars.next();
-                    }
-                    continue;
-                }
-            }
+        if ch == '`'
+            && let Some(close_pos) = inline_span_close(content, i)
+        {
+            out.push(' ');
+            skip_until(&mut chars, close_pos + 1);
+            continue;
         }
-
         out.push(ch);
         chars.next();
     }
 
     out
+}
+
+/// The marker that opens and closes a fenced code block.
+const FENCE: &str = "```";
+
+/// Whether only whitespace precedes byte `i` on its line.
+fn starts_line(content: &str, i: usize) -> bool {
+    let before = &content[..i];
+    let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+    before[line_start..].chars().all(|c| c.is_ascii_whitespace())
+}
+
+/// The byte just past the fenced block opened at byte `open`: past the line
+/// of its closing fence, or the end of `content` when it is never closed.
+fn fence_end(content: &str, open: usize) -> usize {
+    debug_assert!(content[open..].starts_with(FENCE));
+    let line_end = |from: usize| content[from..].find('\n').map_or(content.len(), |p| from + p + 1);
+    // Each pass moves `search_from` forward past a fence, so this ends.
+    let mut search_from = line_end(open + FENCE.len());
+    while search_from < content.len() {
+        let Some(found) = content[search_from..].find(FENCE) else { break };
+        let close = search_from + found;
+        if starts_line(content, close) {
+            return line_end(close + FENCE.len());
+        }
+        search_from = close + FENCE.len();
+    }
+    content.len()
+}
+
+/// The byte of the backtick closing the inline code span opened at byte
+/// `open`, if it closes on the same line.
+fn inline_span_close(content: &str, open: usize) -> Option<usize> {
+    let after_tick = open + 1;
+    let close_pos = after_tick + content.get(after_tick..)?.find('`')?;
+    let is_one_line = !content[after_tick..close_pos].contains('\n');
+    is_one_line.then_some(close_pos)
+}
+
+/// Advance `chars` to the first character at or past byte `end`.
+fn skip_until(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>, end: usize) {
+    while chars.next_if(|&(i, _)| i < end).is_some() {}
 }
 
 #[cfg(test)]

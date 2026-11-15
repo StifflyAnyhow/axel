@@ -58,6 +58,9 @@ pub fn compute_id(
     hex::encode(&digest)
 }
 
+/// Unix seconds now. A clock set before 1970 reads as 0 rather than
+/// failing to sign: the timestamp is informational and the id still covers
+/// whatever value is used.
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -262,7 +265,7 @@ impl EnvelopeBuilder {
         let id = compute_id(&from, created_at, self.kind, &self.tags, &self.content);
         let id_bytes = hex::decode_array::<32>(&id).expect("sha256 hex is 64 chars");
         let sig = hex::encode(&kp.sign(&id_bytes));
-        Ok(Envelope {
+        let envelope = Envelope {
             id,
             from,
             created_at,
@@ -270,7 +273,11 @@ impl EnvelopeBuilder {
             tags: self.tags,
             content: self.content,
             sig,
-        })
+        };
+        // Pairs with `Envelope::verify` on the receiving side: what we sign
+        // must verify there.
+        debug_assert!(envelope.verify().is_ok(), "a freshly signed envelope must verify");
+        Ok(envelope)
     }
 }
 

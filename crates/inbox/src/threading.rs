@@ -37,8 +37,11 @@ impl ThreadMarkers {
 
 /// True when `id` is exactly 64 ASCII-hex characters.
 pub fn is_message_id(id: &str) -> bool {
-    id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+    id.len() == MESSAGE_ID_HEX_CHARS && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
+
+/// An envelope id: a SHA-256 digest (32 bytes) in hex.
+const MESSAGE_ID_HEX_CHARS: usize = 32 * 2;
 
 /// Parse the `root`/`reply` markers from a tag list.
 ///
