@@ -436,13 +436,35 @@ pub(crate) fn replay_thread(
     clear_thread(conn, thread_id)?;
     let own_agents = load_own_agents(conn)?;
 
-    // Pass 1: the participant set, from the root and owner-signed changes.
-    let mut participants: BTreeMap<String, PartRow> = BTreeMap::new();
-    let mut valid_changes: HashSet<&str> = HashSet::new();
+    let Some(roster) = participant_roster(&events, thread_id) else {
+        for e in &events {
+            mark_rejected(conn, &e.id, "thread root (kind 100) not received yet")?;
+        }
+        return Ok(());
+    };
+    authorize_and_apply(conn, &events, thread_id, &roster, &own_agents)?;
+    restore_local_session_state(conn, &saved_offsets)
+}
+
+/// Pass 1 of a replay: the participant set, from the root and the
+/// participant changes its owners (or a leaving participant) signed.
+struct Roster<'a> {
+    participants: BTreeMap<String, PartRow>,
+    /// Ids of the participant changes that took effect.
+    valid_changes: HashSet<&'a str>,
+}
+
+/// The thread's roster after `events` (in replay order), or `None` while the
+/// thread root has not been received.
+fn participant_roster<'a>(events: &'a [Envelope], thread_id: &str) -> Option<Roster<'a>> {
+    let mut roster = Roster {
+        participants: BTreeMap::new(),
+        valid_changes: HashSet::new(),
+    };
     let mut root_seen = false;
-    for e in &events {
+    for e in events {
         if e.kind == kind::THREAD_CREATE && e.id == thread_id {
-            participants.insert(
+            roster.participants.insert(
                 e.from.clone(),
                 PartRow {
                     role: ParticipantRole::Owner,
@@ -450,52 +472,63 @@ pub(crate) fn replay_thread(
             );
             root_seen = true;
         } else if e.kind == kind::THREAD_PARTICIPANT {
-            let Some(target) = e.first_tag(tag::MENTION) else {
-                continue;
-            };
-            let Ok(op) = serde_json::from_str::<wire::ParticipantOp>(&e.content) else {
-                continue;
-            };
-            let signer_is_owner = participants
-                .get(&e.from)
-                .is_some_and(|p| p.role == ParticipantRole::Owner);
-            let self_remove = op.op == "remove" && target == e.from;
-            if !(signer_is_owner || self_remove) {
-                continue;
-            }
-            match op.op.as_str() {
-                "add" => {
-                    participants.insert(
-                        target.to_string(),
-                        PartRow {
-                            role: op.role.unwrap_or(ParticipantRole::Member),
-                        },
-                    );
-                }
-                "remove" => {
-                    participants.remove(target);
-                }
-                _ => continue,
-            }
-            valid_changes.insert(e.id.as_str());
+            apply_participant_change(&mut roster, e);
         }
     }
-    if !root_seen {
-        for e in &events {
-            mark_rejected(conn, &e.id, "thread root (kind 100) not received yet")?;
-        }
-        return Ok(());
-    }
+    root_seen.then_some(roster)
+}
 
-    // Pass 2: authorize and apply in order.
-    for e in &events {
+/// Mirror one participant change into `roster` if its signer may make it.
+fn apply_participant_change<'a>(roster: &mut Roster<'a>, e: &'a Envelope) {
+    let Some(target) = e.first_tag(tag::MENTION) else {
+        return;
+    };
+    let Ok(op) = serde_json::from_str::<wire::ParticipantOp>(&e.content) else {
+        return;
+    };
+    let signer_is_owner = roster
+        .participants
+        .get(&e.from)
+        .is_some_and(|p| p.role == ParticipantRole::Owner);
+    let self_remove = op.op == "remove" && target == e.from;
+    if !(signer_is_owner || self_remove) {
+        return;
+    }
+    match op.op.as_str() {
+        "add" => {
+            roster.participants.insert(
+                target.to_string(),
+                PartRow {
+                    role: op.role.unwrap_or(ParticipantRole::Member),
+                },
+            );
+        }
+        "remove" => {
+            roster.participants.remove(target);
+        }
+        _ => return,
+    }
+    roster.valid_changes.insert(e.id.as_str());
+}
+
+/// Pass 2 of a replay: authorize each event against the roster and apply
+/// it, in order.
+fn authorize_and_apply(
+    conn: &Connection,
+    events: &[Envelope],
+    thread_id: &str,
+    roster: &Roster<'_>,
+    own_agents: &HashMap<String, Option<AuthTag>>,
+) -> Result<(), Error> {
+    for e in events {
         let reason = if e.kind == kind::THREAD_CREATE {
             (e.id != thread_id).then(|| "a second thread root on this thread".to_string())
         } else if e.kind == kind::THREAD_PARTICIPANT {
-            (!valid_changes.contains(e.id.as_str()))
+            (!roster.valid_changes.contains(e.id.as_str()))
                 .then(|| "participant change not signed by a current owner".to_string())
         } else {
-            delegation_problem(e, thread_id).or_else(|| authorize(e, &participants, &own_agents))
+            delegation_problem(e, thread_id)
+                .or_else(|| authorize(e, &roster.participants, own_agents))
         };
         match reason {
             Some(r) => mark_rejected(conn, &e.id, &r)?,
@@ -505,12 +538,19 @@ pub(crate) fn replay_thread(
             },
         }
     }
+    Ok(())
+}
 
-    let mut st = conn.prepare_cached(
+/// Put back the local-only session columns a replay wiped.
+fn restore_local_session_state(
+    conn: &Connection,
+    saved: &LocalSessionState,
+) -> Result<(), Error> {
+    let mut statement = conn.prepare_cached(
         "UPDATE sessions SET transcript_offset = ?2, socket_path = ?3 WHERE id = ?1",
     )?;
-    for (id, (off, sock)) in &saved_offsets {
-        st.execute(params![id, off, sock])?;
+    for (id, (transcript_offset, socket_path)) in saved {
+        statement.execute(params![id, transcript_offset, socket_path])?;
     }
     Ok(())
 }
@@ -563,285 +603,363 @@ fn parse<T: serde::de::DeserializeOwned>(env: &Envelope) -> Result<T, Applied> {
         .map_err(|e| Applied::Rejected(format!("malformed content for kind {}: {e}", env.kind)))
 }
 
-/// Apply one authorized envelope to the projections.
+/// Apply one authorized envelope to the projections: the kind decides which
+/// rows it writes, then every kind indexes its tags and bumps the thread.
 fn apply(conn: &Connection, e: &Envelope, thread_id: &str) -> Result<Applied, Error> {
     let at = e.created_at as i64;
-    match e.kind {
-        kind::THREAD_CREATE => {
-            let title = e.first_tag(tag::TITLE).unwrap_or("");
-            let parent = e.tags.iter().find(|t| t.len() >= 2 && t[0] == tag::PARENT);
-            let parent_id = parent.map(|t| t[1].as_str());
-            let relationship = parent.and_then(|t| t.get(2)).map(String::as_str);
-            conn.execute(
-                "INSERT OR REPLACE INTO threads (id, title, intent, state, created_by, parent_thread_id, relationship, created_at, updated_at, done_at)
-                 VALUES (?1, ?2, ?3, 'open', ?4, ?5, ?6, ?7, ?7, NULL)",
-                params![e.id, title.trim(), e.content, e.from, parent_id, relationship, at],
-            )?;
-            conn.execute(
-                "INSERT OR REPLACE INTO thread_participants (thread_id, pubkey, role, added_by, added_at) VALUES (?1, ?2, 'owner', ?2, ?3)",
-                params![e.id, e.from, at],
-            )?;
-        }
-        kind::THREAD_UPDATE => {
-            let u: wire::ThreadUpdate = match parse(e) {
-                Ok(u) => u,
-                Err(r) => return Ok(r),
-            };
-            conn.execute(
-                "UPDATE threads SET
-                    title = COALESCE(?2, title),
-                    state = COALESCE(?3, state),
-                    done_at = CASE COALESCE(?3, state)
-                                WHEN 'done' THEN COALESCE(done_at, ?4)
-                                WHEN 'archived' THEN done_at
-                                WHEN 'deleted' THEN done_at
-                                ELSE NULL END
-                 WHERE id = ?1",
-                params![
-                    thread_id,
-                    u.title.as_deref().map(str::trim),
-                    u.state.map(|s| s.as_str()),
-                    at
-                ],
-            )?;
-        }
-        kind::THREAD_PROJECT => {
-            let op: wire::ThreadProjectOp = match parse(e) {
-                Ok(o) => o,
-                Err(r) => return Ok(r),
-            };
-            let Some(key) = op.key() else {
-                return Ok(Applied::Rejected(
-                    "thread.project without repo_key or path_hint".into(),
-                ));
-            };
-            match op.op.as_str() {
-                "attach" => {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO thread_projects (thread_id, key, repo_key, path_hint, workspace_kind, branch, worktree_path, added_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![
-                            thread_id,
-                            key,
-                            op.repo_key.as_deref().filter(|k| !k.is_empty()),
-                            op.path_hint.as_deref().unwrap_or(key),
-                            op.workspace_kind.unwrap_or(crate::WorkspaceKind::InPlace).as_str(),
-                            op.branch,
-                            op.worktree_path,
-                            at
-                        ],
-                    )?;
-                }
-                "detach" => {
-                    conn.execute(
-                        "DELETE FROM thread_projects WHERE thread_id = ?1 AND (key = ?2 OR repo_key = ?2 OR path_hint = ?2)",
-                        params![thread_id, key],
-                    )?;
-                }
-                other => {
-                    return Ok(Applied::Rejected(format!(
-                        "unknown thread.project op {other:?}"
-                    )));
-                }
-            }
-        }
-        kind::THREAD_PARTICIPANT => {
-            // Validated in pass 1; mirror the change.
-            let op: wire::ParticipantOp = match parse(e) {
-                Ok(o) => o,
-                Err(r) => return Ok(r),
-            };
-            let target = e.first_tag(tag::MENTION).unwrap_or_default();
-            if op.op == "add" {
-                conn.execute(
-                    "INSERT OR REPLACE INTO thread_participants (thread_id, pubkey, role, added_by, added_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![thread_id, target, op.role.unwrap_or(ParticipantRole::Member).as_str(), e.from, at],
-                )?;
-            } else {
-                conn.execute(
-                    "DELETE FROM thread_participants WHERE thread_id = ?1 AND pubkey = ?2",
-                    params![thread_id, target],
-                )?;
-            }
-        }
-        kind::SESSION_START => {
-            let Some(session_id) = e.first_tag(tag::SESSION) else {
-                return Ok(Applied::Rejected("session.start without an s tag".into()));
-            };
-            let s: wire::SessionStart = match parse(e) {
-                Ok(s) => s,
-                Err(r) => return Ok(r),
-            };
-            let agent = e.first_tag(tag::MENTION).unwrap_or(author(e));
-            conn.execute(
-                "INSERT OR REPLACE INTO sessions (id, thread_id, agent_pubkey, environment_id, environment_label, project_repo_key,
-                     harness, runtime_mode, resumed_from, runtime, state, started_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11)",
-                params![
-                    session_id,
-                    thread_id,
-                    agent,
-                    s.environment_id,
-                    s.environment_label,
-                    s.project_repo_key,
-                    s.harness.as_str(),
-                    s.runtime_mode.as_str(),
-                    s.resumed_from,
-                    s.runtime.as_str(),
-                    at
-                ],
-            )?;
-        }
-        kind::SESSION_UPDATE => {
-            let Some(session_id) = e.first_tag(tag::SESSION) else {
-                return Ok(Applied::Rejected("session.update without an s tag".into()));
-            };
-            let u: wire::SessionUpdateWire = match parse(e) {
-                Ok(u) => u,
-                Err(r) => return Ok(r),
-            };
-            conn.execute(
-                "UPDATE sessions SET
-                    harness_session_id = COALESCE(?2, harness_session_id),
-                    transcript_path = COALESCE(?3, transcript_path),
-                    state = CASE WHEN state = 'ended' THEN state ELSE COALESCE(?4, state) END,
-                    runtime_mode = COALESCE(?6, runtime_mode)
-                 WHERE id = ?1 AND thread_id = ?5",
-                params![
-                    session_id,
-                    u.harness_session_id,
-                    u.transcript_path,
-                    u.state.map(|s| s.as_str()),
-                    thread_id,
-                    u.runtime_mode.map(|m| m.as_str())
-                ],
-            )?;
-            if let Some(rex) = u.rex {
-                conn.execute(
-                    "UPDATE sessions SET rex_session_id = ?2, rex_window_id = ?3, rex_block_id = ?4 WHERE id = ?1 AND thread_id = ?5",
-                    params![session_id, rex.session, rex.window, rex.block, thread_id],
-                )?;
-            }
-        }
-        kind::SESSION_END => {
-            let Some(session_id) = e.first_tag(tag::SESSION) else {
-                return Ok(Applied::Rejected("session.end without an s tag".into()));
-            };
-            let end: wire::SessionEnd = parse(e).unwrap_or_default();
-            conn.execute(
-                "UPDATE sessions SET state = 'ended', ended_at = ?2, ended_reason = ?3 WHERE id = ?1 AND thread_id = ?4",
-                params![session_id, at, end.reason, thread_id],
-            )?;
-        }
-        kind::TURN => {
-            let Some(session_id) = e.first_tag(tag::SESSION) else {
-                return Ok(Applied::Rejected("turn without an s tag".into()));
-            };
-            let t: crate::TurnSummary = match parse(e) {
-                Ok(t) => t,
-                Err(r) => return Ok(r),
-            };
-            conn.execute(
-                "INSERT OR REPLACE INTO turns (id, thread_id, session_id, from_pubkey, created_at, ordinal, user_text,
-                     assistant_text, tool_calls, files_edited, duration_ms, stop_reason, changes_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
-                    e.id,
-                    thread_id,
-                    session_id,
-                    author(e),
-                    at,
-                    t.ordinal,
-                    t.user_text,
-                    t.assistant_text,
-                    t.tool_calls,
-                    t.files_edited,
-                    t.duration_ms,
-                    t.stop_reason,
-                    t.changes.as_ref().and_then(|c| serde_json::to_string(c).ok()),
-                ],
-            )?;
-        }
-        kind::STATUS => {
-            let Some(session_id) = e.first_tag(tag::SESSION) else {
-                return Ok(Applied::Rejected("status without an s tag".into()));
-            };
-            let s: crate::StatusReport = match parse(e) {
-                Ok(s) => s,
-                Err(r) => return Ok(r),
-            };
-            conn.execute(
-                "INSERT OR REPLACE INTO status (session_id, thread_id, state, kind, title, msg, progress, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    session_id,
-                    thread_id,
-                    s.state.as_str(),
-                    s.kind.map(|k| k.as_str()),
-                    s.title,
-                    s.msg,
-                    s.progress.map(i64::from),
-                    at
-                ],
-            )?;
-            let live = match s.state {
-                StatusState::Working => Some(SessionState::Running),
-                StatusState::Blocked => Some(SessionState::Blocked),
-                StatusState::Idle => Some(SessionState::Idle),
-                StatusState::Done | StatusState::Error => None,
-            };
-            if let Some(live) = live {
-                conn.execute(
-                    "UPDATE sessions SET state = ?2 WHERE id = ?1 AND state <> 'ended'",
-                    params![session_id, live.as_str()],
-                )?;
-            }
-        }
-        kind::USAGE => {
-            let Some(session_id) = e.first_tag(tag::SESSION) else {
-                return Ok(Applied::Rejected("usage without an s tag".into()));
-            };
-            let d: wire::UsageWire = match parse(e) {
-                Ok(d) => d,
-                Err(r) => return Ok(r),
-            };
-            conn.execute(
-                "INSERT INTO usage (session_id, thread_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, turns, cost_usd_est, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT (session_id) DO UPDATE SET
-                    input_tokens = usage.input_tokens + excluded.input_tokens,
-                    output_tokens = usage.output_tokens + excluded.output_tokens,
-                    cache_read_tokens = usage.cache_read_tokens + excluded.cache_read_tokens,
-                    cache_write_tokens = usage.cache_write_tokens + excluded.cache_write_tokens,
-                    turns = usage.turns + excluded.turns,
-                    cost_usd_est = usage.cost_usd_est + excluded.cost_usd_est,
-                    updated_at = MAX(usage.updated_at, excluded.updated_at)",
-                params![session_id, thread_id, d.input, d.output, d.cache_read, d.cache_write, d.turns, d.cost_usd_est, at],
-            )?;
-            if at >= now() - USAGE_SAMPLE_RETENTION_SECS {
-                conn.execute(
-                    "INSERT OR IGNORE INTO usage_samples (event_id, session_id, thread_id, at, input_tokens, output_tokens)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![e.id, session_id, thread_id, at, d.input, d.output],
-                )?;
-            }
-            // Every delta, kept, under the agent whose session spent it.
-            if has_usage_log(conn)? {
-                conn.execute(
-                    "INSERT OR IGNORE INTO usage_log (event_id, session_id, thread_id, agent_pubkey, at, model,
-                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, turns, cost_usd_est)
-                     VALUES (?1, ?2, ?3, COALESCE((SELECT agent_pubkey FROM sessions WHERE id = ?2), ?4), ?5, ?6,
-                        ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                    params![e.id, session_id, thread_id, e.from, at, d.model, d.input, d.output, d.cache_read, d.cache_write, d.reasoning, d.turns, d.cost_usd_est],
-                )?;
-            }
-        }
-        _ => {}
+    let applied = match e.kind {
+        kind::THREAD_CREATE => apply_thread_create(conn, e, at)?,
+        kind::THREAD_UPDATE => apply_thread_update(conn, e, thread_id, at)?,
+        kind::THREAD_PROJECT => apply_thread_project(conn, e, thread_id, at)?,
+        kind::THREAD_PARTICIPANT => apply_thread_participant(conn, e, thread_id, at)?,
+        kind::SESSION_START => apply_session_start(conn, e, thread_id, at)?,
+        kind::SESSION_UPDATE => apply_session_update(conn, e, thread_id)?,
+        kind::SESSION_END => apply_session_end(conn, e, thread_id, at)?,
+        kind::TURN => apply_turn(conn, e, thread_id, at)?,
+        kind::STATUS => apply_status(conn, e, thread_id, at)?,
+        kind::USAGE => apply_usage(conn, e, thread_id, at)?,
+        // Conversational kinds (and kinds this build does not know) project
+        // nothing of their own: only their tags, below.
+        _ => Applied::Ok,
+    };
+    if let Applied::Rejected(_) = applied {
+        return Ok(applied);
     }
     index_tags(conn, e)?;
     conn.execute(
         "UPDATE threads SET updated_at = MAX(updated_at, ?2) WHERE id = ?1",
         params![thread_id, at],
     )?;
+    Ok(Applied::Ok)
+}
+
+/// The session an event is about, from its `["s", id]` tag; a rejection
+/// naming `what` when it has none.
+fn session_tag<'a>(e: &'a Envelope, what: &str) -> Result<&'a str, Applied> {
+    e.first_tag(tag::SESSION)
+        .ok_or_else(|| Applied::Rejected(format!("{what} without an s tag")))
+}
+
+fn apply_thread_create(conn: &Connection, e: &Envelope, at: i64) -> Result<Applied, Error> {
+    let title = e.first_tag(tag::TITLE).unwrap_or("");
+    let parent = e.tags.iter().find(|t| t.len() >= 2 && t[0] == tag::PARENT);
+    let parent_id = parent.map(|t| t[1].as_str());
+    let relationship = parent.and_then(|t| t.get(2)).map(String::as_str);
+    conn.execute(
+        "INSERT OR REPLACE INTO threads (id, title, intent, state, created_by, parent_thread_id, relationship, created_at, updated_at, done_at)
+         VALUES (?1, ?2, ?3, 'open', ?4, ?5, ?6, ?7, ?7, NULL)",
+        params![e.id, title.trim(), e.content, e.from, parent_id, relationship, at],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO thread_participants (thread_id, pubkey, role, added_by, added_at) VALUES (?1, ?2, 'owner', ?2, ?3)",
+        params![e.id, e.from, at],
+    )?;
+    Ok(Applied::Ok)
+}
+
+fn apply_thread_update(
+    conn: &Connection,
+    e: &Envelope,
+    thread_id: &str,
+    at: i64,
+) -> Result<Applied, Error> {
+    let update: wire::ThreadUpdate = match parse(e) {
+        Ok(u) => u,
+        Err(r) => return Ok(r),
+    };
+    conn.execute(
+        "UPDATE threads SET
+            title = COALESCE(?2, title),
+            state = COALESCE(?3, state),
+            done_at = CASE COALESCE(?3, state)
+                        WHEN 'done' THEN COALESCE(done_at, ?4)
+                        WHEN 'archived' THEN done_at
+                        WHEN 'deleted' THEN done_at
+                        ELSE NULL END
+         WHERE id = ?1",
+        params![
+            thread_id,
+            update.title.as_deref().map(str::trim),
+            update.state.map(|s| s.as_str()),
+            at
+        ],
+    )?;
+    Ok(Applied::Ok)
+}
+
+fn apply_thread_project(
+    conn: &Connection,
+    e: &Envelope,
+    thread_id: &str,
+    at: i64,
+) -> Result<Applied, Error> {
+    let op: wire::ThreadProjectOp = match parse(e) {
+        Ok(o) => o,
+        Err(r) => return Ok(r),
+    };
+    let Some(key) = op.key() else {
+        return Ok(Applied::Rejected(
+            "thread.project without repo_key or path_hint".into(),
+        ));
+    };
+    match op.op.as_str() {
+        "attach" => {
+            conn.execute(
+                "INSERT OR REPLACE INTO thread_projects (thread_id, key, repo_key, path_hint, workspace_kind, branch, worktree_path, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    thread_id,
+                    key,
+                    op.repo_key.as_deref().filter(|k| !k.is_empty()),
+                    op.path_hint.as_deref().unwrap_or(key),
+                    op.workspace_kind.unwrap_or(crate::WorkspaceKind::InPlace).as_str(),
+                    op.branch,
+                    op.worktree_path,
+                    at
+                ],
+            )?;
+        }
+        "detach" => {
+            conn.execute(
+                "DELETE FROM thread_projects WHERE thread_id = ?1 AND (key = ?2 OR repo_key = ?2 OR path_hint = ?2)",
+                params![thread_id, key],
+            )?;
+        }
+        other => {
+            return Ok(Applied::Rejected(format!(
+                "unknown thread.project op {other:?}"
+            )));
+        }
+    }
+    Ok(Applied::Ok)
+}
+
+/// Mirror a participant change that pass 1 already validated.
+fn apply_thread_participant(
+    conn: &Connection,
+    e: &Envelope,
+    thread_id: &str,
+    at: i64,
+) -> Result<Applied, Error> {
+    let op: wire::ParticipantOp = match parse(e) {
+        Ok(o) => o,
+        Err(r) => return Ok(r),
+    };
+    let target = e.first_tag(tag::MENTION).unwrap_or_default();
+    if op.op == "add" {
+        conn.execute(
+            "INSERT OR REPLACE INTO thread_participants (thread_id, pubkey, role, added_by, added_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![thread_id, target, op.role.unwrap_or(ParticipantRole::Member).as_str(), e.from, at],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM thread_participants WHERE thread_id = ?1 AND pubkey = ?2",
+            params![thread_id, target],
+        )?;
+    }
+    Ok(Applied::Ok)
+}
+
+fn apply_session_start(
+    conn: &Connection,
+    e: &Envelope,
+    thread_id: &str,
+    at: i64,
+) -> Result<Applied, Error> {
+    let session_id = match session_tag(e, "session.start") {
+        Ok(id) => id,
+        Err(r) => return Ok(r),
+    };
+    let start: wire::SessionStart = match parse(e) {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let agent = e.first_tag(tag::MENTION).unwrap_or(author(e));
+    conn.execute(
+        "INSERT OR REPLACE INTO sessions (id, thread_id, agent_pubkey, environment_id, environment_label, project_repo_key,
+             harness, runtime_mode, resumed_from, runtime, state, started_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11)",
+        params![
+            session_id,
+            thread_id,
+            agent,
+            start.environment_id,
+            start.environment_label,
+            start.project_repo_key,
+            start.harness.as_str(),
+            start.runtime_mode.as_str(),
+            start.resumed_from,
+            start.runtime.as_str(),
+            at
+        ],
+    )?;
+    Ok(Applied::Ok)
+}
+
+fn apply_session_update(
+    conn: &Connection,
+    e: &Envelope,
+    thread_id: &str,
+) -> Result<Applied, Error> {
+    let session_id = match session_tag(e, "session.update") {
+        Ok(id) => id,
+        Err(r) => return Ok(r),
+    };
+    let update: wire::SessionUpdateWire = match parse(e) {
+        Ok(u) => u,
+        Err(r) => return Ok(r),
+    };
+    conn.execute(
+        "UPDATE sessions SET
+            harness_session_id = COALESCE(?2, harness_session_id),
+            transcript_path = COALESCE(?3, transcript_path),
+            state = CASE WHEN state = 'ended' THEN state ELSE COALESCE(?4, state) END,
+            runtime_mode = COALESCE(?6, runtime_mode)
+         WHERE id = ?1 AND thread_id = ?5",
+        params![
+            session_id,
+            update.harness_session_id,
+            update.transcript_path,
+            update.state.map(|s| s.as_str()),
+            thread_id,
+            update.runtime_mode.map(|m| m.as_str())
+        ],
+    )?;
+    if let Some(rex) = update.rex {
+        conn.execute(
+            "UPDATE sessions SET rex_session_id = ?2, rex_window_id = ?3, rex_block_id = ?4 WHERE id = ?1 AND thread_id = ?5",
+            params![session_id, rex.session, rex.window, rex.block, thread_id],
+        )?;
+    }
+    Ok(Applied::Ok)
+}
+
+fn apply_session_end(
+    conn: &Connection,
+    e: &Envelope,
+    thread_id: &str,
+    at: i64,
+) -> Result<Applied, Error> {
+    let session_id = match session_tag(e, "session.end") {
+        Ok(id) => id,
+        Err(r) => return Ok(r),
+    };
+    let end: wire::SessionEnd = parse(e).unwrap_or_default();
+    conn.execute(
+        "UPDATE sessions SET state = 'ended', ended_at = ?2, ended_reason = ?3 WHERE id = ?1 AND thread_id = ?4",
+        params![session_id, at, end.reason, thread_id],
+    )?;
+    Ok(Applied::Ok)
+}
+
+fn apply_turn(conn: &Connection, e: &Envelope, thread_id: &str, at: i64) -> Result<Applied, Error> {
+    let session_id = match session_tag(e, "turn") {
+        Ok(id) => id,
+        Err(r) => return Ok(r),
+    };
+    let turn: crate::TurnSummary = match parse(e) {
+        Ok(t) => t,
+        Err(r) => return Ok(r),
+    };
+    conn.execute(
+        "INSERT OR REPLACE INTO turns (id, thread_id, session_id, from_pubkey, created_at, ordinal, user_text,
+             assistant_text, tool_calls, files_edited, duration_ms, stop_reason, changes_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            e.id,
+            thread_id,
+            session_id,
+            author(e),
+            at,
+            turn.ordinal,
+            turn.user_text,
+            turn.assistant_text,
+            turn.tool_calls,
+            turn.files_edited,
+            turn.duration_ms,
+            turn.stop_reason,
+            turn.changes.as_ref().and_then(|c| serde_json::to_string(c).ok()),
+        ],
+    )?;
+    Ok(Applied::Ok)
+}
+
+fn apply_status(conn: &Connection, e: &Envelope, thread_id: &str, at: i64) -> Result<Applied, Error> {
+    let session_id = match session_tag(e, "status") {
+        Ok(id) => id,
+        Err(r) => return Ok(r),
+    };
+    let report: crate::StatusReport = match parse(e) {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    conn.execute(
+        "INSERT OR REPLACE INTO status (session_id, thread_id, state, kind, title, msg, progress, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            session_id,
+            thread_id,
+            report.state.as_str(),
+            report.kind.map(|k| k.as_str()),
+            report.title,
+            report.msg,
+            report.progress.map(i64::from),
+            at
+        ],
+    )?;
+    let live = match report.state {
+        StatusState::Working => Some(SessionState::Running),
+        StatusState::Blocked => Some(SessionState::Blocked),
+        StatusState::Idle => Some(SessionState::Idle),
+        StatusState::Done | StatusState::Error => None,
+    };
+    if let Some(live) = live {
+        conn.execute(
+            "UPDATE sessions SET state = ?2 WHERE id = ?1 AND state <> 'ended'",
+            params![session_id, live.as_str()],
+        )?;
+    }
+    Ok(Applied::Ok)
+}
+
+fn apply_usage(conn: &Connection, e: &Envelope, thread_id: &str, at: i64) -> Result<Applied, Error> {
+    let session_id = match session_tag(e, "usage") {
+        Ok(id) => id,
+        Err(r) => return Ok(r),
+    };
+    let delta: wire::UsageWire = match parse(e) {
+        Ok(d) => d,
+        Err(r) => return Ok(r),
+    };
+    conn.execute(
+        "INSERT INTO usage (session_id, thread_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, turns, cost_usd_est, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT (session_id) DO UPDATE SET
+            input_tokens = usage.input_tokens + excluded.input_tokens,
+            output_tokens = usage.output_tokens + excluded.output_tokens,
+            cache_read_tokens = usage.cache_read_tokens + excluded.cache_read_tokens,
+            cache_write_tokens = usage.cache_write_tokens + excluded.cache_write_tokens,
+            turns = usage.turns + excluded.turns,
+            cost_usd_est = usage.cost_usd_est + excluded.cost_usd_est,
+            updated_at = MAX(usage.updated_at, excluded.updated_at)",
+        params![session_id, thread_id, delta.input, delta.output, delta.cache_read, delta.cache_write, delta.turns, delta.cost_usd_est, at],
+    )?;
+    if at >= now() - USAGE_SAMPLE_RETENTION_SECS {
+        conn.execute(
+            "INSERT OR IGNORE INTO usage_samples (event_id, session_id, thread_id, at, input_tokens, output_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![e.id, session_id, thread_id, at, delta.input, delta.output],
+        )?;
+    }
+    // Every delta, kept, under the agent whose session spent it.
+    if has_usage_log(conn)? {
+        conn.execute(
+            "INSERT OR IGNORE INTO usage_log (event_id, session_id, thread_id, agent_pubkey, at, model,
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, turns, cost_usd_est)
+             VALUES (?1, ?2, ?3, COALESCE((SELECT agent_pubkey FROM sessions WHERE id = ?2), ?4), ?5, ?6,
+                ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![e.id, session_id, thread_id, e.from, at, delta.model, delta.input, delta.output, delta.cache_read, delta.cache_write, delta.reasoning, delta.turns, delta.cost_usd_est],
+        )?;
+    }
     Ok(Applied::Ok)
 }

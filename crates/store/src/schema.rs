@@ -471,71 +471,71 @@ fn add_column_if_missing(
 
 /// Rust work that a migration needs after its SQL, inside the same transaction.
 fn post_migrate(tx: &Connection, version: i64) -> Result<(), Error> {
-    if version == 6 {
-        let threads: Vec<String> = {
-            let mut st = tx.prepare(
-                "SELECT DISTINCT thread_id FROM events WHERE kind = ?1 AND thread_id IS NOT NULL",
-            )?;
-            let rows = st.query_map([crate::kind::USAGE], |r| r.get(0))?;
-            rows.collect::<Result<_, _>>()?
-        };
-        for thread_id in &threads {
-            crate::log::replay_thread(tx, thread_id, None)?;
-        }
+    match version {
+        2 => post_migrate_v2(tx),
+        4 => post_migrate_v4(tx),
+        // Re-project the threads that already hold usage, so `usage_log`
+        // reflects the log.
+        6 => replay_threads_holding(tx, crate::kind::USAGE),
+        8 => add_column_if_missing(tx, "turns", "changes_json", "TEXT"),
+        10 => add_column_if_missing(tx, "agents", "effort", "TEXT"),
+        _ => Ok(()),
     }
-    if version == 4 {
-        add_column_if_missing(tx, "environments", "ssh_target", "TEXT")?;
-        add_column_if_missing(tx, "environments", "host_pubkey", "TEXT")?;
-        add_column_if_missing(tx, "conversation_items", "rev", "INTEGER NOT NULL DEFAULT 0")?;
-        tx.execute_batch(
-            r#"
-            CREATE INDEX IF NOT EXISTS conversation_items_rev ON conversation_items(rev);
-            CREATE TRIGGER IF NOT EXISTS conversation_items_rev_ins AFTER INSERT ON conversation_items BEGIN
-                UPDATE item_rev SET n = n + 1;
-                UPDATE conversation_items SET rev = (SELECT n FROM item_rev) WHERE id = NEW.id;
-            END;
-            CREATE TRIGGER IF NOT EXISTS conversation_items_rev_upd AFTER UPDATE ON conversation_items
-                WHEN NEW.rev = OLD.rev BEGIN
-                UPDATE item_rev SET n = n + 1;
-                UPDATE conversation_items SET rev = (SELECT n FROM item_rev) WHERE id = NEW.id;
-            END;
-            CREATE TRIGGER IF NOT EXISTS conversation_items_rev_del AFTER DELETE ON conversation_items BEGIN
-                UPDATE item_rev SET n = n + 1;
-                INSERT OR REPLACE INTO item_tombstones (id, session_id, rev) VALUES (OLD.id, OLD.session_id, (SELECT n FROM item_rev));
-            END;
-            UPDATE item_rev SET n = (SELECT COUNT(*) FROM conversation_items);
-            "#,
+}
+
+/// Replay every thread that holds at least one event of `kind`.
+fn replay_threads_holding(tx: &Connection, kind: u32) -> Result<(), Error> {
+    let threads: Vec<String> = {
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT thread_id FROM events WHERE kind = ?1 AND thread_id IS NOT NULL",
         )?;
-        // Number the items already here.  The update trigger only fires when
-        // `rev` itself is unchanged, so setting it directly doesn't recurse.
-        tx.execute("UPDATE conversation_items SET rev = rowid", [])?;
-        tx.execute("UPDATE item_rev SET n = (SELECT COALESCE(MAX(rev), 0) FROM conversation_items)", [])?;
+        let rows = statement.query_map([kind], |r| r.get(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for thread_id in &threads {
+        crate::log::replay_thread(tx, thread_id, None)?;
     }
-    if version == 8 {
-        add_column_if_missing(tx, "turns", "changes_json", "TEXT")?;
-    }
-    if version == 10 {
-        add_column_if_missing(tx, "agents", "effort", "TEXT")?;
-    }
-    if version == 2 {
-        add_column_if_missing(tx, "sessions", "runtime", "TEXT NOT NULL DEFAULT 'pane'")?;
-        add_column_if_missing(tx, "sessions", "socket_path", "TEXT")?;
-        // The projection below writes every column the current code knows.
-        add_column_if_missing(tx, "turns", "changes_json", "TEXT")?;
-        // Re-project every thread that already holds a turn envelope, so the
-        // new `turns` table reflects the log.  (Older `sessions` rows keep
-        // the default `runtime = 'pane'`.)
-        let threads: Vec<String> = {
-            let mut st = tx.prepare(
-                "SELECT DISTINCT thread_id FROM events WHERE kind = ?1 AND thread_id IS NOT NULL",
-            )?;
-            let rows = st.query_map([crate::kind::TURN], |r| r.get(0))?;
-            rows.collect::<Result<_, _>>()?
-        };
-        for thread_id in &threads {
-            crate::log::replay_thread(tx, thread_id, None)?;
-        }
-    }
+    Ok(())
+}
+
+fn post_migrate_v2(tx: &Connection) -> Result<(), Error> {
+    add_column_if_missing(tx, "sessions", "runtime", "TEXT NOT NULL DEFAULT 'pane'")?;
+    add_column_if_missing(tx, "sessions", "socket_path", "TEXT")?;
+    // The projection below writes every column the current code knows.
+    add_column_if_missing(tx, "turns", "changes_json", "TEXT")?;
+    // Re-project every thread that already holds a turn envelope, so the
+    // new `turns` table reflects the log.  (Older `sessions` rows keep
+    // the default `runtime = 'pane'`.)
+    replay_threads_holding(tx, crate::kind::TURN)
+}
+
+fn post_migrate_v4(tx: &Connection) -> Result<(), Error> {
+    add_column_if_missing(tx, "environments", "ssh_target", "TEXT")?;
+    add_column_if_missing(tx, "environments", "host_pubkey", "TEXT")?;
+    add_column_if_missing(tx, "conversation_items", "rev", "INTEGER NOT NULL DEFAULT 0")?;
+    tx.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS conversation_items_rev ON conversation_items(rev);
+        CREATE TRIGGER IF NOT EXISTS conversation_items_rev_ins AFTER INSERT ON conversation_items BEGIN
+            UPDATE item_rev SET n = n + 1;
+            UPDATE conversation_items SET rev = (SELECT n FROM item_rev) WHERE id = NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS conversation_items_rev_upd AFTER UPDATE ON conversation_items
+            WHEN NEW.rev = OLD.rev BEGIN
+            UPDATE item_rev SET n = n + 1;
+            UPDATE conversation_items SET rev = (SELECT n FROM item_rev) WHERE id = NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS conversation_items_rev_del AFTER DELETE ON conversation_items BEGIN
+            UPDATE item_rev SET n = n + 1;
+            INSERT OR REPLACE INTO item_tombstones (id, session_id, rev) VALUES (OLD.id, OLD.session_id, (SELECT n FROM item_rev));
+        END;
+        UPDATE item_rev SET n = (SELECT COUNT(*) FROM conversation_items);
+        "#,
+    )?;
+    // Number the items already here.  The update trigger only fires when
+    // `rev` itself is unchanged, so setting it directly doesn't recurse.
+    tx.execute("UPDATE conversation_items SET rev = rowid", [])?;
+    tx.execute("UPDATE item_rev SET n = (SELECT COALESCE(MAX(rev), 0) FROM conversation_items)", [])?;
     Ok(())
 }
 
