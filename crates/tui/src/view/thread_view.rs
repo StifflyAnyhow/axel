@@ -317,242 +317,282 @@ pub fn fold_summary(items: &[&ThreadItem], room: usize) -> String {
 }
 
 /// Lines for one visible row. `selected` paints the background when the timeline has focus.
+/// Tool runs, thoughts and approvals sit flush left, like prose.
 pub(crate) fn row_lines(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line<'static>> {
+    let paint = RowPaint::new(selected);
     match row {
-        Row::Prose(_) => row_body(v, row, width, selected),
-        // Tool runs, thoughts and approvals sit flush left too.
-        _ => row_body(v, row, width, selected),
+        Row::Prose(i) => prose_row(v, *i, width, paint),
+        Row::Changes(i) => changes_row(&v.data.items[*i], paint),
+        Row::Thought(i) => thought_row(v, &v.data.items[*i], width, paint),
+        Row::Fold(idxs) => fold_row(v, idxs, width, paint),
+        Row::Tool { idx, .. } => tool_row(v, &v.data.items[*idx], width, paint),
+        Row::Choice(i) => choice_row(v, &v.data.items[*i], width, paint),
     }
 }
 
-fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line<'static>> {
+/// The styles a row draws with: reversed when it is the selected row.
+#[derive(Clone, Copy)]
+struct RowPaint {
+    selected: bool,
+    base: Style,
+    dim: Style,
+}
+
+impl RowPaint {
+    fn new(selected: bool) -> Self {
+        let base = if selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+        let dim = if selected { theme::dim().add_modifier(Modifier::REVERSED) } else { theme::dim() };
+        RowPaint { selected, base, dim }
+    }
+
+    /// The row's marker glyph: the accent when selected.
+    fn marker(self) -> Style {
+        if self.selected { self.base.fg(theme::ACCENT) } else { self.dim }
+    }
+}
+
+fn prose_row(v: &ThreadView, i: usize, width: usize, paint: RowPaint) -> Vec<Line<'static>> {
+    let RowPaint { base, dim, .. } = paint;
     let items = &v.data.items;
-    let base = if selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
-    let dim = if selected { theme::dim().add_modifier(Modifier::REVERSED) } else { theme::dim() };
-    match row {
-        Row::Prose(i) => {
-            let it = &items[*i];
-            match (&it.kind, &it.body) {
-                (ItemKind::Error, ItemBody::Text(t)) => prose_lines(vec![Span::styled("! ", base.fg(theme::DANGER).bold())], t, width, base.fg(theme::DANGER)),
-                (ItemKind::Answer, ItemBody::Answered(label)) => vec![Line::from(Span::styled(format!("↩ answered: {label}"), dim))],
-                (ItemKind::UserMessage, ItemBody::Text(t)) if it.status == Some(ItemStatus::Cancelled) => {
-                    // Queued but never sent (the session ended first).
-                    let mut lines = prose_lines(you_prefix(dim, false), t.trim(), width, dim);
-                    if let Some(first) = lines.first_mut() {
-                        *first = with_right(std::mem::take(first), &clock(it.at_ms), width, dim);
-                    }
-                    lines.push(Line::from(Span::styled("  × not sent · session ended while queued", dim)));
-                    lines
-                }
-                (ItemKind::UserMessage, ItemBody::Text(t)) if it.relay_to.is_some() => {
-                    // One agent to another: under the sender's badge (unless its
-                    // previous message already shows it), marked and set off.
-                    let mut lines = header_lines(items, *i, base, width);
-                    let to = it.relay_to.clone().unwrap_or_default();
-                    lines.push(Line::from(vec![Span::styled("→ ", dim), Span::styled(to.to_lowercase(), dim.bold())]));
-                    let gutter = Span::styled(RELAY_GUTTER, dim);
-                    for l in user_lines(Vec::new(), t.trim(), width.saturating_sub(RELAY_GUTTER.len()), dim, &v.mention_names()) {
-                        let mut spans = vec![gutter.clone()];
-                        spans.extend(l.spans);
-                        lines.push(Line::from(spans));
-                    }
-                    lines
-                }
-                (ItemKind::UserMessage, ItemBody::Text(t)) => {
-                    let prefix = if speaker_header(it, base, width).is_some() { Vec::new() } else { you_prefix(base, true) };
-                    let mut lines = user_lines(prefix, t.trim(), width, base, &v.mention_names());
-                    match speaker_header(it, base, width) {
-                        // Another participant: header line, text below.
-                        Some(_) => {
-                            let head = header_lines(items, *i, base, width);
-                            lines.splice(0..0, head);
-                        }
-                        // You: no badge, the time on your first line.
-                        None => {
-                            if let Some(first) = lines.first_mut() {
-                                *first = with_right(std::mem::take(first), &clock(it.at_ms), width, base);
-                            }
-                        }
-                    }
-                    if !it.attachments.is_empty() {
-                        let indent = chips_indent(it);
-                        lines.push(Line::from(vec![
-                            Span::styled(" ".repeat(indent), dim),
-                            Span::styled(crate::attach::chips_line(&it.attachments, width.saturating_sub(indent)), dim),
-                        ]));
-                    }
-                    if it.agent.is_none() && it.author.is_none() {
-                        // Your messages stand apart: a blank line above and below.
-                        lines.insert(0, Line::from(""));
-                        lines.push(Line::from(""));
-                    }
-                    lines
-                }
-                (_, ItemBody::Text(t)) => {
-                    // Agent: header line (badge + time), the response starts below
-                    // it. Right after its own message, the same agent goes on under it.
-                    let mut lines = header_lines(items, *i, base, width);
-                    // Agents write Markdown: show it styled, its markers dropped.
-                    lines.extend(super::markdown::md_lines(&clean_text(t), width, base));
-                    lines
-                }
-                _ => vec![Line::from(Span::styled("·", dim))],
+    let it = &items[i];
+    match (&it.kind, &it.body) {
+        (ItemKind::Error, ItemBody::Text(t)) => prose_lines(vec![Span::styled("! ", base.fg(theme::DANGER).bold())], t, width, base.fg(theme::DANGER)),
+        (ItemKind::Answer, ItemBody::Answered(label)) => vec![Line::from(Span::styled(format!("↩ answered: {label}"), dim))],
+        (ItemKind::UserMessage, ItemBody::Text(t)) if it.status == Some(ItemStatus::Cancelled) => {
+            // Queued but never sent (the session ended first).
+            let mut lines = prose_lines(you_prefix(dim, false), t.trim(), width, dim);
+            if let Some(first) = lines.first_mut() {
+                *first = with_right(std::mem::take(first), &clock(it.at_ms), width, dim);
             }
-        }
-        Row::Changes(i) => {
-            let ItemBody::Changes { files, authored, added, removed, between_turns } = &items[*i].body else { return Vec::new() };
-            let marker = if selected { base.fg(theme::ACCENT) } else { dim };
-            // "3 files  +42 −7"; with other hands in the tree, the agent's own
-            // files first: "2 files (+1 not this agent)  +42 −7".
-            let (own, other) = if *authored > 0 && authored < files { (*authored, files - authored) } else { (*files, 0) };
-            let mut what = format!("{own} file{}", if own == 1 { "" } else { "s" });
-            if other > 0 {
-                what.push_str(&format!(" (+{other} not this agent)"));
-            }
-            if *between_turns {
-                what.push_str(" incl. changes between turns");
-            }
-            let mut spans = vec![Span::styled("  ↗ ", marker), Span::styled(what, dim), Span::styled("  ", dim)];
-            spans.push(Span::styled(format!("+{added}"), if selected { base.fg(theme::OK) } else { Style::default().fg(theme::OK) }));
-            spans.push(Span::styled(" ", dim));
-            spans.push(Span::styled(format!("−{removed}"), if selected { base.fg(theme::DANGER) } else { Style::default().fg(theme::DANGER) }));
-            vec![Line::from(spans)]
-        }
-        Row::Thought(i) => {
-            let it = &items[*i];
-            let mut lines = vec![Line::from(vec![
-                Span::styled("· ", dim),
-                Span::styled("thinking", dim),
-                Span::styled(if v.is_expanded(&it.id) { "" } else { " …" }, dim),
-            ])];
-            if v.is_expanded(&it.id)
-                && let ItemBody::Text(t) = &it.body
-            {
-                for l in wrap(&clean_text(t), width.saturating_sub(2).max(8)) {
-                    lines.push(Line::from(vec![Span::styled("  ", dim), Span::styled(l, dim)]));
-                }
-            }
+            lines.push(Line::from(Span::styled("  × not sent · session ended while queued", dim)));
             lines
         }
-        Row::Fold(idxs) => {
-            let tools: Vec<&ThreadItem> = idxs.iter().map(|i| &items[*i]).collect();
-            let n = tools.len();
-            let dur = tools.last().map(|l| l.at_ms).unwrap_or(0) - tools.first().map(|f| f.at_ms).unwrap_or(0);
-            let failed = tools.iter().any(|t| matches!(t.status, Some(ItemStatus::Failed)));
-            let running = tools.iter().any(|t| matches!(t.status, Some(ItemStatus::Running | ItemStatus::Pending)));
-            let marker = if selected { base.fg(theme::ACCENT) } else { dim };
-            // What the calls did first, in the room the rest leaves:
-            // "Read send.rs, main.rs, search for “x” · 4 calls · 12.4s".
-            let mut tail = String::new();
-            // A lone call has no span to time.
-            if n > 1 {
-                tail.push_str(&format!(" · {n} calls · {}", duration_label(dur.max(0))));
-            }
-            if running {
-                tail.push_str(" · running");
-            }
-            if failed {
-                tail.push_str(" · failed");
-            }
-            let room = width.saturating_sub(2 + tail.chars().count()).max(12);
-            let what = fold_summary(&tools, room);
-            vec![Line::from(vec![
-                Span::styled("↗ ", marker),
-                Span::styled(ellipsize(&what, room), base),
-                Span::styled(ellipsize(&tail, width.saturating_sub(2 + what.chars().count().min(room))), dim),
-            ])]
-        }
-        Row::Tool { idx, .. } => {
-            let it = &items[*idx];
-            let status = it.status.unwrap_or(ItemStatus::Completed);
-            let glyph_style = base.fg(match status {
-                ItemStatus::Failed | ItemStatus::Denied => theme::DANGER,
-                ItemStatus::Running | ItemStatus::Pending => theme::ACCENT,
-                ItemStatus::Completed | ItemStatus::Allowed | ItemStatus::Answered => theme::OK,
-                ItemStatus::Cancelled => theme::DIM,
-            });
-            // What it did, then (dim) what it ran: the command, or its input.
-            let (title, input, output) = match &it.body {
-                ItemBody::Tool { title, input, output, summary, .. } => {
-                    let ran = one_line(title.trim_matches('`'));
-                    let detail = if summary.as_str() != ran && !ran.is_empty() { ran } else { input.clone() };
-                    (summary.clone(), detail, output.clone())
-                }
-                _ => ("tool".into(), String::new(), Vec::new()),
-            };
-            let head = format!("  {} ", status.glyph());
-            let room = width.saturating_sub(head.chars().count() + title.chars().count() + 2);
-            let mut lines = vec![Line::from(vec![
-                Span::styled(head, glyph_style),
-                Span::styled(title, base),
-                Span::styled(format!("  {}", ellipsize(&input.replace('\n', " "), room)), dim),
-            ])];
-            if v.is_tool_expanded(&it.id) {
-                if output.is_empty() {
-                    lines.push(Line::from(Span::styled("      (no output)", dim)));
-                }
-                for l in output.iter().take(OUTPUT_HEAD) {
-                    lines.push(Line::from(vec![Span::styled("      ", dim), Span::styled(ellipsize(l, width.saturating_sub(6)), dim)]));
-                }
-                if output.len() > OUTPUT_HEAD {
-                    lines.push(Line::from(Span::styled(format!("      … +{} lines · l for the full log", output.len() - OUTPUT_HEAD), dim)));
-                }
-            }
+        (ItemKind::UserMessage, ItemBody::Text(t)) if it.relay_to.is_some() => relay_lines(v, i, t, width, paint),
+        (ItemKind::UserMessage, ItemBody::Text(t)) => user_message_lines(v, i, t, width, paint),
+        (_, ItemBody::Text(t)) => {
+            // Agent: header line (badge + time), the response starts below
+            // it. Right after its own message, the same agent goes on under it.
+            let mut lines = header_lines(items, i, base, width);
+            // Agents write Markdown: show it styled, its markers dropped.
+            lines.extend(super::markdown::md_lines(&clean_text(t), width, base));
             lines
         }
-        Row::Choice(i) => {
-            let it = &items[*i];
-            let (prompt, options, chosen, multiple) = match &it.body {
-                ItemBody::Choice { prompt, options, chosen, multiple } => (prompt.clone(), options.clone(), chosen.clone(), *multiple),
-                _ => (String::new(), Vec::new(), None, None),
-            };
-            let who = it.agent.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| "agent".into());
-            let (glyph, color, verb) = match it.kind {
-                ItemKind::Permission => ("!", theme::DANGER, "asks permission"),
-                _ => ("?", Color::Yellow, "asks"),
-            };
-            if it.status == Some(ItemStatus::Pending) {
-                let card = Style::default();
-                let mut lines = question_header(glyph, color, &who, verb, &prompt, width);
-                let sel = v.choice_index(&it.id);
-                for (oi, o) in options.iter().enumerate() {
-                    let on = oi == sel;
-                    let checkbox = if multiple.is_some() {
-                        if v.choice_checked.get(&it.id).is_some_and(|s|s.contains(&o.id)) {"[x] "} else {"[ ] "}
-                    } else {""};
-                    // The whole option, wrapped under its own text; the marker
-                    // alone carries the accent, the picked text is just bold.
-                    let indent = 5 + checkbox.len();
-                    let text = if on { card.bold() } else { card };
-                    for (li, l) in wrap(&o.label, width.saturating_sub(indent).max(1)).into_iter().enumerate() {
-                        let lead = match li {
-                            0 => Span::styled(if on { "   ▸ " } else { "     " }, card.fg(theme::ACCENT)),
-                            _ => Span::raw("     "),
-                        };
-                        let pad = if li == 0 { checkbox.to_string() } else { " ".repeat(checkbox.len()) };
-                        lines.push(Line::from(vec![lead, Span::styled(format!("{pad}{l}"), text)]));
-                    }
-                }
-                let hint = if multiple.is_some() {"↑↓ move · Space toggle · Enter confirm"} else if selected { "↑↓ pick · Enter answer" } else { "Tab then ↑↓ to this card, Enter answers" };
-                lines.push(Line::from(Span::styled(format!("     {hint}"), card.fg(theme::DIM))));
-                lines
-            } else {
-                let outcome = match (it.status, chosen) {
-                    (Some(ItemStatus::Denied), c) => format!("denied{}", c.map(|c| format!(": {c}")).unwrap_or_default()),
-                    (Some(ItemStatus::Allowed), c) => format!("allowed{}", c.map(|c| format!(": {c}")).unwrap_or_default()),
-                    (Some(ItemStatus::Answered), c) => format!("answered{}", c.map(|c| format!(": {c}")).unwrap_or_default()),
-                    (Some(ItemStatus::Cancelled), _) => "cancelled".into(),
-                    (_, c) => c.unwrap_or_else(|| "resolved".into()),
-                };
-                let g = it.status.map(ItemStatus::glyph).unwrap_or("·");
-                vec![Line::from(vec![
-                    Span::styled(format!("{g} "), dim),
-                    Span::styled(format!("{who} {verb}: {}", ellipsize(&prompt, width / 2)), dim),
-                    Span::styled(format!(" · {outcome}"), dim),
-                ])]
+        _ => vec![Line::from(Span::styled("·", dim))],
+    }
+}
+
+/// One agent to another: under the sender's badge (unless its previous
+/// message already shows it), marked and set off.
+fn relay_lines(v: &ThreadView, i: usize, text: &str, width: usize, paint: RowPaint) -> Vec<Line<'static>> {
+    let RowPaint { base, dim, .. } = paint;
+    let it = &v.data.items[i];
+    let mut lines = header_lines(&v.data.items, i, base, width);
+    let to = it.relay_to.clone().unwrap_or_default();
+    lines.push(Line::from(vec![Span::styled("→ ", dim), Span::styled(to.to_lowercase(), dim.bold())]));
+    let gutter = Span::styled(RELAY_GUTTER, dim);
+    for l in user_lines(Vec::new(), text.trim(), width.saturating_sub(RELAY_GUTTER.len()), dim, &v.mention_names()) {
+        let mut spans = vec![gutter.clone()];
+        spans.extend(l.spans);
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// Your message, or another participant's under their header.
+fn user_message_lines(v: &ThreadView, i: usize, text: &str, width: usize, paint: RowPaint) -> Vec<Line<'static>> {
+    let RowPaint { base, dim, .. } = paint;
+    let it = &v.data.items[i];
+    let prefix = if speaker_header(it, base, width).is_some() { Vec::new() } else { you_prefix(base, true) };
+    let mut lines = user_lines(prefix, text.trim(), width, base, &v.mention_names());
+    match speaker_header(it, base, width) {
+        // Another participant: header line, text below.
+        Some(_) => {
+            let head = header_lines(&v.data.items, i, base, width);
+            lines.splice(0..0, head);
+        }
+        // You: no badge, the time on your first line.
+        None => {
+            if let Some(first) = lines.first_mut() {
+                *first = with_right(std::mem::take(first), &clock(it.at_ms), width, base);
             }
         }
     }
+    if !it.attachments.is_empty() {
+        let indent = chips_indent(it);
+        lines.push(Line::from(vec![
+            Span::styled(" ".repeat(indent), dim),
+            Span::styled(crate::attach::chips_line(&it.attachments, width.saturating_sub(indent)), dim),
+        ]));
+    }
+    if it.agent.is_none() && it.author.is_none() {
+        // Your messages stand apart: a blank line above and below.
+        lines.insert(0, Line::from(""));
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
+fn changes_row(it: &ThreadItem, paint: RowPaint) -> Vec<Line<'static>> {
+    let RowPaint { selected, base, dim } = paint;
+    let ItemBody::Changes { files, authored, added, removed, between_turns } = &it.body else { return Vec::new() };
+    // "3 files  +42 −7"; with other hands in the tree, the agent's own
+    // files first: "2 files (+1 not this agent)  +42 −7".
+    let (own, other) = if *authored > 0 && authored < files { (*authored, files - authored) } else { (*files, 0) };
+    let mut what = format!("{own} file{}", if own == 1 { "" } else { "s" });
+    if other > 0 {
+        what.push_str(&format!(" (+{other} not this agent)"));
+    }
+    if *between_turns {
+        what.push_str(" incl. changes between turns");
+    }
+    let mut spans = vec![Span::styled("  ↗ ", paint.marker()), Span::styled(what, dim), Span::styled("  ", dim)];
+    spans.push(Span::styled(format!("+{added}"), if selected { base.fg(theme::OK) } else { Style::default().fg(theme::OK) }));
+    spans.push(Span::styled(" ", dim));
+    spans.push(Span::styled(format!("−{removed}"), if selected { base.fg(theme::DANGER) } else { Style::default().fg(theme::DANGER) }));
+    vec![Line::from(spans)]
+}
+
+fn thought_row(v: &ThreadView, it: &ThreadItem, width: usize, paint: RowPaint) -> Vec<Line<'static>> {
+    let dim = paint.dim;
+    let mut lines = vec![Line::from(vec![
+        Span::styled("· ", dim),
+        Span::styled("thinking", dim),
+        Span::styled(if v.is_expanded(&it.id) { "" } else { " …" }, dim),
+    ])];
+    if v.is_expanded(&it.id)
+        && let ItemBody::Text(t) = &it.body
+    {
+        for l in wrap(&clean_text(t), width.saturating_sub(2).max(8)) {
+            lines.push(Line::from(vec![Span::styled("  ", dim), Span::styled(l, dim)]));
+        }
+    }
+    lines
+}
+
+/// A run of tool calls, folded to one line: what they did first, in the
+/// room the rest leaves: "Read send.rs, main.rs, search for “x” · 4 calls · 12.4s".
+fn fold_row(v: &ThreadView, idxs: &[usize], width: usize, paint: RowPaint) -> Vec<Line<'static>> {
+    let RowPaint { base, dim, .. } = paint;
+    let tools: Vec<&ThreadItem> = idxs.iter().map(|i| &v.data.items[*i]).collect();
+    let n = tools.len();
+    let duration_ms = tools.last().map(|l| l.at_ms).unwrap_or(0) - tools.first().map(|f| f.at_ms).unwrap_or(0);
+    let failed = tools.iter().any(|t| matches!(t.status, Some(ItemStatus::Failed)));
+    let running = tools.iter().any(|t| matches!(t.status, Some(ItemStatus::Running | ItemStatus::Pending)));
+    let mut tail = String::new();
+    // A lone call has no span to time.
+    if n > 1 {
+        tail.push_str(&format!(" · {n} calls · {}", duration_label(duration_ms.max(0))));
+    }
+    if running {
+        tail.push_str(" · running");
+    }
+    if failed {
+        tail.push_str(" · failed");
+    }
+    let room = width.saturating_sub(2 + tail.chars().count()).max(12);
+    let what = fold_summary(&tools, room);
+    vec![Line::from(vec![
+        Span::styled("↗ ", paint.marker()),
+        Span::styled(ellipsize(&what, room), base),
+        Span::styled(ellipsize(&tail, width.saturating_sub(2 + what.chars().count().min(room))), dim),
+    ])]
+}
+
+/// One tool call: what it did, then (dim) what it ran: the command, or its
+/// input; expanded, the head of its output.
+fn tool_row(v: &ThreadView, it: &ThreadItem, width: usize, paint: RowPaint) -> Vec<Line<'static>> {
+    let RowPaint { base, dim, .. } = paint;
+    let status = it.status.unwrap_or(ItemStatus::Completed);
+    let glyph_style = base.fg(match status {
+        ItemStatus::Failed | ItemStatus::Denied => theme::DANGER,
+        ItemStatus::Running | ItemStatus::Pending => theme::ACCENT,
+        ItemStatus::Completed | ItemStatus::Allowed | ItemStatus::Answered => theme::OK,
+        ItemStatus::Cancelled => theme::DIM,
+    });
+    let (title, input, output) = match &it.body {
+        ItemBody::Tool { title, input, output, summary, .. } => {
+            let ran = one_line(title.trim_matches('`'));
+            let detail = if summary.as_str() != ran && !ran.is_empty() { ran } else { input.clone() };
+            (summary.clone(), detail, output.clone())
+        }
+        _ => ("tool".into(), String::new(), Vec::new()),
+    };
+    let head = format!("  {} ", status.glyph());
+    let room = width.saturating_sub(head.chars().count() + title.chars().count() + 2);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(head, glyph_style),
+        Span::styled(title, base),
+        Span::styled(format!("  {}", ellipsize(&input.replace('\n', " "), room)), dim),
+    ])];
+    if v.is_tool_expanded(&it.id) {
+        if output.is_empty() {
+            lines.push(Line::from(Span::styled("      (no output)", dim)));
+        }
+        for l in output.iter().take(OUTPUT_HEAD) {
+            lines.push(Line::from(vec![Span::styled("      ", dim), Span::styled(ellipsize(l, width.saturating_sub(6)), dim)]));
+        }
+        if output.len() > OUTPUT_HEAD {
+            lines.push(Line::from(Span::styled(format!("      … +{} lines · l for the full log", output.len() - OUTPUT_HEAD), dim)));
+        }
+    }
+    lines
+}
+
+/// A permission or question: a card with its options while pending, one
+/// dim line with the outcome once resolved.
+fn choice_row(v: &ThreadView, it: &ThreadItem, width: usize, paint: RowPaint) -> Vec<Line<'static>> {
+    let (prompt, options, chosen, multiple) = match &it.body {
+        ItemBody::Choice { prompt, options, chosen, multiple } => (prompt.clone(), options.clone(), chosen.clone(), *multiple),
+        _ => (String::new(), Vec::new(), None, None),
+    };
+    let who = it.agent.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| "agent".into());
+    let (glyph, color, verb) = match it.kind {
+        ItemKind::Permission => ("!", theme::DANGER, "asks permission"),
+        _ => ("?", Color::Yellow, "asks"),
+    };
+    if it.status != Some(ItemStatus::Pending) {
+        return vec![resolved_choice_line(it, chosen, &who, verb, &prompt, width, paint.dim)];
+    }
+    let card = Style::default();
+    let mut lines = question_header(glyph, color, &who, verb, &prompt, width);
+    let sel = v.choice_index(&it.id);
+    for (oi, o) in options.iter().enumerate() {
+        let on = oi == sel;
+        let checkbox = if multiple.is_some() {
+            if v.choice_checked.get(&it.id).is_some_and(|s|s.contains(&o.id)) {"[x] "} else {"[ ] "}
+        } else {""};
+        // The whole option, wrapped under its own text; the marker
+        // alone carries the accent, the picked text is just bold.
+        let indent = 5 + checkbox.len();
+        let text = if on { card.bold() } else { card };
+        for (li, l) in wrap(&o.label, width.saturating_sub(indent).max(1)).into_iter().enumerate() {
+            let lead = match li {
+                0 => Span::styled(if on { "   ▸ " } else { "     " }, card.fg(theme::ACCENT)),
+                _ => Span::raw("     "),
+            };
+            let pad = if li == 0 { checkbox.to_string() } else { " ".repeat(checkbox.len()) };
+            lines.push(Line::from(vec![lead, Span::styled(format!("{pad}{l}"), text)]));
+        }
+    }
+    let hint = if multiple.is_some() {"↑↓ move · Space toggle · Enter confirm"} else if paint.selected { "↑↓ pick · Enter answer" } else { "Tab then ↑↓ to this card, Enter answers" };
+    lines.push(Line::from(Span::styled(format!("     {hint}"), card.fg(theme::DIM))));
+    lines
+}
+
+fn resolved_choice_line(it: &ThreadItem, chosen: Option<String>, who: &str, verb: &str, prompt: &str, width: usize, dim: Style) -> Line<'static> {
+    let outcome = match (it.status, chosen) {
+        (Some(ItemStatus::Denied), c) => format!("denied{}", c.map(|c| format!(": {c}")).unwrap_or_default()),
+        (Some(ItemStatus::Allowed), c) => format!("allowed{}", c.map(|c| format!(": {c}")).unwrap_or_default()),
+        (Some(ItemStatus::Answered), c) => format!("answered{}", c.map(|c| format!(": {c}")).unwrap_or_default()),
+        (Some(ItemStatus::Cancelled), _) => "cancelled".into(),
+        (_, c) => c.unwrap_or_else(|| "resolved".into()),
+    };
+    let g = it.status.map(ItemStatus::glyph).unwrap_or("·");
+    Line::from(vec![
+        Span::styled(format!("{g} "), dim),
+        Span::styled(format!("{who} {verb}: {}", ellipsize(prompt, width / 2)), dim),
+        Span::styled(format!(" · {outcome}"), dim),
+    ])
 }
 
 /// `? atlas asks: <prompt>`, the whole prompt wrapped under itself: a question
@@ -785,8 +825,6 @@ fn mode_spans(v: &ThreadView) -> Vec<Span<'static>> {
     spans
 }
 
-/// The input, a rule under it (no box), then a footer: the mode on the left,
-/// the status or the key help on the right.
 /// Per-character styles for the composer: an `@name` naming a known agent
 /// (case-insensitive, the whole name typed) takes that agent's colour.
 pub(crate) fn mention_styles(chars: &[char], agents: &[(String, Option<axel_store::AgentColor>)]) -> Vec<Style> {
@@ -832,6 +870,8 @@ pub(crate) fn styled_run(chars: &[char], styles: &[Style]) -> Vec<Span<'static>>
     out
 }
 
+/// The input, a rule under it (no box), then a footer: the mode on the left,
+/// the status or the key help on the right.
 pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
     if area.height == 0 || area.width < 4 {
         return;
@@ -839,92 +879,119 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
     let focused = v.focus == Focus::Composer;
     let chips_focused = v.focus == Focus::Attachments;
     let width = area.width as usize;
-    let rule = Line::from(Span::styled("─".repeat(width), theme::dim()));
-    // A pane shorter than the full layout (it opened small, or the split
-    // hasn't settled yet) still shows the input: the rule goes first, then
-    // the footer.
-    let chips_h = u16::from(!v.attachments.is_empty()).min(area.height - 1);
-    // The suggestions for an `@name` sit right under the text, like a shell's completions.
-    let menu_h = menu_rows(v).min(area.height - 1 - chips_h);
-    let spare = area.height - 1 - chips_h - menu_h;
-    let (has_footer, has_bottom) = (spare >= 1, spare >= 2);
-    let chrome = u16::from(has_footer) + u16::from(has_bottom);
-    let text_rows = (area.height - chips_h - menu_h - chrome).max(1) as usize;
-    let text_area = Rect::new(area.x, area.y, area.width, cells(text_rows));
-    let menu_area = Rect::new(area.x, area.y + cells(text_rows), area.width, menu_h);
-    let chips_row = Rect::new(area.x, menu_area.y + menu_h, area.width, chips_h);
-    let bottom = Rect::new(area.x, chips_row.y + chips_h, area.width, 1);
-    let footer = Rect::new(area.x, bottom.y + u16::from(has_bottom), area.width, 1);
-    if has_bottom {
-        frame.render_widget(Paragraph::new(rule), bottom);
+    let layout = ComposerLayout::new(v, area);
+    if let Some(bottom) = layout.bottom {
+        frame.render_widget(Paragraph::new(Line::from(Span::styled("─".repeat(width), theme::dim()))), bottom);
     }
 
     let indent = PROMPT.chars().count();
     let glyph = Span::styled(PROMPT, if focused || chips_focused { theme::accent() } else { theme::dim() });
-    let body_w = width.saturating_sub(indent).max(1);
+    let body_width = width.saturating_sub(indent).max(1);
     if v.composer.is_empty() {
-        let hint = if v.awaiting_answer() {
-            "send a message to decline and redirect the agent · Tab to answer"
-        } else if v.is_working() {
-            "agent is working · Enter sends into its turn · ^S interrupts"
-        } else {
-            if v.compose_only {
-                "message the thread · @name for someone else"
-            } else {
-                "message the thread · @name for someone else · Esc dashboard"
-            }
-        };
         frame.render_widget(
-            Paragraph::new(Line::from(vec![glyph, Span::styled(ellipsize(hint, body_w), theme::dim())])),
-            Rect::new(text_area.x, text_area.y, text_area.width, 1),
+            Paragraph::new(Line::from(vec![glyph, Span::styled(ellipsize(composer_hint(v), body_width), theme::dim())])),
+            Rect::new(layout.text.x, layout.text.y, layout.text.width, 1),
         );
         if focused {
-            frame.set_cursor_position(Position::new(text_area.x + cells(indent), text_area.y));
+            frame.set_cursor_position(Position::new(layout.text.x + cells(indent), layout.text.y));
         }
     } else {
-        // Rows broken at line breaks and the width, keeping the cursor row visible.
-        let chars: Vec<char> = v.composer.text().chars().collect();
-        let styles = mention_styles(&chars, &v.mention_names());
-        let (rows, (cursor_row, cursor_col)) = input_rows(&chars, body_w, v.composer.cursor());
-        // The composer pane grows to fit its text: while it catches up with a
-        // new line, keep the top in place rather than scrolling the first line
-        // away and back. Scroll past the most rows it grows to, or in the full
-        // view, whose layout has no pane to grow.
-        let first_row = if v.compose_only && rows.len() <= MAX_INPUT_ROWS { 0 } else { cursor_row.saturating_sub(text_rows - 1) };
-        for (r, &(start, end)) in rows.iter().enumerate().skip(first_row).take(text_rows) {
-            let lead = if r == 0 { glyph.clone() } else { Span::raw(" ".repeat(indent)) };
-            let mut spans = vec![lead];
-            spans.extend(styled_run(&chars[start..end], &styles[start..end]));
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)),
-                Rect::new(text_area.x, text_area.y + cells(r - first_row), text_area.width, 1),
-            );
-        }
-        // The cursor's row may be the one the pane is still growing to show.
-        if focused && cursor_row - first_row < text_rows {
-            let cx = cells(indent + cursor_col);
-            let cy = cells(cursor_row - first_row);
-            frame.set_cursor_position(Position::new(text_area.x + cx, text_area.y + cy));
-        }
+        render_composer_text(frame, v, layout.text, glyph, focused);
     }
-    if menu_h > 0 {
-        frame.render_widget(Paragraph::new(v.mention.lines(&v.composer, &v.mention_names(), indent, width)), menu_area);
+    if layout.menu.height > 0 {
+        frame.render_widget(Paragraph::new(v.mention.lines(&v.composer, &v.mention_names(), indent, width)), layout.menu);
     }
-    if chips_h > 0 {
+    if layout.chips.height > 0 {
         let selected = chips_focused.then_some(v.attach_sel);
         let mut spans = vec![Span::raw(" ".repeat(indent))];
-        spans.extend(chips_spans(&v.attachments, body_w, selected));
-        frame.render_widget(Paragraph::new(Line::from(spans)), chips_row);
+        spans.extend(chips_spans(&v.attachments, body_width, selected));
+        frame.render_widget(Paragraph::new(Line::from(spans)), layout.chips);
     }
+    if let Some(footer) = layout.footer {
+        render_composer_footer(frame, v, footer);
+    }
+}
 
-    if !has_footer {
-        return;
+/// Where the composer's parts go, top to bottom: text, `@name` menu, chips,
+/// the rule and the footer (each of those two only when there is room).
+struct ComposerLayout {
+    text: Rect,
+    menu: Rect,
+    chips: Rect,
+    bottom: Option<Rect>,
+    footer: Option<Rect>,
+}
+
+impl ComposerLayout {
+    fn new(v: &ThreadView, area: Rect) -> Self {
+        assert!(area.height > 0, "the caller skips an empty area");
+        // A pane shorter than the full layout (it opened small, or the split
+        // hasn't settled yet) still shows the input: the rule goes first, then
+        // the footer.
+        let chips_height = u16::from(!v.attachments.is_empty()).min(area.height - 1);
+        // The suggestions for an `@name` sit right under the text, like a shell's completions.
+        let menu_height = menu_rows(v).min(area.height - 1 - chips_height);
+        let spare = area.height - 1 - chips_height - menu_height;
+        let (has_footer, has_bottom) = (spare >= 1, spare >= 2);
+        let chrome = u16::from(has_footer) + u16::from(has_bottom);
+        let text_rows = (area.height - chips_height - menu_height - chrome).max(1);
+        let text = Rect::new(area.x, area.y, area.width, text_rows);
+        let menu = Rect::new(area.x, area.y + text_rows, area.width, menu_height);
+        let chips = Rect::new(area.x, menu.y + menu_height, area.width, chips_height);
+        let bottom = Rect::new(area.x, chips.y + chips_height, area.width, 1);
+        let footer = Rect::new(area.x, bottom.y + u16::from(has_bottom), area.width, 1);
+        ComposerLayout { text, menu, chips, bottom: has_bottom.then_some(bottom), footer: has_footer.then_some(footer) }
     }
-    // Footer: mode left; status (or as much key help as fits) right.  When the
-    // right side would be cut, the "(shift+tab to cycle)" hint goes first.
+}
+
+/// What an empty composer says it is for.
+fn composer_hint(v: &ThreadView) -> &'static str {
+    if v.awaiting_answer() {
+        "send a message to decline and redirect the agent · Tab to answer"
+    } else if v.is_working() {
+        "agent is working · Enter sends into its turn · ^S interrupts"
+    } else if v.compose_only {
+        "message the thread · @name for someone else"
+    } else {
+        "message the thread · @name for someone else · Esc dashboard"
+    }
+}
+
+/// The composer's text in `area`, rows broken at line breaks and the width,
+/// keeping the cursor row visible.
+fn render_composer_text(frame: &mut Frame, v: &ThreadView, area: Rect, glyph: Span<'static>, focused: bool) {
+    let indent = PROMPT.chars().count();
+    let body_width = (area.width as usize).saturating_sub(indent).max(1);
+    let text_rows = area.height as usize;
+    let chars: Vec<char> = v.composer.text().chars().collect();
+    let styles = mention_styles(&chars, &v.mention_names());
+    let (rows, (cursor_row, cursor_col)) = input_rows(&chars, body_width, v.composer.cursor());
+    // The composer pane grows to fit its text: while it catches up with a
+    // new line, keep the top in place rather than scrolling the first line
+    // away and back. Scroll past the most rows it grows to, or in the full
+    // view, whose layout has no pane to grow.
+    let first_row = if v.compose_only && rows.len() <= MAX_INPUT_ROWS { 0 } else { cursor_row.saturating_sub(text_rows - 1) };
+    for (r, &(start, end)) in rows.iter().enumerate().skip(first_row).take(text_rows) {
+        let lead = if r == 0 { glyph.clone() } else { Span::raw(" ".repeat(indent)) };
+        let mut spans = vec![lead];
+        spans.extend(styled_run(&chars[start..end], &styles[start..end]));
+        frame.render_widget(Paragraph::new(Line::from(spans)), Rect::new(area.x, area.y + cells(r - first_row), area.width, 1));
+    }
+    // The cursor's row may be the one the pane is still growing to show.
+    if focused && cursor_row - first_row < text_rows {
+        let cx = cells(indent + cursor_col);
+        let cy = cells(cursor_row - first_row);
+        frame.set_cursor_position(Position::new(area.x + cx, area.y + cy));
+    }
+}
+
+/// Footer: mode left; status (or as much key help as fits) right.  When the
+/// right side would be cut, the "(shift+tab to cycle)" hint goes first.
+fn render_composer_footer(frame: &mut Frame, v: &ThreadView, footer: Rect) {
+    let width = footer.width as usize;
     let fit = |left: &[Span<'static>]| -> Line<'static> {
-        let left_w: usize = left.iter().map(|s| s.content.chars().count()).sum();
-        let room = width.saturating_sub(left_w + 2);
+        let left_width: usize = left.iter().map(|s| s.content.chars().count()).sum();
+        let room = width.saturating_sub(left_width + 2);
         match &v.status {
             Some(st) => {
                 let style = if st.starts_with("error") { theme::danger() } else { theme::accent() };
@@ -959,6 +1026,6 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
         right = fit(&left);
     }
     frame.render_widget(Paragraph::new(Line::from(left)), footer);
-    let rw = (cells(right.width()) + 1).min(footer.width);
-    frame.render_widget(Paragraph::new(right), Rect::new(footer.x + footer.width - rw, footer.y, rw.saturating_sub(1), 1));
+    let right_width = (cells(right.width()) + 1).min(footer.width);
+    frame.render_widget(Paragraph::new(right), Rect::new(footer.x + footer.width - right_width, footer.y, right_width.saturating_sub(1), 1));
 }
