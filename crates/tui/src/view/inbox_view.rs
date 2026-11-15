@@ -10,14 +10,14 @@ use super::help_line;
 use crate::inbox::{Focus, Inbox};
 use crate::model::RequestKind;
 use crate::theme;
-use crate::util::{ellipsize, relative_time};
+use crate::util::{cells, ellipsize, relative_time};
 
 pub fn render(frame: &mut Frame, ib: &Inbox, now: i64) {
     let area = frame.area();
     let [body, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
 
-    let n_req = ib.data.requests.len() as u16;
-    let n_status = ib.data.statuses.len() as u16;
+    let n_req = cells(ib.data.requests.len());
+    let n_status = cells(ib.data.statuses.len());
     let req_h = (n_req.max(1) + 2).min(body.height / 2).max(3);
     let status_h = (n_status.max(1) + 2).min(body.height.saturating_sub(req_h) / 2).max(3);
     let [req_area, status_area, msg_area] =

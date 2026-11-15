@@ -9,6 +9,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use super::dashboard_view::{plan_thread_cols, render_thread_row};
 use super::{field_line, help_line};
 use crate::picker::ThreadPicker;
+use crate::util::cells;
 use crate::theme;
 
 const PAD: u16 = 2;
@@ -65,7 +66,7 @@ pub fn render(frame: &mut Frame, p: &ThreadPicker, focused: bool, now: i64) {
     let rows = list.height as usize;
     let first = p.sel.saturating_sub(rows.saturating_sub(1));
     for (n, &i) in visible.iter().enumerate().skip(first).take(rows) {
-        let row = Rect::new(list.x, list.y + (n - first) as u16, list.width, 1);
+        let row = Rect::new(list.x, list.y + cells(n - first), list.width, 1);
         let t = &p.threads[i];
         render_thread_row(frame, t, row, &cols, focused && n == p.sel, now);
         if t.settled {

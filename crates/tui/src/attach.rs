@@ -165,6 +165,7 @@ pub fn chip_parts(attachments: &[PathBuf], width: usize, selected: Option<usize>
     let names: Vec<String> = attachments.iter().map(|p| chip_name(p)).collect();
     let mut shown = total;
     loop {
+        assert!(shown <= total, "only ever drops chips");
         let hidden = total - shown;
         if shown == 0 {
             return (Vec::new(), hidden);
@@ -210,6 +211,7 @@ pub fn chip_parts(attachments: &[PathBuf], width: usize, selected: Option<usize>
             .collect();
         let line_cols: usize = parts.iter().map(|p| chip_cols(&p.text)).sum::<usize>() + (shown - 1) * 2 + suffix_cols;
         if line_cols <= width {
+            debug_assert!(selected.is_none_or(|s| s >= total || parts.iter().any(|p| p.index == s)), "the selected chip is shown");
             return (parts, hidden);
         }
         shown -= 1;

@@ -10,7 +10,7 @@ use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
 use super::{chips_spans, field_line, help_line};
 use crate::launcher::{Field, Launcher, Step, TitleFocus, WhereMode, WhereRow, WhoMode, Workspace};
 use crate::theme;
-use crate::util::{display_path, ellipsize, relative_time};
+use crate::util::{cells, display_path, ellipsize, relative_time};
 
 /// Horizontal padding inside the pane.
 const PAD: u16 = 2;
@@ -59,15 +59,14 @@ pub fn render(frame: &mut Frame, l: &Launcher, now: i64) {
 
     // Breadcrumbs for answered steps (compact when short on rows).
     let crumbs = l.breadcrumbs();
-    let crumb_rows = if inner.height >= 14 { crumbs.len() as u16 } else { 0 };
+    let crumb_rows = if inner.height >= 14 { cells(crumbs.len()) } else { 0 };
     let has_gap = inner.height >= 12 && crumb_rows > 0;
-    let [crumb_area, gap, body] = Layout::vertical([
+    let [crumb_area, _gap, body] = Layout::vertical([
         Constraint::Length(crumb_rows),
         Constraint::Length(if has_gap { 1 } else { 0 }),
         Constraint::Min(1),
     ])
     .areas(inner);
-    let _ = gap;
 
     if crumb_rows > 0 {
         let lines: Vec<Line> = crumbs
@@ -156,11 +155,11 @@ fn prompt_input(frame: &mut Frame, area: Rect, l: &Launcher) {
         let lead = if r == 0 { glyph.clone() } else { Span::raw("  ") };
         let mut spans = vec![lead];
         spans.extend(super::thread_view::styled_run(&chars[start..end], &styles[start..end]));
-        frame.render_widget(Paragraph::new(Line::from(spans)), Rect { y: area.y + (r - first) as u16, height: 1, ..area });
+        frame.render_widget(Paragraph::new(Line::from(spans)), Rect { y: area.y + cells(r - first), height: 1, ..area });
     }
     // The cursor's row may be the one the pane is still growing to show.
     if focused && cur_row - first < height {
-        frame.set_cursor_position(Position::new(area.x + 2 + cur_col as u16, area.y + (cur_row - first) as u16));
+        frame.set_cursor_position(Position::new(area.x + 2 + cells(cur_col), area.y + cells(cur_row - first)));
     }
 }
 
@@ -168,20 +167,20 @@ fn prompt_input(frame: &mut Frame, area: Rect, l: &Launcher) {
 /// [`super::thread_view::MAX_INPUT_ROWS`]) and the attachments row.
 pub fn prompt_pane_rows(l: &Launcher, width: u16) -> u16 {
     let field = width.saturating_sub(PAD * 2);
-    let text = prompt_rows(l, field).min(super::thread_view::MAX_INPUT_ROWS as u16);
+    let text = prompt_rows(l, field).min(cells(super::thread_view::MAX_INPUT_ROWS));
     1 + text + menu_rows(l) + u16::from(!l.attachments.is_empty())
 }
 
 /// Rows the `@name` suggestions take under the prompt.
 fn menu_rows(l: &Launcher) -> u16 {
-    l.mention_options().len().min(crate::mention::MAX_ROWS) as u16
+    cells(l.mention_options().len().min(crate::mention::MAX_ROWS))
 }
 
 /// Rows the prompt's text takes in a field `width` wide.
 fn prompt_rows(l: &Launcher, width: u16) -> u16 {
     let chars: Vec<char> = l.title.text().chars().collect();
     let body_w = (width as usize).saturating_sub(2).max(1);
-    super::thread_view::input_rows(&chars, body_w, l.title.cursor()).0.len().max(1) as u16
+    cells(super::thread_view::input_rows(&chars, body_w, l.title.cursor()).0.len().max(1))
 }
 
 /// The first screen: just the input (placeholder `What are we building?`),
@@ -212,8 +211,8 @@ fn render_prompt(frame: &mut Frame, l: &Launcher, full: Rect) {
         (None, None) => Line::from(Span::styled("no agent yet", theme::dim())),
     };
     // Who/where takes the right of the row while the input leaves it room.
-    let right_w = right.width() as u16;
-    let typed = l.title.text().chars().count() as u16;
+    let right_w = cells(right.width());
+    let typed = cells(l.title.text().chars().count());
     let room = input.width.saturating_sub(right_w + 2);
     let show_right = l.error.is_some() || (rows == 1 && !l.title.text().contains('\n') && room >= 24 && typed + 3 < room);
     let field = if show_right { Rect { width: room, ..input } } else { input };
@@ -347,8 +346,8 @@ fn render_new_agent(frame: &mut Frame, l: &Launcher, area: Rect) {
         let focused = l.form.field == *field;
         let marker = Span::styled(if focused { "› " } else { "  " }, theme::accent());
         let label = Span::styled(format!("{:<label_w$}", field.label()), if focused { theme::accent() } else { theme::dim() });
-        let value_x = row.x + 2 + label_w as u16;
-        let value_w = row.width.saturating_sub(2 + label_w as u16) as usize;
+        let value_x = row.x + 2 + cells(label_w);
+        let value_w = row.width.saturating_sub(2 + cells(label_w)) as usize;
         let value_line: Line = match field {
             Field::Name => {
                 let (shown, col) = l.form.name.view(value_w);

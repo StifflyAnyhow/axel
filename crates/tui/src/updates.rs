@@ -53,18 +53,21 @@ fn cached_latest(path: &Path, now: u64, fetch: impl FnOnce() -> Option<String>) 
     std::fs::create_dir_all(path.parent()?).ok()?;
     let lock = path.with_extension("lock");
     if std::fs::metadata(&lock).ok().and_then(|m| m.modified().ok()).is_some_and(|t| t.elapsed().unwrap_or(Duration::MAX) > Duration::from_secs(60)) {
+        // A stale lock from a crashed check; if it won't go, create_new below fails and we use the cache.
         let _ = std::fs::remove_file(&lock);
     }
     let Ok(_file) = std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) else {
         return cached.map(|c| c.latest);
     };
     struct Unlock(PathBuf);
+    // A lock left behind goes stale after a minute and is removed above.
     impl Drop for Unlock { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
     let _unlock = Unlock(lock);
     let Some(latest) = fetch().filter(|tag| Version::parse(tag).is_some()) else { return cached.map(|c| c.latest) };
     let cache = Cache { checked_at: now, latest: latest.clone() };
     if let Ok(bytes) = serde_json::to_vec(&cache) {
         let pending = path.with_extension("pending");
+        // The cache only saves a request: failing to write it means the next check asks GitHub again.
         if std::fs::write(&pending, bytes).is_ok() { let _ = std::fs::rename(pending, path); }
     }
     Some(latest)
@@ -76,6 +79,7 @@ fn hint(installed: &str, latest: &str) -> Option<String> {
 
 fn spawn(check: impl Fn() -> Option<String> + Send + 'static) -> Receiver<Option<String>> {
     let (tx, rx) = mpsc::channel();
+    // Without the thread the receiver just disconnects and no update hint shows: the check is optional.
     let _ = std::thread::Builder::new().name("axel-updates".into()).spawn(move || loop {
         if tx.send(check()).is_err() { break }
         std::thread::sleep(RETRY);

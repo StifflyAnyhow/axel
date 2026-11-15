@@ -331,6 +331,7 @@ impl DiffView {
         if stops.is_empty() { return }
         let current = stops.iter().position(|(file, row)| *file == self.file && (row.holds(self.cursor) || self.lines().is_empty())).unwrap_or(0);
         let target = (current as isize + delta).clamp(0, stops.len() as isize - 1) as usize;
+        assert!(target < stops.len(), "the target is a stop");
         let (file, row) = stops[target];
         if file != self.file { self.mark = None; }
         self.file = file;
@@ -589,6 +590,7 @@ pub fn run_diff(data: DiffData, drafts: Vec<Draft>) -> Result<(Outcome, Vec<Draf
 /// editing. The default reader leaves scrolling and selection to the terminal.
 fn run_review(v: &mut DiffView) -> Result<Outcome> {
     let mut terminal = ratatui::init();
+    // Clicks and pastes are niceties; keys still review without them.
     let _ = crossterm::execute!(std::io::stdout(), event::EnableMouseCapture, event::EnableBracketedPaste);
     let result = (|| -> Result<Outcome> {
         loop {
@@ -605,6 +607,7 @@ fn run_review(v: &mut DiffView) -> Result<Outcome> {
             }
         }
     })();
+    // Teardown: keep restoring the terminal even if this step fails.
     let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture, event::DisableBracketedPaste);
     ratatui::restore();
     result

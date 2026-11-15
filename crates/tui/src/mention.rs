@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use crate::input::TextInput;
 use crate::model::AgentColor;
 use crate::theme;
-use crate::util::fuzzy_score;
+use crate::util::{cells, fuzzy_score};
 
 /// The most suggestions shown at once.
 pub const MAX_ROWS: usize = 5;
@@ -156,7 +156,7 @@ impl MentionMenu {
 
     /// Rows the list takes for `input`.
     pub fn height(&self, input: &TextInput, names: &[Name]) -> u16 {
-        self.options(input, names).len().min(MAX_ROWS) as u16
+        cells(self.options(input, names).len().min(MAX_ROWS))
     }
 }
 

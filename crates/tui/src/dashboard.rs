@@ -91,6 +91,7 @@ impl Dashboard {
             *sel = 0;
         } else {
             *sel = (*sel as i64 + delta).clamp(0, len as i64 - 1) as usize;
+            assert!(*sel < len, "the selection is on a row");
         }
     }
 

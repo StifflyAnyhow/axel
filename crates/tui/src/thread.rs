@@ -12,6 +12,10 @@ use crate::attach::parse_dropped_paths;
 use crate::input::TextInput;
 use crate::model::{ItemBody, ItemKind, ItemStatus, RuntimeMode, ThreadData, ThreadItem};
 
+/// Prompts sent from this view kept for ↑ history: the store holds the rest,
+/// and the thread view reads its newest 500 items anyway.
+const SENT_HISTORY_MAX: usize = 500;
+
 /// Command sent to a managed session's host (mirrors `axel_acp::socket::Command`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SendCommand {
@@ -800,6 +804,7 @@ impl ThreadView {
         let last = n as i64 - 1;
         let next = (self.cursor as i64 + delta as i64).clamp(0, last);
         self.cursor = next as usize;
+        assert!(self.cursor < n, "the cursor is on a row");
         self.follow = next == last;
     }
 
@@ -1056,6 +1061,7 @@ impl ThreadView {
         let last = rows.len() as i64 - 1;
         let next = (self.cursor as i64 + delta as i64).clamp(0, last);
         self.cursor = next as usize;
+        assert!(self.cursor < rows.len(), "the cursor is on a row");
         self.follow = next == last;
         ThreadAction::None
     }
@@ -1178,6 +1184,9 @@ impl ThreadView {
             if !t.is_empty() {
                 v.sent.retain(|s| *s != t);
                 v.sent.push(t);
+                if v.sent.len() > SENT_HISTORY_MAX {
+                    v.sent.remove(0);
+                }
             }
             v.hist_pos = None;
             v.hist_draft.clear();

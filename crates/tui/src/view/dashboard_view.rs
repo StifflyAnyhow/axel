@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Sparkline};
 use crate::dashboard::{Dashboard, Widget};
 use crate::model::{DashAgentRow, RequestKind, ThreadRow, state_glyph};
 use crate::theme;
-use crate::util::{ellipsize, format_tokens, relative_time};
+use crate::util::{cells, ellipsize, format_tokens, relative_time};
 
 const SPARK_W: u16 = 10;
 
@@ -108,7 +108,7 @@ fn plan_compact_cols(width: usize) -> CompactCols {
     used += grow;
     let spare = width.saturating_sub(used);
     if spare > COMPACT_SPARK_MIN as usize {
-        c.spark = ((spare - 1) as u16).min(SPARK_W);
+        c.spark = cells(spare - 1).min(SPARK_W);
         used += 1 + c.spark as usize;
     }
     c.name += width.saturating_sub(used).min(10);
@@ -146,12 +146,12 @@ fn render_compact(frame: &mut Frame, d: &Dashboard, area: Rect) {
             let first = d.agent_sel.saturating_sub(shown.saturating_sub(1)).min(total.saturating_sub(shown));
             let cols = plan_compact_cols(inner.width as usize);
             for (row_i, (i, a)) in d.data.agents.iter().enumerate().skip(first).take(shown).enumerate() {
-                let row = Rect::new(inner.x, inner.y + row_i as u16, inner.width, 1);
+                let row = Rect::new(inner.x, inner.y + cells(row_i), inner.width, 1);
                 render_compact_row(frame, a, row, &cols, i == d.agent_sel);
             }
             if total > shown {
                 let hidden = total - shown;
-                let row = Rect::new(inner.x, inner.y + shown as u16, inner.width, 1);
+                let row = Rect::new(inner.x, inner.y + cells(shown), inner.width, 1);
                 frame.render_widget(Paragraph::new(Line::from(Span::styled(format!("+{hidden} more"), theme::dim()))), row);
             }
         }
@@ -173,7 +173,7 @@ fn render_compact_row(frame: &mut Frame, a: &DashAgentRow, row: Rect, cols: &Com
         Span::styled(format!("{:<w$}", ellipsize(&a.name, cols.name), w = cols.name), base.fg(theme::agent_color(a.color)).bold()),
     ];
     let spark_x = if cols.spark > 0 {
-        let x = row.x + span_len(&spans) as u16 + 1;
+        let x = row.x + cells(span_len(&spans)) + 1;
         spans.push(Span::styled(" ".repeat(cols.spark as usize + 1), base));
         Some(x)
     } else {
@@ -323,7 +323,7 @@ fn render_threads(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
     let rows = inner.height as usize;
     let first = d.thread_sel.saturating_sub(rows.saturating_sub(1));
     for (i, t) in d.data.threads.iter().enumerate().skip(first).take(rows) {
-        let row = Rect::new(inner.x, inner.y + (i - first) as u16, inner.width, 1);
+        let row = Rect::new(inner.x, inner.y + cells(i - first), inner.width, 1);
         render_thread_row(frame, t, row, &cols, i == d.thread_sel && focused, now);
     }
 }
@@ -359,7 +359,7 @@ pub(crate) fn render_thread_row(frame: &mut Frame, t: &ThreadRow, row: Rect, col
         }
     }
     let spark_x = if cols.spark {
-        let x = row.x + span_len(&spans) as u16 + 1;
+        let x = row.x + cells(span_len(&spans)) + 1;
         spans.push(Span::styled(" ".repeat(SPARK_W as usize + 1), base));
         Some(x)
     } else {
@@ -441,7 +441,7 @@ fn render_agents(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
     let rows = inner.height as usize;
     let first = d.agent_sel.saturating_sub(rows.saturating_sub(1));
     for (i, a) in d.data.agents.iter().enumerate().skip(first).take(rows) {
-        let row = Rect::new(inner.x, inner.y + (i - first) as u16, inner.width, 1);
+        let row = Rect::new(inner.x, inner.y + cells(i - first), inner.width, 1);
         render_agent_row(frame, a, row, &cols, i == d.agent_sel && focused, now);
     }
 }
@@ -463,7 +463,7 @@ fn render_agent_row(frame: &mut Frame, a: &DashAgentRow, row: Rect, cols: &Agent
         spans.push(Span::styled(format!(" {:<w$}", ellipsize(&t, w), w = w), style));
     }
     let spark_x = if cols.spark {
-        let x = row.x + span_len(&spans) as u16 + 1;
+        let x = row.x + cells(span_len(&spans)) + 1;
         spans.push(Span::styled(" ".repeat(SPARK_W as usize + 1), base));
         Some(x)
     } else {

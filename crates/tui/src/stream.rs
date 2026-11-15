@@ -165,6 +165,7 @@ impl RawInput {
 
 impl Drop for RawInput {
     fn drop(&mut self) {
+        // Teardown can't report: a terminal that refuses these is already gone.
         let _ = crossterm::execute!(std::io::stdout(), event::DisableBracketedPaste, crossterm::cursor::Show);
         let _ = crossterm::terminal::disable_raw_mode();
     }

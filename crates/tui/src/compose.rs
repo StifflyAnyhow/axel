@@ -18,7 +18,7 @@ use ratatui::widgets::Paragraph;
 use crate::Deps;
 use crate::glue;
 use crate::thread::{Row, ThreadAction, ThreadView};
-use crate::util::now_secs;
+use crate::util::{cells, now_secs};
 use crate::view::thread_view::{composer_height, queue_height, render_composer, render_queue, row_lines};
 
 const POLL: Duration = Duration::from_millis(60);
@@ -49,6 +49,7 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
     ask_new(&v);
 
     let mut terminal = ratatui::init();
+    // Without bracketed paste a paste arrives as keys: worse, but still usable.
     let _ = execute!(stdout(), EnableBracketedPaste);
     // Tell Shift+Enter (a line break) apart from Enter (send).
     let keys = crate::util::enhance_keys();
@@ -118,11 +119,13 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
         }
     })();
     crate::util::restore_keys(keys);
+    // Teardown: keep restoring the terminal even if this step fails.
     let _ = execute!(stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
 }
 
+/// `None` when the thread is gone or can't be read; the next poll reads it again.
 fn thread_state(deps: &Deps, thread_id: &str) -> Option<axel_store::ThreadState> {
     deps.store.get_thread(thread_id).ok().flatten().map(|t| t.state)
 }
@@ -303,7 +306,7 @@ impl PaneFit {
 pub fn desired_height(v: &ThreadView, width: u16) -> u16 {
     // `composer_height` picks its text rows from the area height; ask as a tall pane.
     let composer = composer_height(v, Rect::new(0, 0, width, 40));
-    let card = v.pending_choice().map_or(0, |i| row_lines(v, &Row::Choice(i), width.saturating_sub(1) as usize, true).len() as u16);
+    let card = v.pending_choice().map_or(0, |i| cells(row_lines(v, &Row::Choice(i), width.saturating_sub(1) as usize, true).len()));
     composer + queue_height(v) + card
 }
 
@@ -316,7 +319,7 @@ pub fn render(frame: &mut Frame, v: &ThreadView) {
         Some(i) => row_lines(v, &Row::Choice(i), area.width.saturating_sub(1) as usize, true),
         None => Vec::new(),
     };
-    let card_h = (card.len() as u16).min(area.height.saturating_sub(composer_h + queue_h));
+    let card_h = cells(card.len()).min(area.height.saturating_sub(composer_h + queue_h));
     let [_, card_area, queue_area, composer_area] = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(card_h),

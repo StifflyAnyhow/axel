@@ -24,6 +24,7 @@ impl Input {
 
 impl Drop for Input {
     fn drop(&mut self) {
+        // Teardown can't report: a terminal that refuses these is already gone.
         let _ = write!(stdout(), "\x1b[0m\x1b[?25h");
         let _ = stdout().flush();
         let _ = terminal::disable_raw_mode();

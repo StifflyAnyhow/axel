@@ -116,12 +116,40 @@ pub fn describe_line(title: &str, kind: Option<&str>, raw: &Value) -> String {
     }
 }
 
+/// ACP's tool kinds this module tells apart, read from the wire's
+/// snake_case text; any other kind is `Other`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolKind {
+    Read,
+    Edit,
+    Execute,
+    Think,
+    Fetch,
+    SwitchMode,
+    Other,
+}
+
+impl ToolKind {
+    fn parse(text: &str) -> Self {
+        match text {
+            "read" => ToolKind::Read,
+            "edit" => ToolKind::Edit,
+            "execute" => ToolKind::Execute,
+            "think" => ToolKind::Think,
+            "fetch" => ToolKind::Fetch,
+            "switch_mode" => ToolKind::SwitchMode,
+            _ => ToolKind::Other,
+        }
+    }
+}
+
 /// Every action in one call: a command can do several things.
 pub fn describe_all(title: &str, kind: Option<&str>, raw: &Value) -> Vec<Action> {
+    let kind = kind.map(ToolKind::parse);
     let s = |k: &str| raw.get(k).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
     // 1. The harness's own words.
     if let Some(d) = s("description")
-        && (s("command").is_some() || kind == Some("execute") || kind == Some("think"))
+        && (s("command").is_some() || matches!(kind, Some(ToolKind::Execute | ToolKind::Think)))
     {
         return vec![Action::plain(Verb::Described, capitalize(first_line(d).trim_end_matches('.')))];
     }
@@ -140,7 +168,7 @@ pub fn describe_all(title: &str, kind: Option<&str>, raw: &Value) -> Vec<Action>
     let command = s("command").or_else(|| s("cmd")).map(String::from).or_else(|| {
         raw.get("command").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "))
     });
-    let command = command.or_else(|| (kind == Some("execute")).then(|| title.trim().trim_matches('`').to_string()));
+    let command = command.or_else(|| (kind == Some(ToolKind::Execute)).then(|| title.trim().trim_matches('`').to_string()));
     if let Some(cmd) = command.filter(|c| !c.trim().is_empty()) {
         let acts = describe_command(&cmd);
         if !acts.is_empty() {
@@ -156,7 +184,7 @@ pub fn describe_all(title: &str, kind: Option<&str>, raw: &Value) -> Vec<Action>
         ("Edit", Some(p)) => return vec![Action::new(Verb::Edit, short(p), format!("Edit {}", short(p)))],
         _ => {}
     }
-    if matches!(tool, "EnterPlanMode" | "Exited") || kind == Some("switch_mode") {
+    if matches!(tool, "EnterPlanMode" | "Exited") || kind == Some(ToolKind::SwitchMode) {
         return vec![Action::plain(Verb::Plan, if tool == "EnterPlanMode" { "Plan first" } else { "Leave plan mode" })];
     }
     vec![Action::plain(Verb::Other, first_line(title))]
@@ -184,15 +212,15 @@ fn codex_action(a: &Value) -> Option<Action> {
 }
 
 /// Claude Code's tools (and MCP tools), from their input.
-fn structured(tool: &str, title: &str, kind: Option<&str>, raw: &Value) -> Option<Action> {
+fn structured(tool: &str, title: &str, kind: Option<ToolKind>, raw: &Value) -> Option<Action> {
     let s = |k: &str| raw.get(k).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
     let n = |k: &str| raw.get(k).and_then(Value::as_u64);
-    let path = s("file_path").or_else(|| s("notebook_path")).or_else(|| matches!(kind, Some("read" | "edit")).then(|| s("path")).flatten());
+    let path = s("file_path").or_else(|| s("notebook_path")).or_else(|| matches!(kind, Some(ToolKind::Read | ToolKind::Edit)).then(|| s("path")).flatten());
     if let Some(path) = path {
         let f = short(path);
         return Some(match (kind, tool) {
             (_, "Write") => Action::new(Verb::Write, f.clone(), format!("Write {f}")),
-            (Some("edit"), _) | (_, "Edit" | "MultiEdit" | "NotebookEdit") => Action::new(Verb::Edit, f.clone(), format!("Edit {f}")),
+            (Some(ToolKind::Edit), _) | (_, "Edit" | "MultiEdit" | "NotebookEdit") => Action::new(Verb::Edit, f.clone(), format!("Edit {f}")),
             _ if raw.get("content").is_some() => Action::new(Verb::Write, f.clone(), format!("Write {f}")),
             _ => match (n("offset"), n("limit")) {
                 (Some(o), Some(l)) => Action::new(Verb::Read, f.clone(), format!("Read lines {}–{} of {f}", o.max(1), o.max(1) + l - 1)),
@@ -217,7 +245,7 @@ fn structured(tool: &str, title: &str, kind: Option<&str>, raw: &Value) -> Optio
         return Some(Action::new(Verb::Fetch, h.clone(), format!("Fetch {}", trim_url(url))));
     }
     if let Some(q) = s("query")
-        && (tool == "WebSearch" || kind == Some("fetch"))
+        && (tool == "WebSearch" || kind == Some(ToolKind::Fetch))
     {
         let q = quote(q);
         return Some(Action::new(Verb::WebSearch, q.clone(), format!("Search the web for {q}")));

@@ -35,12 +35,14 @@ pub fn run(deps: Deps, initial: Screen) -> Result<Outcome> {
     // Mouse capture: without it the terminal turns the wheel into ↑/↓ on the
     // alternate screen, which the composer reads as prompt history.
     // Focus reports: the recent-threads pane only highlights its row while it has focus.
+    // Each is a nicety (paste, wheel, focus); the TUI still works without them.
     let _ = execute!(stdout(), EnableBracketedPaste, EnableMouseCapture, EnableFocusChange);
     // Shift+Enter in the thread view's composer is a line break.
     let keys = crate::util::enhance_keys();
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         crate::util::restore_keys(keys);
+        // Already panicking: restore what we can and let the hook report.
         let _ = execute!(stdout(), DisableBracketedPaste, DisableMouseCapture, DisableFocusChange);
         ratatui::restore();
         previous_hook(info);
@@ -49,10 +51,21 @@ pub fn run(deps: Deps, initial: Screen) -> Result<Outcome> {
     let result = event_loop(&mut terminal, &deps, &owner_pk, initial);
 
     crate::util::restore_keys(keys);
+    // Teardown: keep restoring the terminal even if this step fails.
     let _ = execute!(stdout(), DisableBracketedPaste, DisableMouseCapture, DisableFocusChange);
     ratatui::restore();
+    // Drop our terminal-restoring hook (it owns the previous one); the default is back.
     let _ = std::panic::take_hook();
     result
+}
+
+/// A list for the launcher, or an empty one and the error to show in its
+/// header: the launcher still works without its suggestions.
+fn or_empty<T>(loaded: Result<Vec<T>>) -> (Vec<T>, Option<String>) {
+    match loaded {
+        Ok(list) => (list, None),
+        Err(e) => (Vec::new(), Some(format!("couldn't read the store: {e}"))),
+    }
 }
 
 struct App<'a> {
@@ -80,6 +93,8 @@ struct App<'a> {
 impl<'a> App<'a> {
     fn new(deps: &'a Deps<'a>, owner_pk: &'a str, initial: Screen) -> Self {
         let now = now_secs();
+        // Start empty on a load error: opening the screen refreshes it, and
+        // the refresh shows the error in the screen's flash line.
         let dashboard = Dashboard::new(glue::load_dashboard(deps.store, owner_pk, now).unwrap_or_default());
         let inbox = Inbox::new(glue::load_inbox(deps.store, owner_pk).unwrap_or_default());
         let launcher = Self::fresh_launcher(deps);
@@ -106,11 +121,12 @@ impl<'a> App<'a> {
     }
 
     fn fresh_launcher(deps: &Deps) -> Launcher {
-        let projects = glue::load_projects(deps.store).unwrap_or_default();
-        let agents = glue::load_agents(deps.store).unwrap_or_default();
+        let (projects, projects_error) = or_empty(glue::load_projects(deps.store));
+        let (agents, agents_error) = or_empty(glue::load_agents(deps.store));
         let harnesses = deps.harnesses.iter().map(|h| h.to_string()).collect();
         let mut l = Launcher::new(deps.cwd.clone(), projects, agents, harnesses);
         l.pane_grows = deps.fit_prompt.is_some();
+        l.error = projects_error.or(agents_error);
         l
     }
 
@@ -122,15 +138,19 @@ impl<'a> App<'a> {
                 if self.launcher.spawn.is_some() {
                     self.launcher = Self::fresh_launcher(self.deps);
                 } else {
-                    let projects = glue::load_projects(self.deps.store).unwrap_or_default();
-                    let agents = glue::load_agents(self.deps.store).unwrap_or_default();
+                    let (projects, projects_error) = or_empty(glue::load_projects(self.deps.store));
+                    let (agents, agents_error) = or_empty(glue::load_agents(self.deps.store));
                     self.launcher.set_projects(projects);
                     self.launcher.set_agents(agents);
+                    if let Some(error) = projects_error.or(agents_error) {
+                        self.launcher.error = Some(error);
+                    }
                 }
             }
             Screen::Thread(tid) => {
                 let same = self.thread.as_ref().is_some_and(|t| &t.thread_id == tid);
                 if !same {
+                    // Start empty on a load error: the refresh below shows it in the status line.
                     let data = glue::load_thread(self.deps.store, self.owner_pk, tid, now_secs()).unwrap_or_default();
                     self.thread = Some(ThreadView::new(tid, data));
                 }
@@ -344,6 +364,7 @@ impl<'a> App<'a> {
                 None
             }
             DashAction::OpenThread(tid) => {
+                // Showing it outside this TUI is a preference: on any error, open it here instead.
                 let opened = self.deps.open_thread.is_some_and(|f| f(&tid).is_ok());
                 if !opened {
                     self.open(Screen::Thread(tid));
@@ -352,9 +373,10 @@ impl<'a> App<'a> {
             }
             DashAction::FocusSession(sid) => Some(Outcome::FocusSession(sid)),
             DashAction::Spawn { thread_id, title } => {
-                let agents = glue::load_agents(self.deps.store).unwrap_or_default();
+                let (agents, agents_error) = or_empty(glue::load_agents(self.deps.store));
                 let harnesses = self.deps.harnesses.iter().map(|h| h.to_string()).collect();
                 self.launcher = Launcher::for_spawn(self.deps.cwd.clone(), agents, harnesses, &thread_id, &title);
+                self.launcher.error = agents_error;
                 self.screen = Screen::Launcher;
                 None
             }
@@ -455,6 +477,7 @@ impl<'a> App<'a> {
                 None
             }
             PickAction::Open(tid) => {
+                // Showing it outside this TUI is a preference: on any error, open it here instead.
                 let opened = self.deps.open_thread.is_some_and(|f| f(&tid).is_ok());
                 if !opened {
                     self.open(Screen::Thread(tid));

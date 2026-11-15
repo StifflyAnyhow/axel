@@ -17,6 +17,16 @@ use crate::model::{
 };
 use crate::util::bucket_series;
 
+/// The newest items a thread view reads: the window docs/CONTRACTS.md names
+/// for the thread view. Older items stay in the store.
+const THREAD_ITEMS_MAX: usize = 500;
+/// Messages listed on the inbox screen, which has the whole screen for them.
+const INBOX_MESSAGES_MAX: usize = 50;
+/// Messages on the dashboard, where they share the screen with threads and agents.
+const DASHBOARD_MESSAGES_MAX: usize = 20;
+/// Projects the launcher offers under "Where?": more than fit on a screen.
+const RECENT_PROJECTS_MAX: usize = 20;
+
 /// Map any crate error into anyhow via Display, so this compiles regardless of
 /// whether the other crates' error types are `Send + Sync + 'static`.
 fn se<E: std::fmt::Display>(e: E) -> anyhow::Error {
@@ -29,7 +39,7 @@ pub fn owner_pubkey(keystore: &Keystore) -> Result<String> {
 
 pub fn load_projects(store: &Store) -> Result<Vec<ProjectRow>> {
     Ok(store
-        .recent_projects(20)
+        .recent_projects(RECENT_PROJECTS_MAX)
         .map_err(se)?
         .into_iter()
         .map(|p| ProjectRow { name: p.name, path: p.path })
@@ -54,6 +64,7 @@ pub fn load_agents(store: &Store) -> Result<Vec<AgentRow>> {
     Ok(agents
         .into_iter()
         .map(|a| {
+            // A badge only: an unreadable count shows as none rather than hiding the agent.
             let unread = store.unread_count(&a.pubkey).unwrap_or(0);
             agent_row(a, unread)
         })
@@ -149,6 +160,7 @@ fn requests(store: &Store, names: &mut Names) -> Result<Vec<RequestRow>> {
         let thread_id = thread_tag(&m);
         let session_id = session_tag(&m);
         let thread_title = match &thread_id {
+            // A label only: an unreadable thread shows without its title.
             Some(tid) => titles
                 .entry(tid.clone())
                 .or_insert_with(|| store.get_thread(tid).ok().flatten().map(|t| t.title))
@@ -194,6 +206,7 @@ pub fn load_inbox(store: &Store, owner_pk: &str) -> Result<InboxData> {
     let mut statuses = Vec::new();
     let mut threads: HashMap<String, Option<axel_store::Thread>> = HashMap::new();
     for s in store.statuses().map_err(se)? {
+        // Labels only: an unreadable session or thread falls back to `?` and the status's own title.
         let session = store.get_session(&s.session_id).ok().flatten();
         let thread = threads
             .entry(s.thread_id.clone())
@@ -212,7 +225,7 @@ pub fn load_inbox(store: &Store, owner_pk: &str) -> Result<InboxData> {
         });
     }
     statuses.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
-    let messages = messages(store, owner_pk, &mut names, 50)?;
+    let messages = messages(store, owner_pk, &mut names, INBOX_MESSAGES_MAX)?;
     let unread = store.unread_count(owner_pk).map_err(se)?;
     Ok(InboxData { requests, statuses, messages, unread })
 }
@@ -369,6 +382,7 @@ pub fn load_dashboard(store: &Store, owner_pk: &str, now: i64) -> Result<Dashboa
         let thread_id = latest.as_ref().map(|s| s.thread_id.clone());
         let (thread_title, environment, spark, active, status) = match &latest {
             Some(sess) => {
+                // A label only: an unreadable thread shows without its title.
                 let title = thread_titles
                     .entry(sess.thread_id.clone())
                     .or_insert_with(|| store.get_thread(&sess.thread_id).ok().flatten().map(|t| t.title))
@@ -420,7 +434,7 @@ pub fn load_dashboard(store: &Store, owner_pk: &str, now: i64) -> Result<Dashboa
     }
 
     let requests = requests(store, &mut names)?;
-    let messages = messages(store, owner_pk, &mut names, 20)?;
+    let messages = messages(store, owner_pk, &mut names, DASHBOARD_MESSAGES_MAX)?;
     let unread = store.unread_count(owner_pk).map_err(se)?;
     Ok(DashboardData { threads, agents, tokens, requests, messages, unread })
 }
@@ -613,7 +627,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
         agents.push((name, color, state));
     }
 
-    let local_env = store.local_environment().map(|e| e.id).unwrap_or_default();
+    let local_env = store.local_environment().map_err(se)?.id;
     let live_sessions: Vec<LiveSession> = sessions
         .iter()
         .filter(|s| s.ended_at.is_none() && agent_pks.contains(&s.agent_pubkey))
@@ -624,6 +638,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             started_at: s.started_at,
             mode: s.runtime_mode,
             host: (s.environment_id != local_env).then(|| {
+                // A label only: fall back to the one the session recorded.
                 store.environment(&s.environment_id).ok().flatten().map_or_else(|| s.environment_label.clone(), |e| e.label)
             }),
             last_reply_at: None,
@@ -635,7 +650,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
     // Local items.
     let mut items: Vec<ThreadItem> = Vec::new();
     let mut sessions_with_items: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for it in store.thread_items(thread_id, 500).map_err(se)? {
+    for it in store.thread_items(thread_id, THREAD_ITEMS_MAX).map_err(se)? {
         sessions_with_items.insert(it.session_id.clone());
         let kind = map_kind(it.kind);
         let from = it.content.get("from").and_then(|v| v.as_str());
@@ -685,6 +700,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
         }
         let agent = by_id.get(&t.session_id).map(|s| names.lookup(&s.agent_pubkey)).or_else(|| Some(names.lookup(&t.from_pubkey)));
         let at_ms = t.created_at as i64 * 1000;
+        // A label only: an unreadable name shows the message as unattributed.
         let author = if t.from_pubkey == owner_pk { None } else { store.known_identity_name(&t.from_pubkey).ok().flatten() };
         items.push(ThreadItem {
             id: format!("{}:u", t.id),

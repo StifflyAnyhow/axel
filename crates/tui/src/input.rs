@@ -7,6 +7,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::util::cells;
+
 /// How an edit groups for undo: consecutive typing is one step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Edit {
@@ -119,6 +121,7 @@ impl TextInput {
         if let Some((chars, cursor)) = self.undo.pop() {
             self.redo.push((std::mem::replace(&mut self.chars, chars), self.cursor));
             self.cursor = cursor;
+            debug_assert!(self.cursor <= self.chars.len(), "a saved cursor fits its saved text");
         }
         self.last = None;
     }
@@ -128,6 +131,7 @@ impl TextInput {
         if let Some((chars, cursor)) = self.redo.pop() {
             self.undo.push((std::mem::replace(&mut self.chars, chars), self.cursor));
             self.cursor = cursor;
+            debug_assert!(self.cursor <= self.chars.len(), "a saved cursor fits its saved text");
         }
         self.last = None;
     }
@@ -136,6 +140,7 @@ impl TextInput {
         if ch == '\n' || ch == '\r' {
             return;
         }
+        assert!(self.cursor <= self.chars.len(), "the cursor is within the text");
         self.save(Edit::Typing);
         self.chars.insert(self.cursor, ch);
         self.cursor += 1;
@@ -499,8 +504,9 @@ impl TextInput {
         }
         let inner = width.saturating_sub(1).max(1); // leave one cell for the cursor at the end
         let start = self.cursor.saturating_sub(inner);
+        debug_assert!(start <= self.cursor && self.cursor <= self.chars.len());
         let shown: String = self.chars.iter().skip(start).take(width).collect();
-        let col = (self.cursor - start).min(width.saturating_sub(1)) as u16;
+        let col = cells((self.cursor - start).min(width.saturating_sub(1)));
         (shown, col)
     }
 }

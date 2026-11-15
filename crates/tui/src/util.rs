@@ -28,11 +28,12 @@ pub fn slugify(title: &str) -> String {
         }
     }
 
-    const MAX: usize = 40;
-    if out.chars().count() > MAX {
-        let cut: String = out.chars().take(MAX).collect();
+    // Branch names stay readable in a terminal tab and a `git branch` list at 40.
+    const SLUG_CHARS_MAX: usize = 40;
+    if out.chars().count() > SLUG_CHARS_MAX {
+        let cut: String = out.chars().take(SLUG_CHARS_MAX).collect();
         out = match cut.rfind('-') {
-            Some(idx) if idx >= MAX / 2 => cut[..idx].to_string(),
+            Some(idx) if idx >= SLUG_CHARS_MAX / 2 => cut[..idx].to_string(),
             _ => cut,
         };
     }
@@ -102,11 +103,17 @@ pub fn fuzzy_score(needle: &str, haystack: &str) -> Option<u32> {
         if let Some(prev) = last_hit
             && idx == prev + 1
         {
-            score += 10;
+            score = score.saturating_add(10);
         }
         last_hit = Some(idx);
     }
     Some(score)
+}
+
+/// A count of terminal cells or rows as ratatui's `u16`, saturating: no
+/// terminal is 65 535 cells wide, so a larger count only means "all of it".
+pub(crate) fn cells(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
 }
 
 /// Truncate `s` to at most `max` characters, appending `…` when cut.
@@ -205,6 +212,7 @@ pub fn log_key(ev: &crossterm::event::Event) {
     }
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("keys.log")) {
+        // A debugging aid: a key the log misses must not disturb the TUI.
         let _ = writeln!(f, "{} {ev:?}", chrono::Local::now().format("%H:%M:%S%.3f"));
     }
 }
@@ -212,6 +220,7 @@ pub fn log_key(ev: &crossterm::event::Event) {
 /// Undo [`enhance_keys`].
 pub fn restore_keys(enhanced: bool) {
     if enhanced {
+        // Teardown: a terminal that won't take the pop is already gone or ours no longer.
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
     }
 }

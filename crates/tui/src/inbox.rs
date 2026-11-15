@@ -139,6 +139,7 @@ impl Inbox {
         }
         let next = (*sel as i64 + delta as i64).clamp(0, len as i64 - 1);
         *sel = next as usize;
+        assert!(*sel < len, "the selection is on a row");
     }
 
     fn set_sel(&mut self, to: usize) {

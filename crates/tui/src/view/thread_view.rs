@@ -10,7 +10,7 @@ use super::{chips_spans, help_line};
 use crate::model::{ItemBody, ItemKind, ItemStatus, ThreadItem, state_glyph};
 use crate::theme;
 use crate::thread::{Focus, Row, ThreadView};
-use crate::util::{ellipsize, format_tokens};
+use crate::util::{cells, ellipsize, format_tokens};
 
 const OUTPUT_HEAD: usize = 12;
 /// Queued prompts shown above the composer before collapsing into "+N more".
@@ -25,7 +25,7 @@ pub fn queue_height(v: &ThreadView) -> u16 {
     // While the strip has focus up to 8 rows show; otherwise collapse to
     // QUEUE_ROWS plus a "+N more" line (never "+1 more": that row fits the message).
     let cap = if v.focus == Focus::Queue { 8 } else { QUEUE_ROWS };
-    n.min(cap + 1) as u16
+    cells(n.min(cap + 1))
 }
 
 pub fn render(frame: &mut Frame, v: &ThreadView, now: i64) {
@@ -602,9 +602,9 @@ fn render_timeline(frame: &mut Frame, v: &ThreadView, area: Rect, _now: i64) {
     if rows.is_empty() {
         let msg = empty_hint(&v.data);
         let lines = wrap(&msg, inner.width.saturating_sub(2) as usize);
-        let top = inner.y + inner.height.saturating_sub(lines.len() as u16) / 2;
+        let top = inner.y + inner.height.saturating_sub(cells(lines.len())) / 2;
         for (i, l) in lines.into_iter().enumerate() {
-            let y = top + i as u16;
+            let y = top + cells(i);
             if y >= inner.y + inner.height {
                 break;
             }
@@ -703,11 +703,11 @@ pub(crate) fn render_queue(frame: &mut Frame, v: &ThreadView, area: Rect) {
             Span::styled(ellipsize(&text, room), if selected { style.bold() } else { theme::dim() }),
             Span::styled(files, theme::dim()),
         ]);
-        frame.render_widget(Paragraph::new(line), Rect::new(area.x + 1, area.y + r as u16, area.width.saturating_sub(1), 1));
+        frame.render_widget(Paragraph::new(line), Rect::new(area.x + 1, area.y + cells(r), area.width.saturating_sub(1), 1));
     }
     if n > shown {
         let more = Line::from(Span::styled(format!("    +{} more · Tab to browse", n - shown), theme::dim()));
-        frame.render_widget(Paragraph::new(more), Rect::new(area.x + 1, area.y + shown as u16, area.width.saturating_sub(1), 1));
+        frame.render_widget(Paragraph::new(more), Rect::new(area.x + 1, area.y + cells(shown), area.width.saturating_sub(1), 1));
     }
 }
 
@@ -739,12 +739,12 @@ pub fn composer_height(v: &ThreadView, area: Rect) -> u16 {
     // size it draws agree. In the full view, a short screen keeps two.
     let max = if v.compose_only || area.height >= 20 { MAX_INPUT_ROWS } else { 2 };
     let chips = u16::from(!v.attachments.is_empty());
-    composer_text_rows(v, area.width, max) as u16 + menu_rows(v) + chips + 2
+    cells(composer_text_rows(v, area.width, max)) + menu_rows(v) + chips + 2
 }
 
 /// Rows the `@name` suggestions take under the composer's text.
 fn menu_rows(v: &ThreadView) -> u16 {
-    v.mention_options().len().min(crate::mention::MAX_ROWS) as u16
+    cells(v.mention_options().len().min(crate::mention::MAX_ROWS))
 }
 
 /// `run [ axel update ] to get 0.3.139`, the command a pill; only the pill
@@ -850,8 +850,8 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
     let (has_footer, has_bottom) = (spare >= 1, spare >= 2);
     let chrome = u16::from(has_footer) + u16::from(has_bottom);
     let text_rows = (area.height - chips_h - menu_h - chrome).max(1) as usize;
-    let text_area = Rect::new(area.x, area.y, area.width, text_rows as u16);
-    let menu_area = Rect::new(area.x, area.y + text_rows as u16, area.width, menu_h);
+    let text_area = Rect::new(area.x, area.y, area.width, cells(text_rows));
+    let menu_area = Rect::new(area.x, area.y + cells(text_rows), area.width, menu_h);
     let chips_row = Rect::new(area.x, menu_area.y + menu_h, area.width, chips_h);
     let bottom = Rect::new(area.x, chips_row.y + chips_h, area.width, 1);
     let footer = Rect::new(area.x, bottom.y + u16::from(has_bottom), area.width, 1);
@@ -879,7 +879,7 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
             Rect::new(text_area.x, text_area.y, text_area.width, 1),
         );
         if focused {
-            frame.set_cursor_position(Position::new(text_area.x + indent as u16, text_area.y));
+            frame.set_cursor_position(Position::new(text_area.x + cells(indent), text_area.y));
         }
     } else {
         // Rows broken at line breaks and the width, keeping the cursor row visible.
@@ -897,13 +897,13 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
             spans.extend(styled_run(&chars[start..end], &styles[start..end]));
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
-                Rect::new(text_area.x, text_area.y + (r - first_row) as u16, text_area.width, 1),
+                Rect::new(text_area.x, text_area.y + cells(r - first_row), text_area.width, 1),
             );
         }
         // The cursor's row may be the one the pane is still growing to show.
         if focused && cursor_row - first_row < text_rows {
-            let cx = (indent + cursor_col) as u16;
-            let cy = (cursor_row - first_row) as u16;
+            let cx = cells(indent + cursor_col);
+            let cy = cells(cursor_row - first_row);
             frame.set_cursor_position(Position::new(text_area.x + cx, text_area.y + cy));
         }
     }
@@ -959,6 +959,6 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
         right = fit(&left);
     }
     frame.render_widget(Paragraph::new(Line::from(left)), footer);
-    let rw = (right.width() as u16 + 1).min(footer.width);
+    let rw = (cells(right.width()) + 1).min(footer.width);
     frame.render_widget(Paragraph::new(right), Rect::new(footer.x + footer.width - rw, footer.y, rw.saturating_sub(1), 1));
 }

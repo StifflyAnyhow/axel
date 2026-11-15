@@ -7,6 +7,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{DiffView, Draft, Layout, LineKind, Side, paint};
 use crate::theme;
+use crate::util::cells;
 
 struct Row {
     file: usize,
@@ -71,8 +72,8 @@ fn sidebar(frame: &mut Frame, v: &mut DiffView, area: Rect) {
     let selected = rows.iter().position(|(i, _)| *i == Some(v.file)).unwrap_or(0);
     let first = selected.saturating_sub(area.height.saturating_sub(3) as usize);
     for (n, (file, line)) in rows.into_iter().skip(first).take(area.height as usize).enumerate() {
-        draw(frame, area.x + 1, area.y + n as u16, area.width.saturating_sub(2), line);
-        if let Some(i) = file { v.hits.push((Rect::new(area.x, area.y + n as u16, area.width.saturating_sub(1), 1), super::Hit::File(i))); }
+        draw(frame, area.x + 1, area.y + cells(n), area.width.saturating_sub(2), line);
+        if let Some(i) = file { v.hits.push((Rect::new(area.x, area.y + cells(n), area.width.saturating_sub(1), 1), super::Hit::File(i))); }
     }
     for y in area.y..area.bottom() {
         draw(frame, area.right() - 1, y, 1, Line::styled("│", Style::default().fg(v.palette.border)));
@@ -263,7 +264,7 @@ pub(super) fn render(frame: &mut Frame, v: &mut DiffView) {
     }
     if nav_width > 0 { sidebar(frame, v, Rect::new(area.x, area.y + 2, nav_width, area.height - 3)); }
     for (i, row) in planned.into_iter().skip(v.scroll).take(body_height).enumerate() {
-        let y = area.y + 2 + i as u16;
+        let y = area.y + 2 + cells(i);
         // The pinned header already labels a file at its initial stream position.
         if row.header && i == 0 { continue }
         if row.header { v.hits.push((Rect::new(x, y, width, 1), super::Hit::File(row.file))); }
