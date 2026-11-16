@@ -12,7 +12,7 @@
 //!   `usage_samples`, `usage_log`, `mentions`, `message_refs`;
 //! - **local-only**: `environments`, `projects`, `agents`, `read_frontiers`,
 //!   `session_context`, `plan_limits`, `turn_marks`, `native_usage_sources`,
-//!   `native_usage`, `model_requests`,
+//!   `native_usage`, `model_requests`, `local_settings`,
 //!   plus the `sessions.transcript_offset` column.
 
 use rusqlite::Connection;
@@ -472,6 +472,12 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX model_requests_at      ON model_requests(started_at_ms);
     CREATE INDEX model_requests_thread  ON model_requests(thread_id, started_at_ms);
     CREATE INDEX model_requests_session ON model_requests(session_id, started_at_ms);
+
+    -- Switches the owner set on this machine (`axel inspect on`), by name.
+    CREATE TABLE local_settings (
+        key    TEXT PRIMARY KEY,
+        value  TEXT NOT NULL
+    );
     "#,
 ];
 

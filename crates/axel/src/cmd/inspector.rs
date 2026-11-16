@@ -32,7 +32,7 @@ const CODEX_AUTH_BYTES_MAX: u64 = 1024 * 1024;
 
 /// Whether the session runs through the inspector.
 pub enum Inspection {
-    /// `AXEL_INSPECT=0`, or a harness the proxy doesn't speak for.
+    /// The owner hasn't turned it on, or a harness the proxy doesn't speak for.
     Off,
     /// The proxy runs; the harness's environment points at it.
     On(Inspector),
@@ -56,13 +56,27 @@ pub struct Session<'a> {
     pub harness: &'a Harness,
 }
 
-/// Start the proxy for `session` unless inspection is off, and point the
-/// harness's environment `env` at it.  Never fails: a proxy that can't start
-/// leaves `env` as it was.
-pub fn start(session: &Session<'_>, env: &mut Vec<(String, String)>) -> Inspection {
-    let is_off = std::env::var("AXEL_INSPECT").is_ok_and(|v| v.trim() == "0");
+/// Whether this session should run through the inspector: only when the
+/// owner asked.  `switched_on` is the machine's switch (`axel inspect on`);
+/// `AXEL_INSPECT=1` turns it on for one session and `AXEL_INSPECT=0` off.
+pub fn wanted(switched_on: bool) -> bool {
+    wanted_with(switched_on, std::env::var("AXEL_INSPECT").ok().as_deref())
+}
+
+fn wanted_with(switched_on: bool, variable: Option<&str>) -> bool {
+    match variable.map(str::trim) {
+        Some("1") => true,
+        Some("0") => false,
+        _ => switched_on,
+    }
+}
+
+/// Start the proxy for `session` when `wanted`, and point the harness's
+/// environment `env` at it.  Never fails: a proxy that can't start leaves
+/// `env` as it was.
+pub fn start(session: &Session<'_>, wanted: bool, env: &mut Vec<(String, String)>) -> Inspection {
     let is_proxied = matches!(session.harness, Harness::Claude | Harness::Codex);
-    if is_off || !is_proxied {
+    if !wanted || !is_proxied {
         return Inspection::Off;
     }
     // The user's own Anthropic endpoint is Claude's business only.
@@ -244,9 +258,44 @@ fn write_rows(store: &Store, rows: Receiver<ModelRequest>) {
     }
 }
 
+/// `axel inspect on|off|status`: the machine's switch.  New managed sessions
+/// read it when they start; running ones keep what they started with.
+pub fn switch(ctx: &super::Ctx, switch: crate::cli::InspectSwitch) -> Result<()> {
+    use crate::cli::InspectSwitch;
+    match switch {
+        InspectSwitch::On => {
+            ctx.store.set_setting(axel_store::Setting::Inspector, true)?;
+            println!("{}", t!("The token inspector is on. New managed sessions send their model requests through a local proxy on 127.0.0.1, which records their size, tokens and timing, never their prompts or credentials. Sessions already running are unchanged."));
+            println!("{}", t!("Open it with `axel inspect`; turn it off with `axel inspect off`."));
+        }
+        InspectSwitch::Off => {
+            ctx.store.set_setting(axel_store::Setting::Inspector, false)?;
+            println!("{}", t!("The token inspector is off. New managed sessions talk to their provider directly; sessions already running keep their proxy until they end."));
+        }
+        InspectSwitch::Status => {
+            if ctx.store.setting_on(axel_store::Setting::Inspector)? {
+                println!("{}", t!("The token inspector is on: new managed sessions are recorded."));
+            } else {
+                println!("{}", t!("The token inspector is off. Turn it on with `axel inspect on`."));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_proxy_runs_only_when_the_owner_asked() {
+        assert!(!wanted_with(false, None), "off by default");
+        assert!(wanted_with(true, None), "on after `axel inspect on`");
+        assert!(wanted_with(false, Some("1")), "AXEL_INSPECT=1 for one session");
+        assert!(!wanted_with(true, Some("0")), "AXEL_INSPECT=0 wins over the switch");
+        assert!(!wanted_with(false, Some("yes")), "anything else leaves the switch as it is");
+        assert!(wanted_with(true, Some("")));
+    }
 
     #[test]
     fn the_codex_login_picks_the_upstream() {

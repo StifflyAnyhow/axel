@@ -286,8 +286,9 @@ harness is pointed at, which forwards every model request unchanged to the provi
 records one `model_requests` row per request: model, usage read from the streamed
 response, timings, sizes, and a breakdown of the context by kind (system prompt, each
 tool's definition, text, tool calls and results by tool, images, reasoning). Metadata
-only: no header, body or prompt text is stored. `AXEL_INSPECT=0` turns it off; a proxy
-that can't start leaves the session direct, with a notice on the thread.
+only: no header, body or prompt text is stored. It is off until the owner runs
+`axel inspect on` (`off` and `status` too; `AXEL_INSPECT=1` or `0` for one session); a
+proxy that can't start leaves the session direct, with a notice on the thread.
 
 ## Dashboard (the main screen)
 

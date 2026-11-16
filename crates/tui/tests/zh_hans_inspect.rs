@@ -61,6 +61,6 @@ fn the_token_inspector_speaks_simplified_chinese_within_the_width() {
     let empty = Inspector::new(None, InspectData::default());
     for (width, height) in SIZES {
         let all = draw(&empty, width, height).concat();
-        assert!(all.contains("Token 检查器") && all.contains("AXEL_INSPECT"), "the empty state at {width}×{height}:\n{all}");
+        assert!(all.contains("Token 检查器") && all.contains("axel inspect on"), "the empty state at {width}×{height}:\n{all}");
     }
 }

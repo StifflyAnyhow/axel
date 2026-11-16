@@ -27,6 +27,7 @@ mod log;
 mod model_requests;
 mod policy;
 mod reads;
+mod settings;
 mod remote;
 pub mod pricing;
 pub mod schema;
@@ -61,6 +62,7 @@ pub use model_requests::{
     CONTEXT_PARTS_MAX, ContextBreakdown, ContextKind, ContextPart, MODEL_REQUESTS_LIMIT_MAX, ModelProvider, ModelRequest,
     ModelRequestFilter, RequestOutcome,
 };
+pub use settings::Setting;
 pub use wire::kind;
 
 /// The read-frontier scope used by [`Store::unread_count`] and [`Store::mark_read`].

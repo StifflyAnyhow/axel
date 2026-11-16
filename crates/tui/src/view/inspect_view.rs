@@ -272,7 +272,12 @@ fn toolbar(ins: &Inspector, view: &ListView, width: usize, sidebar_shown: bool) 
     if !sidebar_shown && flagged > 0 {
         parts.push((6, vec![sep(), Span::styled(t!("{n} flagged", n = flagged), theme::danger())]));
     }
-    let live = ins.is_live().then(|| Span::styled(format!("● {}", t!("live")), theme::accent()));
+    // At the right: "live" while a request runs, else that recording is off.
+    let live = if ins.is_live() {
+        Some(Span::styled(format!("● {}", t!("live")), theme::accent()))
+    } else {
+        (!ins.data.recording).then(|| Span::styled(format!("○ {}", t!("recording off")), theme::dim()))
+    };
     let room = width.saturating_sub(live.as_ref().map_or(0, |l| l.width() + 1));
     // Drop the least needed until the rest fits; bounded by the parts.
     for _ in 0..parts.len() {
@@ -859,8 +864,17 @@ fn empty_state(frame: &mut Frame, ins: &Inspector, area: Rect) {
         Line::from(t!("Every request your agents send to their model: what it cost, and what filled its context.")),
         Line::from(""),
         Line::styled(t!("Nothing was recorded here in the last 24 hours."), theme::dim()),
-        Line::styled(t!("Requests are recorded for managed sessions, unless AXEL_INSPECT is set to 0."), theme::dim()),
     ];
+    if ins.data.recording {
+        lines.push(Line::styled(t!("New managed sessions are recorded as they work."), theme::dim()));
+    } else {
+        lines.push(Line::styled(t!("Recording is off: nothing goes through the inspector until you ask."), theme::dim()));
+        lines.push(Line::from(vec![
+            Span::styled(t!("Turn it on with"), theme::dim()),
+            Span::styled(" axel inspect on ", theme::pill()),
+            Span::styled(t!("then start a managed session."), theme::dim()),
+        ]));
+    }
     if ins.scope != Scope::All {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled("f", theme::accent()), Span::styled(format!(" {}", t!("shows every thread")), theme::dim())]));
@@ -1040,7 +1054,7 @@ mod tests {
     fn nothing_recorded_says_what_the_inspector_is_and_needs() {
         for (w, h) in SIZES {
             let s = screen(w, h, &Inspector::new(Some("T1".into()), InspectData::default())).join("\n");
-            assert!(s.contains("Token inspector") && s.contains("AXEL_INSPECT"), "at {w}×{h}:\n{s}");
+            assert!(s.contains("Token inspector") && s.contains("axel inspect on"), "at {w}×{h}:\n{s}");
             assert!(s.contains("shows every thread"), "{s}");
         }
     }

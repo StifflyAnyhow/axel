@@ -167,7 +167,10 @@ fn host(session_id: &str) -> Result<()> {
     // After harness_env, which edits our environment while single-threaded:
     // the proxy's runtime starts threads.
     let inspected = super::inspector::Session { session_id: &session.id, thread_id: &thread.id, agent_pubkey: &agent.pubkey, harness: &agent.harness };
-    let inspection = super::inspector::start(&inspected, &mut env);
+    // Off unless the owner asked for it (`axel inspect on`, or AXEL_INSPECT=1
+    // for one session); an unreadable switch is off.
+    let switched_on = ctx.store.setting_on(axel_store::Setting::Inspector).unwrap_or(false);
+    let inspection = super::inspector::start(&inspected, super::inspector::wanted(switched_on), &mut env);
     let (on_turn, notices) = match &inspection {
         super::inspector::Inspection::On(inspector) => (Some(inspector.turn_hook()), Vec::new()),
         super::inspector::Inspection::Failed { notice } => (None, vec![notice.clone()]),

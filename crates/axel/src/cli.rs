@@ -111,6 +111,10 @@ pub enum Command {
     /// Inspect each request agents send to their model, in a large Rex
     /// pane (again to hide it); outside Rex, right here.
     Inspect {
+        /// `on` or `off` records new managed sessions' requests or stops
+        /// (off until you turn it on); `status` says which.
+        #[command(subcommand)]
+        switch: Option<InspectSwitch>,
         /// Thread to start on (default: $AXEL_THREAD, else every thread).
         #[arg(long)]
         thread: Option<String>,
@@ -472,6 +476,17 @@ pub enum ScreenArg {
     Usage,
     /// Each model request and what filled its context (the token inspector).
     Inspect,
+}
+
+/// The token inspector's switch.
+#[derive(Copy, Clone, Debug, Subcommand, PartialEq, Eq)]
+pub enum InspectSwitch {
+    /// Route new managed sessions through the local proxy and record their requests.
+    On,
+    /// Let new managed sessions talk to their provider directly again.
+    Off,
+    /// Say whether the inspector is on.
+    Status,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]

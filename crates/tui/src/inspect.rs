@@ -850,6 +850,7 @@ pub mod fixtures {
                 (THREAD_REVIEW.to_string(), "review the pay-kit PR".to_string()),
             ]),
             now_ms,
+            recording: true,
         }
     }
 }

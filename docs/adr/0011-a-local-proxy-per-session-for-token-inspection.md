@@ -68,7 +68,12 @@ useless to anyone but the harness it serves:
    can't start, the session runs direct and says so; a request the proxy
    refuses never reaches the provider.
 
-`AXEL_INSPECT=0` turns it off for a session. Pane sessions (the harness's own
+**Off until the owner turns it on.** The proxy carries credentials, so it never
+runs unasked: `axel inspect on` switches it on for this machine (a local-only
+setting in the store), `axel inspect off` back off, `axel inspect status` says
+which. Sessions read the switch when they start; a running session keeps what
+it started with. `AXEL_INSPECT=1` turns it on for one session, `AXEL_INSPECT=0`
+off whatever the switch says, and a switch that can't be read is off. Pane sessions (the harness's own
 CLI in a Rex pane) aren't proxied yet: they have no host process to own it.
 
 ## Consequences
