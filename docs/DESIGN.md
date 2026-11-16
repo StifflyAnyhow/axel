@@ -280,6 +280,15 @@ No telemetry server. Harnesses already write structured transcripts:
 - Cost is estimated from a small per-model price table (`axel-config::pricing`), shown
   as an estimate.
 
+Transcripts say how much a turn cost, not why. For that, each managed session's host
+runs the token inspector's proxy (`axel-proxy`, ADR 0011): a loopback HTTP proxy the
+harness is pointed at, which forwards every model request unchanged to the provider and
+records one `model_requests` row per request: model, usage read from the streamed
+response, timings, sizes, and a breakdown of the context by kind (system prompt, each
+tool's definition, text, tool calls and results by tool, images, reasoning). Metadata
+only: no header, body or prompt text is stored. `AXEL_INSPECT=0` turns it off; a proxy
+that can't start leaves the session direct, with a notice on the thread.
+
 ## Dashboard (the main screen)
 
 `axel` opens on the **dashboard**, styled after bashtop/cxgpu: dense, boxed widgets,
