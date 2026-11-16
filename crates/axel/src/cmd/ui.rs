@@ -258,6 +258,7 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
         manage_thread: Some(&manage_thread),
         open_controls: None,
         open_terminal: None,
+        open_inspector: None,
     };
     let outcome = axel_tui::run(deps, initial)?;
     finish(&ctx, outcome, peer.as_ref())
@@ -869,7 +870,7 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
         }
     };
     let open_terminal = |thread_id: &str| open_thread_terminal(&ctx, thread_id);
-    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: Some(&open_controls), open_terminal: Some(&open_terminal) };
+    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: Some(&open_controls), open_terminal: Some(&open_terminal), open_inspector: None };
     let stream = ctx.rex.as_ref().and_then(stream_block);
     // The tokens pane opened beside us, in the same row, if there is one.
     let usage = ctx.rex.as_ref().and_then(|rex| rex.view().ok().and_then(|v| block_beside(&v, &rex.env().block, TOKENS_LABEL)));
@@ -1059,7 +1060,7 @@ pub fn run_answer(thread_id: &str, item_id: &str) -> Result<()> {
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
     let summon = |_: &str, _: &str, _: &str, _: &[std::path::PathBuf]| -> Result<String> { anyhow::bail!("not from here") };
     let runtime_label = |h: &axel_store::Harness| launch::runtime_label(h);
-    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: None, open_terminal: None };
+    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: None, open_terminal: None, open_inspector: None };
     let res = axel_tui::run_answer(deps, thread_id, item_id);
     close_own_layer(&ctx);
     res
