@@ -24,6 +24,7 @@ mod items;
 mod local;
 mod native_usage;
 mod log;
+mod model_requests;
 mod policy;
 mod reads;
 mod remote;
@@ -55,6 +56,10 @@ pub use types::{
     RuntimeMode, Session, SessionFilter, SessionRuntime, SessionState, SessionUpdate, Status,
     StatusReport, StatusState, Thread, ThreadFilter, ThreadProject, ThreadState, ThreadSummary,
     ThreadWorkspace, Turn, TurnChanges, TurnMark, FileChange, ChangeStatus, TurnSummary, Usage, UsageDelta, UsageSample, UsageTotals, UsageWindows, NativeUsage, SessionContext, LimitWindow, PlanLimit, WorkspaceKind,
+};
+pub use model_requests::{
+    CONTEXT_PARTS_MAX, ContextBreakdown, ContextKind, ContextPart, MODEL_REQUESTS_LIMIT_MAX, ModelProvider, ModelRequest,
+    ModelRequestFilter, RequestOutcome,
 };
 pub use wire::kind;
 
