@@ -23,7 +23,8 @@ pub fn run(thread: &str) -> Result<()> {
     let mut note: Option<String> = None;
     loop {
         let data = load(&ctx, &t.id, note.take())?;
-        let outcome = run_manage(data)?;
+        let mut refresh = || inspect_overview(&ctx, &t.id).ok();
+        let outcome = run_manage(data, &mut refresh)?;
         note = Some(match act(&ctx, &t.id, &outcome) {
             Ok(None) => break,
             Ok(Some(n)) => n,
@@ -76,6 +77,18 @@ fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> 
         Outcome::Stop => {
             let n = super::thread::stop_thread(ctx, thread_id)?;
             if n == 1 { t!("stopped 1 session").to_string() } else { t!("stopped {n} sessions", n = n) }
+        }
+        Outcome::SetInspected(on) => {
+            ctx.store.set_thread_inspected(thread_id, *on)?;
+            if *on {
+                t!("inspector on: this thread's new managed sessions are recorded (running ones are unchanged)").to_string()
+            } else {
+                t!("inspector off: this thread's new managed sessions talk to their provider directly").to_string()
+            }
+        }
+        Outcome::OpenInspector => {
+            super::ui::toggle_inspect(Some(thread_id.to_string()))?;
+            t!("opened the token inspector").to_string()
         }
         Outcome::Rename(title) => {
             ctx.store.update_thread(&ctx.owner()?, thread_id, Some(title), None)?;
@@ -273,7 +286,29 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
         agents: agent_names,
         hosts: ctx.store.hosts()?.into_iter().map(|h| h.label).collect(),
         note,
+        inspect: inspect_overview(ctx, thread_id)?,
     })
+}
+
+/// Most requests the overview reads: an hour of a busy thread, several
+/// agents each making a few a minute, fits well inside it.
+const INSPECT_REQUESTS_MAX: usize = 2000;
+
+/// The token inspector's overview of the thread's last hour.
+fn inspect_overview(ctx: &Ctx, thread_id: &str) -> Result<axel_tui::manage::InspectOverview> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let on = ctx.store.thread_inspected(thread_id)?;
+    let minutes = i64::try_from(axel_tui::manage::INSPECT_MINUTES).expect("a small constant");
+    let filter = axel_store::ModelRequestFilter {
+        thread_id: Some(thread_id.to_string()),
+        since_ms: now_ms.saturating_sub(minutes * 60_000),
+        limit: INSPECT_REQUESTS_MAX,
+        ..Default::default()
+    };
+    let requests = ctx.store.model_requests(&filter)?;
+    let names: HashMap<String, String> = ctx.store.list_agents()?.into_iter().map(|a| (a.pubkey, a.name)).collect();
+    let name = |pk: &str| names.get(pk).cloned().unwrap_or_else(|| pk.chars().take(8).collect());
+    Ok(axel_tui::manage::inspect_overview(on, &requests, &name, now_ms))
 }
 
 /// A count as the pane's integers hold it.

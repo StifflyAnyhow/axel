@@ -443,7 +443,7 @@ fn badge(r: &ModelRequest, width: Option<usize>) -> Vec<Span<'static>> {
 }
 
 /// `claude-sonnet-5-5` reads as `sonnet-5-5`: the family says the provider.
-fn short_model(model: &str) -> String {
+pub(crate) fn short_model(model: &str) -> String {
     model.strip_prefix("claude-").unwrap_or(model).to_string()
 }
 
@@ -754,7 +754,7 @@ fn bar_name(b: &BarRow) -> String {
     }
 }
 
-fn largest_name(b: &BarRow) -> String {
+pub(crate) fn largest_name(b: &BarRow) -> String {
     match b.kind {
         ContextKind::ToolResult if !b.label.is_empty() => t!("tool results from {tool}", tool = b.label),
         kind => kind_name(kind).to_string(),
