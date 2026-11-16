@@ -1,0 +1,34 @@
+# Every piece of text Axel shows a person, in every language it speaks.
+#
+# The key is the English text exactly as it is written in the code, in
+# `t!("…")`; each entry gives its translation per locale. A key with no
+# translation for the active locale shows in English. `{name}` placeholders
+# are filled in by the code and must appear, unchanged, in every
+# translation (their order may change).
+#
+# Locales: zh-Hans (Simplified Chinese).
+#
+# Text that a model reads (system prompts, catch-up notes, MCP tool
+# descriptions and results) stays English and never goes here: it is part of
+# what agents are told, not what people see.
+#
+# Glossary, so the same word is always the same word:
+#   agent 智能体 · thread 话题 · session 会话 · turn 轮次 · owner 所有者
+#   host 主机 · harness harness · skill 技能 · prompt 提示词 · composer 输入框
+#   dashboard 仪表盘 · pane 窗格 · usage 用量 · tokens token · cost 费用
+#   budget 预算 · checkpoint 检查点 · diff 差异 · approve 批准 · deny 拒绝
+#   permission 权限 · question 问题 · autopilot 自动模式 · supervised 监督模式
+#   plan mode 计划模式 · pause 暂停 · resume 恢复 · archive 归档 · reach 可联系范围
+#   worktree, Rex, ACP, MCP, Claude Code, Codex: kept as they are.
+# Punctuation in zh-Hans: full-width （，。：？！）, but keep `code`, paths,
+# key names (Enter, Tab, Esc, Shift+Tab) and placeholders as they are.
+
+# --- i18n (this crate's own tests) ---
+"{who} asks: {title}":
+  zh-Hans: "{who} 提问：{title}"
+
+# --- tui ---
+
+# --- axel ---
+
+# --- acp ---

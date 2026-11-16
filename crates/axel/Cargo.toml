@@ -10,6 +10,7 @@ name = "axel"
 path = "src/main.rs"
 
 [dependencies]
+axel-i18n.workspace = true
 crossterm.workspace = true
 axel-identity.workspace = true
 axel-inbox.workspace = true

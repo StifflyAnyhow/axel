@@ -19,6 +19,7 @@ axel-rex = { path = "crates/rex" }
 axel-tui = { path = "crates/tui" }
 axel-acp = { path = "crates/acp" }
 axel-mcp = { path = "crates/mcp" }
+axel-i18n = { path = "crates/i18n" }
 
 anyhow = "1"
 thiserror = "2"

@@ -160,6 +160,7 @@ dependencies = [
  "anyhow",
  "axel-acp",
  "axel-config",
+ "axel-i18n",
  "axel-identity",
  "axel-inbox",
  "axel-mcp",
@@ -188,6 +189,7 @@ version = "0.3.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "axel-i18n",
  "axel-identity",
  "axel-rex",
  "axel-store",
@@ -213,6 +215,13 @@ dependencies = [
  "serde_norway",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "axel-i18n"
+version = "0.3.0"
+dependencies = [
+ "serde_norway",
 ]
 
 [[package]]
@@ -295,6 +304,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "axel-config",
+ "axel-i18n",
  "axel-identity",
  "axel-inbox",
  "axel-rex",

@@ -36,6 +36,7 @@ test = false
 doc = false
 
 [dependencies]
+axel-i18n.workspace = true
 axel-identity.workspace = true
 axel-rex.workspace = true
 axel-store.workspace = true
