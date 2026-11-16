@@ -1594,6 +1594,10 @@
 "pushing the code to {host}: {error}":
   zh-Hans: "将代码推送到 {host}：{error}"
 
+# cmd/ui.rs: axel inspect
+"opening the token inspector in Rex":
+  zh-Hans: "在 Rex 中打开 token 检查器"
+
 # --- acp ---
 # The session host's pane lines.
 "adapter: {command}":

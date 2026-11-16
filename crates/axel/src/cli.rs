@@ -108,6 +108,13 @@ pub enum Command {
     /// The built-in Codex ACP agent (what managed Codex sessions run).
     #[command(name = "codex-acp", hide = true)]
     CodexAcp,
+    /// Inspect each request agents send to their model, in a large Rex
+    /// pane (again to hide it); outside Rex, right here.
+    Inspect {
+        /// Thread to start on (default: $AXEL_THREAD, else every thread).
+        #[arg(long)]
+        thread: Option<String>,
+    },
     /// Show the tokens each agent spent, in the top-right corner of this
     /// Rex window (again to hide it); outside Rex, right here.
     Usage {
@@ -463,6 +470,8 @@ pub enum ScreenArg {
     Threads,
     /// Tokens spent per agent (the corner pane).
     Usage,
+    /// Each model request and what filled its context (the token inspector).
+    Inspect,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]

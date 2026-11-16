@@ -113,6 +113,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             inbox::send(&text.join(" "), &to, kind)
         }
         Some(Command::Inbox { agent, json }) => inbox::show(agent.as_deref(), json),
+        Some(Command::Inspect { thread }) => ui::toggle_inspect(thread),
         Some(Command::Usage { refresh: true }) => usage::refresh(),
         Some(Command::Usage { refresh: false }) => ui::toggle_usage(),
         Some(Command::Doctor) => doctor::run(),
