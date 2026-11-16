@@ -40,39 +40,8 @@ pub fn run(thread: &str) -> Result<()> {
 fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> {
     Ok(Some(match outcome {
         Outcome::Close => return Ok(None),
-        Outcome::Reset { agent } => {
-            let text = recap(ctx, thread_id)?;
-            let stopped = super::thread::stop_thread(ctx, thread_id)?;
-            let session = super::ui::summon_with(ctx, thread_id, agent, &text, &[], true)?;
-            // The thread's own panes come back on the installed binary too;
-            // docking closes this pane, so nothing is left to report in it.
-            if super::ui::relaunch_thread_panes(ctx, thread_id)? {
-                return Ok(None);
-            }
-            format!("reset: {stopped} session{} ended, {agent} starts fresh ({})", if stopped == 1 { "" } else { "s" }, &session[..8.min(session.len())])
-        }
-        Outcome::Move { agent, host } => {
-            let a = ctx.store.agent_by_name(agent)?.with_context(|| format!("no agent named {agent:?}"))?;
-            // A live Claude session travels with its conversation; anything
-            // else starts over there with a recap.
-            let live = ctx
-                .store
-                .list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), agent_pubkey: Some(a.pubkey.clone()), ..Default::default() })?
-                .into_iter()
-                .find(|s| s.ended_at.is_none());
-            match live {
-                Some(s) if s.harness == axel_store::Harness::Claude && super::host::host_of(ctx, &s)?.is_none() => {
-                    let (new_session, _) = super::host::move_session(ctx, &s.id, host)?;
-                    format!("moved {agent} to {host} with its conversation ({})", &new_session[..8.min(new_session.len())])
-                }
-                _ => {
-                    let text = recap(ctx, thread_id)?;
-                    super::thread::stop_thread(ctx, thread_id)?;
-                    let session = super::host::launch_remote(ctx, host, thread_id, agent, &text, &[])?;
-                    format!("{agent} starts on {host} with a recap ({})", &session[..8.min(session.len())])
-                }
-            }
-        }
+        Outcome::Reset { agent } => return reset(ctx, thread_id, agent),
+        Outcome::Move { agent, host } => move_agent(ctx, thread_id, agent, host)?,
         Outcome::Settle => {
             super::thread::set_state(ctx, thread_id, ThreadOp::Settle)?;
             "settled".into()
@@ -101,11 +70,11 @@ fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> 
         }
         Outcome::StopAgent { agent } => {
             let n = super::thread::stop_agent(ctx, thread_id, agent)?;
-            format!("stopped {agent}: {n} session{}", if n == 1 { "" } else { "s" })
+            format!("stopped {agent}: {n} session{}", plural(n))
         }
         Outcome::Stop => {
             let n = super::thread::stop_thread(ctx, thread_id)?;
-            format!("stopped {n} session{}", if n == 1 { "" } else { "s" })
+            format!("stopped {n} session{}", plural(n))
         }
         Outcome::Rename(title) => {
             ctx.store.update_thread(&ctx.owner()?, thread_id, Some(title), None)?;
@@ -118,9 +87,57 @@ fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> 
             if super::ui::relaunch_thread_panes(ctx, thread_id)? {
                 return Ok(None);
             }
-            format!("hard reset: {stopped} session{} ended; the next message starts from scratch", if stopped == 1 { "" } else { "s" })
+            format!("hard reset: {stopped} session{} ended; the next message starts from scratch", plural(stopped))
         }
     }))
+}
+
+/// `s` for a count other than one.
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Characters of a session id the footer shows.
+const SESSION_ID_SHORT_CHARS: usize = 8;
+
+fn short_session(id: &str) -> &str {
+    id.get(..SESSION_ID_SHORT_CHARS).unwrap_or(id)
+}
+
+/// Stop the thread's sessions and start `agent` fresh with a recap.
+fn reset(ctx: &Ctx, thread_id: &str, agent: &str) -> Result<Option<String>> {
+    let text = recap(ctx, thread_id)?;
+    let stopped = super::thread::stop_thread(ctx, thread_id)?;
+    let session = super::ui::summon_with(ctx, thread_id, agent, &text, &[], true)?;
+    // The thread's own panes come back on the installed binary too;
+    // docking closes this pane, so nothing is left to report in it.
+    if super::ui::relaunch_thread_panes(ctx, thread_id)? {
+        return Ok(None);
+    }
+    Ok(Some(format!("reset: {stopped} session{} ended, {agent} starts fresh ({})", plural(stopped), short_session(&session))))
+}
+
+/// Run `agent` on `host` from here on.  A live Claude session travels with
+/// its conversation; anything else starts over there with a recap.
+fn move_agent(ctx: &Ctx, thread_id: &str, agent: &str, host: &str) -> Result<String> {
+    let a = ctx.store.agent_by_name(agent)?.with_context(|| format!("no agent named {agent:?}"))?;
+    let live = ctx
+        .store
+        .list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), agent_pubkey: Some(a.pubkey.clone()), ..Default::default() })?
+        .into_iter()
+        .find(|s| s.ended_at.is_none());
+    Ok(match live {
+        Some(s) if s.harness == axel_store::Harness::Claude && super::host::host_of(ctx, &s)?.is_none() => {
+            let (new_session, _) = super::host::move_session(ctx, &s.id, host)?;
+            format!("moved {agent} to {host} with its conversation ({})", short_session(&new_session))
+        }
+        _ => {
+            let text = recap(ctx, thread_id)?;
+            super::thread::stop_thread(ctx, thread_id)?;
+            let session = super::host::launch_remote(ctx, host, thread_id, agent, &text, &[])?;
+            format!("{agent} starts on {host} with a recap ({})", short_session(&session))
+        }
+    })
 }
 
 fn pause_agent(ctx: &Ctx, thread_id: &str, name: &str, paused: bool) -> Result<usize> {
@@ -174,6 +191,9 @@ pub fn recap(ctx: &Ctx, thread_id: &str) -> Result<String> {
     Ok(out)
 }
 
+/// Minutes of usage the pane's sparkline covers, one bar each.
+const SPARK_MINUTES: usize = 60;
+
 /// What the pane shows, from the store.
 fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> {
     let now = chrono::Utc::now().timestamp();
@@ -190,7 +210,7 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
     let mut rows = Vec::new();
     let mut agent_names: Vec<String> = Vec::new();
     let (mut tokens, mut cost, mut tool_calls, mut files) = (0i64, 0f64, 0i64, 0i64);
-    let mut spark = vec![0i64; 60];
+    let mut spark = vec![0i64; SPARK_MINUTES];
     for s in &sessions {
         let agent = agents.get(&s.agent_pubkey);
         let name = agent.map(|a| a.name.clone()).unwrap_or_else(|| s.agent_pubkey.chars().take(8).collect());
@@ -201,30 +221,9 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
         let (toks, usd) = usage.map(|u| (u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens, u.cost_usd_est)).unwrap_or((0, 0.0));
         let mine: Vec<_> = turns.iter().filter(|x| x.session_id == s.id).collect();
         let calls: i64 = mine.iter().map(|x| x.summary.tool_calls).sum();
-        files += mine.iter().filter_map(|x| x.summary.changes.as_ref()).map(|c| c.files.len() as i64).sum::<i64>();
-        for sample in ctx.store.usage_samples(Some(&s.id), now - 3600)? {
-            let minute = ((sample.at - (now - 3600)) / 60).clamp(0, 59) as usize;
-            spark[minute] += sample.input_tokens + sample.output_tokens;
-        }
+        files += mine.iter().filter_map(|x| x.summary.changes.as_ref()).map(|c| count(c.files.len())).sum::<i64>();
+        add_to_spark(ctx, &s.id, now, &mut spark)?;
         let live = s.ended_at.is_none();
-        let state = match (live, statuses.get(&s.id)) {
-            (false, _) => "ended".to_string(),
-            (true, _) if s.state == SessionState::Paused => "paused".into(),
-            (true, Some(st)) => match st.state {
-                StatusState::Working => "working",
-                StatusState::Blocked => "blocked",
-                StatusState::Done => "done",
-                StatusState::Error => "error",
-                StatusState::Idle => "idle",
-            }
-            .to_string(),
-            (true, None) => match s.state {
-                SessionState::Running => "working",
-                SessionState::Blocked => "blocked",
-                _ => "idle",
-            }
-            .to_string(),
-        };
         let host = (s.environment_id != local_env).then(|| ctx.store.environment(&s.environment_id).ok().flatten().map_or_else(|| s.environment_label.clone(), |e| e.label));
         let runs = match agent.and_then(|a| a.model.clone()) {
             Some(m) => format!("{}/{m}", s.harness.as_str()),
@@ -237,10 +236,10 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
             agent: name,
             color: agent.and_then(|a| a.color),
             runs,
-            state,
+            state: session_state_label(s, statuses.get(&s.id)).into(),
             live,
             host,
-            turns: mine.len() as i64,
+            turns: count(mine.len()),
             tool_calls: calls,
             tokens: toks,
             cost_usd: usd,
@@ -253,29 +252,72 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
             && agent.archived_at.is_none() && !agent_names.contains(&agent.name)
         { agent_names.push(agent.name.clone()); }
     }
-    let state = match t.state {
-        ThreadState::Open => "open",
-        ThreadState::Done => "done",
-        ThreadState::Archived => "archived",
-        ThreadState::Deleted => "deleted",
-    };
     Ok(ManageData {
         thread_id: thread_id.to_string(),
         title: t.title.clone(),
-        state: state.into(),
+        state: thread_state_label(t.state).into(),
         age: axel_tui::manage::duration_label(now - t.created_at),
         projects: summary.projects.iter().map(|p| p.path_hint.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.path_hint.display().to_string())).collect(),
         sessions: rows,
         spark,
         tokens,
         cost_usd: cost,
-        turns: turns.len() as i64,
+        turns: count(turns.len()),
         tool_calls,
         files_changed: files,
         agents: agent_names,
         hosts: ctx.store.hosts()?.into_iter().map(|h| h.label).collect(),
         note,
     })
+}
+
+/// A count as the pane's integers hold it.
+fn count(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// Add the session's tokens of the last hour to `spark`, a bar a minute.
+fn add_to_spark(ctx: &Ctx, session_id: &str, now: i64, spark: &mut [i64]) -> Result<()> {
+    assert_eq!(spark.len(), SPARK_MINUTES);
+    let since = now - 60 * i64::try_from(SPARK_MINUTES).expect("a small constant");
+    for sample in ctx.store.usage_samples(Some(session_id), since)? {
+        let minute = usize::try_from((sample.at - since) / 60).unwrap_or(0).min(SPARK_MINUTES - 1);
+        spark[minute] = spark[minute].saturating_add(sample.input_tokens.saturating_add(sample.output_tokens));
+    }
+    Ok(())
+}
+
+/// What a session is doing, in the pane's words.
+fn session_state_label(s: &axel_store::Session, status: Option<&axel_store::Status>) -> &'static str {
+    if s.ended_at.is_some() {
+        return "ended";
+    }
+    if s.state == SessionState::Paused {
+        return "paused";
+    }
+    match status {
+        Some(st) => match st.state {
+            StatusState::Working => "working",
+            StatusState::Blocked => "blocked",
+            StatusState::Done => "done",
+            StatusState::Error => "error",
+            StatusState::Idle => "idle",
+        },
+        None => match s.state {
+            SessionState::Running => "working",
+            SessionState::Blocked => "blocked",
+            _ => "idle",
+        },
+    }
+}
+
+fn thread_state_label(state: ThreadState) -> &'static str {
+    match state {
+        ThreadState::Open => "open",
+        ThreadState::Done => "done",
+        ThreadState::Archived => "archived",
+        ThreadState::Deleted => "deleted",
+    }
 }
 
 #[cfg(test)]
