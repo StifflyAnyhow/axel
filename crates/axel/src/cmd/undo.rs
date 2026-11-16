@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use axel_i18n::t;
 use axel_acp::checkpoint::{self, REFS};
 use axel_store::{ChangeStatus, FileChange, TurnChanges};
 
@@ -55,7 +56,7 @@ pub fn blocked_reason(ctx: &Ctx, session_id: &str) -> Result<Option<String>> {
     }
     let mid_turn = matches!(s.state, SessionState::Running | SessionState::Blocked | SessionState::Paused)
         || ctx.store.status(session_id)?.is_some_and(|st| matches!(st.state, StatusState::Working | StatusState::Blocked));
-    Ok(mid_turn.then(|| "the agent is mid-turn; wait for it to finish".to_string()))
+    Ok(mid_turn.then(|| t!("the agent is mid-turn; wait for it to finish").to_string()))
 }
 
 /// Reverse the turn's change in `dir`'s working tree (see the module doc).
@@ -207,29 +208,30 @@ pub fn run(thread: &str, session: Option<&str>, turn: Option<i64>, restore_files
     let p = super::diff::pick(&ctx, &t.id, session, turn)?;
     let ordinal = p.turn.summary.ordinal;
     if let Some(why) = blocked_reason(&ctx, &p.turn.session_id)? {
-        bail!("can't undo turn {ordinal} of {}: {why}", p.agent);
+        bail!("{}", t!("can't undo turn {n} of {agent}: {why}", n = ordinal, agent = p.agent, why = why));
     }
     let files: Vec<String> = files_of(&p.changes).iter().map(|f| f.path.clone()).collect();
     if files.is_empty() {
-        println!("turn {ordinal} of {} changed no files", p.agent);
+        println!("{}", t!("turn {n} of {agent} changed no files", n = ordinal, agent = p.agent));
         return Ok(());
     }
-    let dir = super::links::thread_dir(&ctx, &t.id).context("this machine has no checkout of the thread's project")?;
+    let dir = super::links::thread_dir(&ctx, &t.id).context(t!("this machine has no checkout of the thread's project"))?;
     if !yes {
         use std::io::Write;
-        print!(
-            "{} turn {ordinal} of {}: {} file{} ({})? [y/N] ",
-            if restore_files { "restore the files of" } else { "undo" },
-            p.agent,
-            files.len(),
-            if files.len() == 1 { "" } else { "s" },
-            files.join(", ")
-        );
+        let (n, list) = (files.len(), files.join(", "));
+        let question = match (restore_files, n) {
+            (true, 1) => t!("restore the files of turn {turn} of {agent}: 1 file ({files})?", turn = ordinal, agent = p.agent, files = list),
+            (true, _) => t!("restore the files of turn {turn} of {agent}: {n} files ({files})?", turn = ordinal, agent = p.agent, n = n, files = list),
+            (false, 1) => t!("undo turn {turn} of {agent}: 1 file ({files})?", turn = ordinal, agent = p.agent, files = list),
+            (false, _) => t!("undo turn {turn} of {agent}: {n} files ({files})?", turn = ordinal, agent = p.agent, n = n, files = list),
+        };
+        // The answer stays y or yes, as the [y/N] hint says, in every language.
+        print!("{question} [y/N] ");
         std::io::stdout().flush()?;
         let mut answer = String::new();
         std::io::stdin().read_line(&mut answer)?;
         if !matches!(answer.trim(), "y" | "Y" | "yes") {
-            println!("left as is");
+            println!("{}", t!("left as is"));
             return Ok(());
         }
     }
@@ -240,21 +242,26 @@ pub fn run(thread: &str, session: Option<&str>, turn: Option<i64>, restore_files
             UndoResult::Done(d) => (d, false),
             UndoResult::Conflicts(files) => {
                 bail!(
-                    "later work overlaps {}: nothing changed. `axel thread undo {} --turn {ordinal} --restore` rewrites the turn's files to how they were before it",
-                    files.join(", "),
-                    &t.id[..12.min(t.id.len())]
+                    "{}",
+                    t!(
+                        "later work overlaps {files}: nothing changed. `axel thread undo {thread} --turn {n} --restore` rewrites the turn's files to how they were before it",
+                        files = files.join(", "),
+                        thread = &t.id[..12.min(t.id.len())],
+                        n = ordinal
+                    )
                 );
             }
         }
     };
-    println!(
-        "{}: {} (snapshot of the tree before: {})",
-        if restored { "restored" } else { "undone" },
-        done.files.join(", "),
-        done.snapshot_ref
-    );
+    let (files, snapshot) = (done.files.join(", "), &done.snapshot_ref);
+    let line = if restored {
+        t!("restored: {files} (snapshot of the tree before: {snapshot})", files = files, snapshot = snapshot)
+    } else {
+        t!("undone: {files} (snapshot of the tree before: {snapshot})", files = files, snapshot = snapshot)
+    };
+    println!("{line}");
     if let Err(e) = notify(&ctx, &t.id, &p.turn.session_id, ordinal, &done.files, restored) {
-        eprintln!("axel: telling the agent: {e:#}");
+        eprintln!("axel: {}", t!("telling the agent: {error}", error = format!("{e:#}")));
     }
     Ok(())
 }

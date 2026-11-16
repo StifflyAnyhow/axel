@@ -354,7 +354,7 @@ fn was_handled(from: &str, created_s: u64, got: &[(String, i64)]) -> bool {
 pub fn show(agent: Option<&str>, json: bool) -> Result<()> {
     let ctx = Ctx::open()?;
     let pk = match agent {
-        Some(name) => ctx.store.agent_by_name(name)?.with_context(|| format!("no agent named {name:?}"))?.pubkey,
+        Some(name) => ctx.store.agent_by_name(name)?.with_context(|| axel_i18n::t!("no agent named {name}", name = format!("{name:?}")))?.pubkey,
         None => ctx.owner()?.public().to_string(),
     };
     let msgs = ctx.store.inbox(&pk, 50)?;
@@ -365,12 +365,12 @@ pub fn show(agent: Option<&str>, json: bool) -> Result<()> {
     let agents = ctx.store.list_agents()?;
     let owner_pk = ctx.owner()?.public().to_string();
     let name_of = |pk: &str| {
-        if pk == owner_pk { return "you".to_string(); }
+        if pk == owner_pk { return axel_i18n::t!("you").to_string(); }
         agents.iter().find(|a| a.pubkey == pk).map(|a| a.name.clone()).unwrap_or_else(|| format!("{}…", &pk[..8]))
     };
     for m in msgs {
         let when = i64::try_from(m.created_at).ok().and_then(|secs| chrono::DateTime::from_timestamp(secs, 0)).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default();
-        println!("{when}  {:<12} {:<18} {}", name_of(&m.from), kind::name(m.kind), m.content.lines().next().unwrap_or(""));
+        println!("{when}  {} {:<18} {}", super::text::pad(&name_of(&m.from), 12), kind::name(m.kind), m.content.lines().next().unwrap_or(""));
     }
     Ok(())
 }

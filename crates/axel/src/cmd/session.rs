@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use axel_i18n::t;
 use axel_acp::HostConfig;
 use axel_store::{SessionFilter, SessionRuntime, SessionState};
 
@@ -15,7 +16,7 @@ pub fn run(cmd: SessionCommand) -> Result<()> {
         SessionCommand::Host { session } => host(&session),
         SessionCommand::Stop { session } => {
             let ctx = Ctx::open()?;
-            let s = ctx.store.get_session(&session)?.with_context(|| format!("no session {session}"))?;
+            let s = ctx.store.get_session(&session)?.with_context(|| t!("no session {id}", id = session))?;
             if s.state == SessionState::Paused { super::process_control::resume(&ctx, &s)?; }
             // A host that doesn't answer has already gone; ending the row is what counts.
             if let Some(sock) = &s.socket_path {
@@ -25,14 +26,14 @@ pub fn run(cmd: SessionCommand) -> Result<()> {
             if let (Some(rex), Some(block)) = (&ctx.rex, s.rex_block_id.as_deref()) {
                 rex.api_call("block.close", serde_json::json!({"block_id": block})).ok();
             }
-            println!("ended {}", s.id);
+            println!("{}", t!("ended {session}", session = s.id));
             Ok(())
         }
         SessionCommand::Move { session, to } => {
             let ctx = Ctx::open()?;
             let s = resolve_session(&ctx, &session)?;
             let (id, place) = super::host::move_session(&ctx, &s, &to)?;
-            println!("moved to {place}: session {id} resumes the conversation");
+            println!("{}", t!("moved to {place}: session {session} resumes the conversation", place = place, session = id));
             Ok(())
         }
         SessionCommand::Ls { all } => {
@@ -42,7 +43,7 @@ pub fn run(cmd: SessionCommand) -> Result<()> {
             for s in ctx.store.list_sessions(SessionFilter { states, limit: Some(LIST_SESSIONS_MAX), ..Default::default() })? {
                 let agent = agents.iter().find(|a| a.pubkey == s.agent_pubkey).map(|a| a.name.as_str()).unwrap_or("?");
                 let thread = ctx.store.get_thread(&s.thread_id)?.map(|t| t.title).unwrap_or_default();
-                println!("{}  {:<8} {:<7} {:<12} {:<10} {}", s.id, s.state, s.runtime, agent, s.environment_label, thread);
+                println!("{}  {:<8} {:<7} {} {} {}", s.id, s.state, s.runtime, super::text::pad(agent, 12), super::text::pad(&s.environment_label, 10), thread);
             }
             Ok(())
         }
@@ -68,8 +69,8 @@ fn resolve_session(ctx: &Ctx, id: &str) -> Result<String> {
         .collect();
     match hits.len() {
         1 => Ok(hits[0].id.clone()),
-        0 => bail!("no session matches {id:?}"),
-        n => bail!("{n} sessions match {id:?}; be more specific"),
+        0 => bail!("{}", t!("no session matches {query}", query = format!("{id:?}"))),
+        n => bail!("{}", t!("{n} sessions match {query}; be more specific", n = n, query = format!("{id:?}"))),
     }
 }
 
@@ -125,14 +126,14 @@ fn session_meta(agent: &axel_store::Agent, cwd: &Path) -> Option<serde_json::Map
     let path = match super::launch::write_claude_guard_hooks() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("axel: could not write the guard hook settings: {e}");
+            eprintln!("axel: {}", t!("could not write the guard hook settings: {error}", error = e));
             return None;
         }
     };
     let mut extra_args = serde_json::json!({ "settings": path.to_string_lossy() });
     match super::launch::write_axel_plugin() {
         Ok(dir) => extra_args["plugin-dir"] = serde_json::json!(dir.to_string_lossy()),
-        Err(e) => eprintln!("axel: could not write the axel skill plugin: {e}"),
+        Err(e) => eprintln!("axel: {}", t!("could not write the axel skill plugin: {error}", error = e)),
     }
     let meta = serde_json::json!({
         "systemPrompt": { "append": super::launch::system_prompt(agent, cwd) },
@@ -143,12 +144,12 @@ fn session_meta(agent: &axel_store::Agent, cwd: &Path) -> Option<serde_json::Map
 
 fn host(session_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
-    let session = ctx.store.get_session(session_id)?.with_context(|| format!("no session {session_id}"))?;
+    let session = ctx.store.get_session(session_id)?.with_context(|| t!("no session {id}", id = session_id))?;
     if session.runtime != SessionRuntime::Managed {
-        bail!("session {session_id} is a pane session, not managed");
+        bail!("{}", t!("session {id} is a pane session, not managed", id = session_id));
     }
-    let thread = ctx.store.get_thread(&session.thread_id)?.context("thread vanished")?;
-    let agent = ctx.store.agent_by_pubkey(&session.agent_pubkey)?.context("agent vanished")?;
+    let thread = ctx.store.get_thread(&session.thread_id)?.context(t!("the thread vanished"))?;
+    let agent = ctx.store.agent_by_pubkey(&session.agent_pubkey)?.context(t!("the agent vanished"))?;
     let signer = ctx.agent_signer(&agent.pubkey, Some(&session.thread_id))?;
 
     let cwd = std::env::var("AXEL_CWD").map(PathBuf::from).ok().filter(|p| p.is_dir()).unwrap_or(std::env::current_dir()?);

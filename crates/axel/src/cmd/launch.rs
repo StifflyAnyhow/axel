@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use axel_i18n::t;
 use axel_config::{AgentProfile, Harness, HarnessKind, WorkspaceConfig, drivers, git, launch as cfg_launch};
 use axel_store::{NewSession, RuntimeMode, SessionRuntime, SessionState, SessionUpdate, StatusReport, StatusState, ThreadWorkspace, WorkspaceKind};
 use axel_tui::LaunchRequest;
@@ -90,7 +91,7 @@ pub fn pick_runtime(harness: &axel_store::Harness, wanted: Option<SessionRuntime
     match cmd.first() {
         Some(program) if which(program).is_some() => SessionRuntime::Managed,
         Some(program) => {
-            eprintln!("axel: {program} not found on PATH; falling back to the pane runtime for {harness}");
+            eprintln!("axel: {}", t!("{program} not found on PATH; falling back to the pane runtime for {harness}", program = program, harness = harness));
             SessionRuntime::Pane
         }
         None => SessionRuntime::Pane,
@@ -101,9 +102,9 @@ pub fn pick_runtime(harness: &axel_store::Harness, wanted: Option<SessionRuntime
 pub fn runtime_label(harness: &axel_store::Harness) -> String {
     let cmd = axel_acp::adapter_command(harness);
     match cmd.first() {
-        Some(program) if which(program).is_some() => format!("managed ({program})"),
-        Some(program) => format!("pane ({program} not found on PATH)"),
-        None => "pane".to_string(),
+        Some(program) if which(program).is_some() => t!("managed ({program})", program = program),
+        Some(program) => t!("pane ({program} not found on PATH)", program = program),
+        None => t!("pane").to_string(),
     }
 }
 
@@ -123,7 +124,7 @@ pub fn spawn_detached(spec: &cfg_launch::LaunchSpec, session_id: &str) -> Result
         .stderr(out)
         .process_group(0)
         .spawn()
-        .context("starting the session host")?;
+        .context(t!("starting the session host"))?;
     Ok(())
 }
 
@@ -138,7 +139,7 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
 
     // 1. Thread: new, or an existing one we're spawning another agent onto.
     let thread = match &req.thread_id {
-        Some(id) => ctx.store.get_thread(id)?.with_context(|| format!("thread {id} not found"))?,
+        Some(id) => ctx.store.get_thread(id)?.with_context(|| t!("no thread {id}", id = id))?,
         // The first line names it; the whole text is what we're building.
         None => ctx.store.create_thread(&owner, &axel_tui::util::title_line(&req.title), &req.title, None)?,
     };
@@ -147,7 +148,7 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     let (work_dir, primary_repo_key) = resolve_work_dir(ctx, &req, &opts, &owner, &env.id, &thread)?;
 
     // 3. Profile, from the agent's row in the store.
-    let config = WorkspaceConfig::load(&work_dir).context("reading AXEL.md")?;
+    let config = WorkspaceConfig::load(&work_dir).context(t!("reading AXEL.md"))?;
     let profile = build_profile(&agent);
 
     // 4. Skills (remote ones fetched and pinned in AXEL.lock) and the project context.
@@ -193,7 +194,7 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
         apply_pane_only(&mut spec, &agent, claude_profile.as_ref())?;
     }
     if !work_dir.is_dir() {
-        bail!("workspace directory does not exist: {}", work_dir.display());
+        bail!("{}", t!("workspace directory does not exist: {path}", path = work_dir.display()));
     }
     let label = format!("{} · {}", agent.name, truncate(&thread.title, LABEL_TITLE_CHARS_MAX));
     let started = Started { thread, session, agent, agent_kp, work_dir, label };
@@ -228,16 +229,16 @@ fn clear_agent(ctx: &Ctx, req: &LaunchRequest) -> Result<Cleared> {
     let agent = ctx
         .store
         .agent_by_pubkey(&req.agent_pubkey)?
-        .with_context(|| format!("agent {} not found", req.agent_pubkey))?;
+        .with_context(|| t!("agent {key} not found", key = req.agent_pubkey))?;
     // The agent's key, or (on a remote host) this host's key under the
     // agent's delegation for the thread.
     let agent_kp = ctx
         .agent_signer(&req.agent_pubkey, req.thread_id.as_deref())
-        .with_context(|| format!("refusing to launch {}: its key is missing from the keystore", agent.name))?;
+        .with_context(|| t!("refusing to launch {name}: its key is missing from the keystore", name = agent.name))?;
     // Reach, loops, depth and budget; a summoned session never runs broader
     // than the session that summoned it.
     let (parent_session, mode_cap) = super::policy::check_summon(ctx, &agent.pubkey)
-        .with_context(|| format!("refusing to launch {}", agent.name))?;
+        .with_context(|| t!("refusing to launch {name}", name = agent.name))?;
     let runtime_mode = mode_cap.map_or(agent.runtime_mode, |cap| axel_store::narrower(agent.runtime_mode, cap));
     Ok(Cleared { agent, agent_kp, parent_session, runtime_mode })
 }
@@ -357,9 +358,9 @@ fn prepare_claude_state(state: Option<PathBuf>, has_profile: bool, work_dir: &Pa
     let path = state.map_or_else(default_claude_state_path, Ok)?;
     if let Err(e) = prepare_claude_config(&path, work_dir, runtime_mode == RuntimeMode::Autopilot) {
         if has_profile {
-            return Err(e).with_context(|| format!("preparing Claude Code config at {}", path.display()));
+            return Err(e).with_context(|| t!("preparing Claude Code config at {path}", path = path.display()));
         }
-        eprintln!("axel: could not prepare Claude Code config for {}: {e}", work_dir.display());
+        eprintln!("axel: {}", t!("could not prepare Claude Code config for {path}: {error}", path = work_dir.display(), error = e));
     }
     Ok(())
 }
@@ -411,7 +412,7 @@ fn prepend_claude_axel_args(spec: &mut cfg_launch::LaunchSpec, agent: &axel_stor
     let mut args = vec!["--append-system-prompt".to_string(), system_prompt(agent, work_dir)];
     match write_axel_plugin() {
         Ok(dir) => args.extend(["--plugin-dir".to_string(), dir.to_string_lossy().into_owned()]),
-        Err(e) => eprintln!("axel: could not write the axel skill plugin: {e}"),
+        Err(e) => eprintln!("axel: {}", t!("could not write the axel skill plugin: {error}", error = e)),
     }
     // Axel's tools; the server inherits the pane's AXEL_* identity.
     let mcp = serde_json::json!({ "mcpServers": { MCP_SERVER: { "command": axel_exe(), "args": ["mcp"] } } });
@@ -479,7 +480,7 @@ fn start_managed(
         &session.id,
         &SessionUpdate { state: Some(SessionState::Starting), harness_session_id: resume, ..Default::default() },
     )?;
-    let axel = std::env::current_exe().context("locating axel")?.to_string_lossy().into_owned();
+    let axel = std::env::current_exe().context(t!("locating the axel binary"))?.to_string_lossy().into_owned();
     let mut host_spec = cfg_launch::LaunchSpec { program: axel, args: vec!["session".into(), "host".into(), session.id.clone()], env: vec![] };
     for (k, v) in spec.env.iter().filter(|(k, _)| host_keeps_env(k)) {
         host_spec.env.push((k.clone(), v.clone()));
@@ -507,7 +508,7 @@ fn start_managed(
     let window_id = super::ui::window_of_block(rex, &rex.env().block).ok().flatten().unwrap_or_default();
     let block = Some(
         rex.new_detached_terminal(&pane_label, &command, Some(&work_dir), &host_spec.env)
-            .context("starting the session host in Rex")?,
+            .context(t!("starting the session host in Rex"))?,
     );
     ctx.store.update_session(
         &agent_kp,
@@ -541,7 +542,7 @@ fn start_window(ctx: &Ctx, started: Started, spec: &cfg_launch::LaunchSpec, rex:
     command.extend(spec.args.iter().cloned());
     let window = rex
         .new_window(&label, &command, Some(&work_dir), &spec.env, true)
-        .context("opening a Rex window for the agent")?;
+        .context(t!("opening a Rex window for the agent"))?;
     let block = window.block_ids.first().cloned();
     ctx.store.update_session(
         &agent_kp,
@@ -578,11 +579,11 @@ fn last_session_id(ctx: &Ctx, thread_id: &str) -> Option<String> {
 fn prepare_workspace(project: &Path, kind: WorkspaceKind, branch: Option<&str>, title: &str) -> Result<(PathBuf, ThreadWorkspace)> {
     match kind {
         WorkspaceKind::Worktree => {
-            let repo = git::repo_root(project).context("project is not a git repository")?;
+            let repo = git::repo_root(project).context(t!("the project is not a git repository"))?;
             let branch = branch.map(String::from).unwrap_or_else(|| format!("axel/{}", axel_tui::slugify(title)));
             let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
             let dest = paths::worktrees_dir().join(name).join(branch.replace('/', "-"));
-            let path = git::ensure_worktree(&repo, &branch, &dest).context("creating worktree")?;
+            let path = git::ensure_worktree(&repo, &branch, &dest).context(t!("creating the worktree"))?;
             Ok((path.clone(), ThreadWorkspace { kind, branch: Some(branch), worktree_path: Some(path) }))
         }
         _ => Ok((project.to_path_buf(), ThreadWorkspace { kind: WorkspaceKind::InPlace, branch: git::current_branch(project), worktree_path: None })),
@@ -590,7 +591,7 @@ fn prepare_workspace(project: &Path, kind: WorkspaceKind, branch: Option<&str>, 
 }
 
 pub fn default_claude_state_path() -> Result<PathBuf> {
-    Ok(dirs::home_dir().context("no home dir")?.join(".claude.json"))
+    Ok(dirs::home_dir().context(t!("no home directory"))?.join(".claude.json"))
 }
 
 /// Pre-answer Claude Code's startup dialogs in its state file: folder trust
@@ -606,7 +607,7 @@ pub fn prepare_claude_config(path: &Path, dir: &Path, autopilot: bool) -> Result
         Err(e) => return Err(e.into()),
     };
     if !root.is_object() {
-        bail!("Claude Code state must be a JSON object");
+        bail!("{}", t!("Claude Code state must be a JSON object"));
     }
     let mut changed = false;
     let key = dir.to_string_lossy().into_owned();
@@ -631,7 +632,7 @@ pub fn prepare_claude_config(path: &Path, dir: &Path, autopilot: bool) -> Result
     if !changed {
         return Ok(());
     }
-    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().context("missing Claude state directory")?)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().context(t!("missing Claude state directory"))?)?;
     serde_json::to_writer_pretty(tmp.as_file_mut(), &root)?;
     tmp.persist(path)?;
     Ok(())
@@ -653,7 +654,7 @@ pub fn exec_inline(spec: cfg_launch::LaunchSpec) -> Result<()> {
         }
     }
     let err = cmd.exec();
-    bail!("failed to exec {}: {err}", spec.program)
+    bail!("{}", t!("failed to exec {program}: {error}", program = spec.program, error = err))
 }
 
 /// PATH lookup for a bare program name.
@@ -700,7 +701,7 @@ pub fn install_skills(
 ) -> Result<Vec<String>> {
     let all = skills_from(config, global)?;
     let skills = axel_config::resolve_skills(requested, &all);
-    driver.install(work_dir, &skills).context("installing skills")?;
+    driver.install(work_dir, &skills).context(t!("installing skills"))?;
     let dir = driver.skills_dir(work_dir);
     let mut local: Vec<PathBuf> = skills.iter().map(|s| dir.join(&s.name)).collect();
     if let Some(axel_md) = config.and_then(|c| c.path.clone())
@@ -730,7 +731,7 @@ fn exclude_from_git(dir: &Path, paths: &[PathBuf]) {
         Ok(have) => have,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
-            eprintln!("axel: could not read {}: {e}; skill links stay visible to git", exclude.display());
+            eprintln!("axel: {}", t!("could not read {path}: {error}; skill links stay visible to git", path = exclude.display(), error = e));
             return;
         }
     };
@@ -755,7 +756,7 @@ fn exclude_from_git(dir: &Path, paths: &[PathBuf]) {
     let header = if have.contains("# axel:") { "" } else { "# axel: skill links installed for agents on this machine\n" };
     // The links still work; git just sees them, so this is a warning, not a failed launch.
     if let Err(e) = std::fs::write(&exclude, format!("{have}{sep}{header}{add}")) {
-        eprintln!("axel: could not update {}: {e}; skill links stay visible to git", exclude.display());
+        eprintln!("axel: {}", t!("could not update {path}: {error}; skill links stay visible to git", path = exclude.display(), error = e));
     }
 }
 
@@ -771,7 +772,7 @@ fn skills_from(config: Option<&WorkspaceConfig>, global: &Path) -> Result<axel_c
     };
     let resolved = axel_config::remote::resolve(config, &paths::skills_cache_dir());
     for w in &resolved.warnings {
-        eprintln!("axel: skills: {w}");
+        eprintln!("axel: {}", t!("skills: {warning}", warning = w));
     }
     Ok(axel_config::find_skills(&resolved.roots, Some(global.as_path()))?)
 }

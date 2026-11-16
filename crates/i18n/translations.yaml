@@ -692,5 +692,663 @@
   zh-Hans: "套餐限额"
 
 # --- axel ---
+# cmd/mod.rs
+"opening ~/.axel/axel.db":
+  zh-Hans: "打开 ~/.axel/axel.db"
+"opening the keystore":
+  zh-Hans: "打开密钥库"
+"loading the owner key":
+  zh-Hans: "加载所有者密钥"
+"no key for agent {agent} here, and no delegation from it for this thread":
+  zh-Hans: "本机没有智能体 {agent} 的密钥，它也没有为此话题授予委托"
+"axel-links:// links open through {app}":
+  zh-Hans: "axel-links:// 链接将通过 {app} 打开"
+# cmd/update.rs, cmd/log.rs, cmd/usage.rs, cmd/gc.rs
+"running the Axel install script":
+  zh-Hans: "运行 Axel 安装脚本"
+"axel update failed: {status}":
+  zh-Hans: "axel update 失败：{status}"
+"no log at {path}":
+  zh-Hans: "{path} 处没有日志"
+"home directory unavailable":
+  zh-Hans: "无法获取主目录"
+"Reconciled {n} sessions from local harness logs. Axel estimates, rolling 24h:":
+  zh-Hans: "已根据本地 harness 日志核对 {n} 个会话。Axel 估算的最近 24 小时用量："
+"{name}: ${cost} · {tokens} tokens":
+  zh-Hans: "{name}：${cost} · {tokens} token"
+"usage reconciliation: {error}":
+  zh-Hans: "用量核对：{error}"
+"{dir}: 1 checkpoint ref pruned":
+  zh-Hans: "{dir}：已清理 1 个检查点引用"
+"{dir}: {n} checkpoint refs pruned":
+  zh-Hans: "{dir}：已清理 {n} 个检查点引用"
+"1 checkpoint ref pruned":
+  zh-Hans: "已清理 1 个检查点引用"
+"{n} checkpoint refs pruned":
+  zh-Hans: "已清理 {n} 个检查点引用"
+# cmd/effort.rs
+"{label} has no `{effort}` reasoning effort (it stops at {top}); its sessions run at {label}'s default":
+  zh-Hans: "{label} 没有 `{effort}` 推理强度（最高为 {top}），它的会话将以 {label} 的默认强度运行"
+"{label} has no `{effort}` reasoning effort; its sessions run at {label}'s default":
+  zh-Hans: "{label} 没有 `{effort}` 推理强度，它的会话将以 {label} 的默认强度运行"
+"{label} panes cannot be started at effort {effort}; a managed (ACP) session applies it when the harness offers that level, and says so when it doesn't":
+  zh-Hans: "{label} 窗格无法以推理强度 {effort} 启动；托管（ACP）会话会在 harness 提供该级别时应用它，不提供时会给出提示"
+"{label} cannot take effort {effort}":
+  zh-Hans: "{label} 不支持推理强度 {effort}"
+# cmd/process_control.rs
+"listing session processes":
+  zh-Hans: "列出会话进程"
+"could not list session processes":
+  zh-Hans: "无法列出会话进程"
+"the session exited before it could be paused":
+  zh-Hans: "会话在暂停前已退出"
+"the session's process tree is more than {max} levels deep":
+  zh-Hans: "会话的进程树超过 {max} 层"
+"this session has ended":
+  zh-Hans: "此会话已结束"
+"this session's process is not running here":
+  zh-Hans: "此会话的进程不在本机运行"
+"reading the paused session's process record":
+  zh-Hans: "读取已暂停会话的进程记录"
+"the paused process record belongs to another session":
+  zh-Hans: "这份暂停进程记录属于另一个会话"
+# cmd/claude_profile.rs
+"--claude-config-dir requires the Claude harness":
+  zh-Hans: "--claude-config-dir 需要 Claude harness"
+"use an existing absolute Claude config directory or `default`":
+  zh-Hans: "请使用一个已存在的 Claude 配置目录绝对路径，或 `default`"
+"invalid agent public key":
+  zh-Hans: "智能体公钥无效"
+"reading the agent's Claude profile":
+  zh-Hans: "读取智能体的 Claude 配置"
+"missing Claude profile directory":
+  zh-Hans: "缺少 Claude 配置所在目录"
+"removing the agent's Claude profile":
+  zh-Hans: "删除智能体的 Claude 配置"
+"Claude config directory is unavailable: {path}":
+  zh-Hans: "Claude 配置目录不可用：{path}"
+"Claude config directory must be UTF-8":
+  zh-Hans: "Claude 配置目录路径必须是 UTF-8"
+# cmd/agent.rs, cmd/policy.rs
+"no agent named {name}":
+  zh-Hans: "没有名为 {name} 的智能体"
+"archived {name}":
+  zh-Hans: "已归档 {name}"
+"agents with a Claude config directory run locally":
+  zh-Hans: "指定了 Claude 配置目录的智能体只能在本机运行"
+"use --inherit-claude-config when switching to a different harness":
+  zh-Hans: "切换到其他 harness 时请使用 --inherit-claude-config"
+"the agent vanished":
+  zh-Hans: "智能体已不存在"
+"{name}  {runs}  mode {mode}":
+  zh-Hans: "{name}  {runs}  模式 {mode}"
+"an agent named {name} already exists":
+  zh-Hans: "名为 {name} 的智能体已存在"
+"{old} is now {new}; sessions already running keep calling it {old} until they restart":
+  zh-Hans: "{old} 已改名为 {new}；正在运行的会话在重启前仍称它为 {old}"
+"{n} unread":
+  zh-Hans: "{n} 条未读"
+"reach {who}":
+  zh-Hans: "可联系范围 {who}"
+"Claude config directory: {dir}":
+  zh-Hans: "Claude 配置目录：{dir}"
+"key in keystore: yes":
+  zh-Hans: "密钥库中的密钥：有"
+"key in keystore: MISSING":
+  zh-Hans: "密钥库中的密钥：缺失"
+"spent today: ${spent} (estimated; managed sessions don't report usage yet)":
+  zh-Hans: "今日花费：${spent}（估算值；托管会话尚不上报用量）"
+"owner attestation: valid (owner {owner})":
+  zh-Hans: "所有者证明：有效（所有者 {owner}）"
+"owner attestation: INVALID (owner {owner})":
+  zh-Hans: "所有者证明：无效（所有者 {owner}）"
+"agent names are letters, digits, - and _ so they work as @mentions":
+  zh-Hans: "智能体名称只能包含字母、数字、- 和 _，以便用作 @提及"
+"storing the agent key":
+  zh-Hans: "保存智能体密钥"
+"attesting the agent":
+  zh-Hans: "为智能体签发证明"
+"two models: {a} (from {spec}) and --model {b}":
+  zh-Hans: "指定了两个模型：{a}（来自 {spec}）和 --model {b}"
+"no harness named":
+  zh-Hans: "未指定 harness"
+"{me} always reaches itself; --allow/--disallow take other agents":
+  zh-Hans: "{me} 总能联系自己；--allow/--disallow 只接受其他智能体"
+"{me} can reach any agent; use --reach nobody --allow … to list who it may reach":
+  zh-Hans: "{me} 可以联系任何智能体；请用 --reach nobody --allow … 列出它可以联系的智能体"
+"--daily-usd takes a number or `unlimited`, not {value}":
+  zh-Hans: "--daily-usd 需要一个数字或 `unlimited`，而不是 {value}"
+"--daily-usd must be zero or more":
+  zh-Hans: "--daily-usd 必须大于或等于零"
+"no host named {quoted}; add it with `axel host add {label}`":
+  zh-Hans: "没有名为 {quoted} 的主机；请用 `axel host add {label}` 添加"
+"runs on {host} (`@name@local` or `--host local` runs it here)":
+  zh-Hans: "在 {host} 上运行（用 `@name@local` 或 `--host local` 可在本机运行）"
+"runs here":
+  zh-Hans: "在本机运行"
+"unlimited":
+  zh-Hans: "不限"
+"${usd}/day":
+  zh-Hans: "${usd}/天"
+"reach   {who}":
+  zh-Hans: "可联系范围  {who}"
+"budget  {spend} · summon depth ≤ {depth}":
+  zh-Hans: "预算  {spend} · 召唤深度 ≤ {depth}"
+"effort  {effort}":
+  zh-Hans: "推理强度  {effort}"
+"warning: {warning}":
+  zh-Hans: "警告：{warning}"
+"nobody (only you)":
+  zh-Hans: "无（仅你）"
+"any agent":
+  zh-Hans: "任何智能体"
+# cmd/thread.rs
+"this thread has no open views here":
+  zh-Hans: "此话题在本机没有打开的视图"
+"ended {n} session(s) on {title}":
+  zh-Hans: "已结束「{title}」上的 {n} 个会话"
+"give the thread a title: what are we building?":
+  zh-Hans: "请给话题起个标题：我们要做什么？"
+"thread {thread}\nsession {session} on {host}\nopen the thread: axel thread open {short}":
+  zh-Hans: "话题 {thread}\n会话 {session}，位于 {host}\n打开话题：axel thread open {short}"
+"thread {thread}\nsession {session} on {host}":
+  zh-Hans: "话题 {thread}\n会话 {session}，位于 {host}"
+"this thread has no session to resume":
+  zh-Hans: "此话题没有可恢复的会话"
+"the last session has no harness session id yet; starting fresh on the same thread":
+  zh-Hans: "上一个会话还没有 harness 会话 ID；将在同一话题上重新开始"
+"not a git repository":
+  zh-Hans: "不是 git 仓库"
+"attached {path} to {title}":
+  zh-Hans: "已将 {path} 关联到「{title}」"
+"scratch":
+  zh-Hans: "临时"
+"the thread vanished":
+  zh-Hans: "话题已不存在"
+"sessions:":
+  zh-Hans: "会话："
+"agent {agent}  env {env}  harness {harness}  resume {resume}":
+  zh-Hans: "智能体 {agent}  环境 {env}  harness {harness}  恢复 {resume}"
+"messages: {n}":
+  zh-Hans: "消息：{n}"
+"settled: {title}":
+  zh-Hans: "已完成：{title}"
+"reopened: {title}":
+  zh-Hans: "已重新打开：{title}"
+"archived: {title}":
+  zh-Hans: "已归档：{title}"
+"deleted: {title}":
+  zh-Hans: "已删除：{title}"
+"{host}: couldn't reach it to stop the session ({error}); it ends there at the next sync":
+  zh-Hans: "{host}：无法连接以停止会话（{error}）；它会在下次同步时在那边结束"
+"no thread matches {query}":
+  zh-Hans: "没有与 {query} 匹配的话题"
+"{n} threads match {query}; be more specific":
+  zh-Hans: "有 {n} 个话题与 {query} 匹配，请更具体一些"
+"thread {thread}\nsession {session}":
+  zh-Hans: "话题 {thread}\n会话 {session}"
+"host in Rex window {window}\nopen the thread: axel thread open {short}":
+  zh-Hans: "会话宿主在 Rex 窗口 {window}\n打开话题：axel thread open {short}"
+"hosting here; open the thread elsewhere: axel thread open {short}":
+  zh-Hans: "会话宿主在此运行；在别处打开话题：axel thread open {short}"
+"thread {thread}\nsession {session}\nrex window {window}":
+  zh-Hans: "话题 {thread}\n会话 {session}\nRex 窗口 {window}"
+# cmd/session.rs, cmd/inbox.rs
+"you":
+  zh-Hans: "你"
+"no session {id}":
+  zh-Hans: "没有会话 {id}"
+"ended {session}":
+  zh-Hans: "已结束 {session}"
+"moved to {place}: session {session} resumes the conversation":
+  zh-Hans: "已移至 {place}：会话 {session} 接着之前的对话继续"
+"no session matches {query}":
+  zh-Hans: "没有与 {query} 匹配的会话"
+"{n} sessions match {query}; be more specific":
+  zh-Hans: "有 {n} 个会话与 {query} 匹配，请更具体一些"
+"could not write the guard hook settings: {error}":
+  zh-Hans: "无法写入守卫 hook 设置：{error}"
+"could not write the axel skill plugin: {error}":
+  zh-Hans: "无法写入 axel 技能插件：{error}"
+"session {id} is a pane session, not managed":
+  zh-Hans: "会话 {id} 是窗格会话，不是托管会话"
+# cmd/doctor.rs
+"db:":
+  zh-Hans: "数据库："
+"session {session}  block {block}":
+  zh-Hans: "会话 {session}  块 {block}"
+"rex host:":
+  zh-Hans: "Rex 主机："
+"unavailable ({error})":
+  zh-Hans: "不可用（{error}）"
+"not detected (REX_SESSION unset); launcher runs inline":
+  zh-Hans: "未检测到（REX_SESSION 未设置）；启动器将内联运行"
+"owner:":
+  zh-Hans: "所有者："
+"env:":
+  zh-Hans: "环境："
+"agents:":
+  zh-Hans: "智能体："
+"key: ok":
+  zh-Hans: "密钥：正常"
+"key: MISSING":
+  zh-Hans: "密钥：缺失"
+"pending:":
+  zh-Hans: "待处理："
+"threads:":
+  zh-Hans: "话题："
+"{open} open, {live} live sessions":
+  zh-Hans: "{open} 个进行中，{live} 个活跃会话"
+"not found":
+  zh-Hans: "未找到"
+# cmd/skills.rs
+"reading AXEL.md":
+  zh-Hans: "读取 AXEL.md"
+"global  {dir}":
+  zh-Hans: "全局  {dir}"
+"no skills here. Add sources under `skills:` in AXEL.md (a directory, or a skills.sh link).":
+  zh-Hans: "这里没有技能。请在 AXEL.md 的 `skills:` 下添加来源（一个目录，或一个 skills.sh 链接）。"
+"no AXEL.md here or above (up to the repository root)":
+  zh-Hans: "当前目录及其上级（直到仓库根目录）都没有 AXEL.md"
+"AXEL.md has no directory":
+  zh-Hans: "AXEL.md 没有所在目录"
+"AXEL.md lists no remote skills.":
+  zh-Hans: "AXEL.md 没有列出远程技能。"
+"AXEL.md has no remote skill source `{source}`":
+  zh-Hans: "AXEL.md 中没有远程技能来源 `{source}`"
+"checking {n} remote source(s)…":
+  zh-Hans: "正在检查 {n} 个远程来源…"
+"every pin is current.":
+  zh-Hans: "所有固定版本都是最新的。"
+"unpinned":
+  zh-Hans: "未固定"
+"Pin {source} to {commit}?":
+  zh-Hans: "将 {source} 固定到 {commit}？"
+"wrote {path}":
+  zh-Hans: "已写入 {path}"
+"nothing applied; rerun with --yes to move these pins.":
+  zh-Hans: "未应用任何更改；加上 --yes 重新运行以更新这些固定版本。"
+"new skill: {name}":
+  zh-Hans: "新技能：{name}"
+"removed upstream: {name}":
+  zh-Hans: "上游已删除：{name}"
+# cmd/manage.rs (the thread controls pane's footer)
+"settled":
+  zh-Hans: "已完成"
+"reopened":
+  zh-Hans: "已重新打开"
+"archived":
+  zh-Hans: "已归档"
+"paused {agent}: {n} session(s)":
+  zh-Hans: "已暂停 {agent}：{n} 个会话"
+"resumed {agent}: {n} session(s)":
+  zh-Hans: "已恢复 {agent}：{n} 个会话"
+"removed {agent} from this thread; history kept":
+  zh-Hans: "已将 {agent} 移出此话题；历史记录保留"
+"stopped {agent}: 1 session":
+  zh-Hans: "已停止 {agent}：1 个会话"
+"stopped {agent}: {n} sessions":
+  zh-Hans: "已停止 {agent}：{n} 个会话"
+"stopped 1 session":
+  zh-Hans: "已停止 1 个会话"
+"stopped {n} sessions":
+  zh-Hans: "已停止 {n} 个会话"
+"renamed to {title}":
+  zh-Hans: "已重命名为「{title}」"
+"hard reset: 1 session ended; the next message starts from scratch":
+  zh-Hans: "已彻底重置：结束了 1 个会话；下一条消息将从头开始"
+"hard reset: {n} sessions ended; the next message starts from scratch":
+  zh-Hans: "已彻底重置：结束了 {n} 个会话；下一条消息将从头开始"
+"reset: 1 session ended, {agent} starts fresh ({session})":
+  zh-Hans: "已重置：结束了 1 个会话，{agent} 以全新上下文开始（{session}）"
+"reset: {n} sessions ended, {agent} starts fresh ({session})":
+  zh-Hans: "已重置：结束了 {n} 个会话，{agent} 以全新上下文开始（{session}）"
+"moved {agent} to {host} with its conversation ({session})":
+  zh-Hans: "已将 {agent} 连同对话移至 {host}（{session}）"
+"{agent} starts on {host} with a recap ({session})":
+  zh-Hans: "{agent} 带着回顾在 {host} 上开始（{session}）"
+"no such thread":
+  zh-Hans: "没有这个话题"
+# cmd/diff.rs, cmd/undo.rs
+"no session {prefix}… on this thread":
+  zh-Hans: "此话题上没有会话 {prefix}…"
+"no turn {n} on this thread":
+  zh-Hans: "此话题上没有第 {n} 轮"
+"no turn on this thread changed a file (or none left checkpoints)":
+  zh-Hans: "此话题上没有任何一轮修改过文件（或都没有留下检查点）"
+"agent":
+  zh-Hans: "智能体"
+"turn {n} of {agent} left no checkpoints (not a git workspace, or an older build)":
+  zh-Hans: "{agent} 的第 {n} 轮没有留下检查点（不是 git 工作区，或是旧版本）"
+"1 file +{added} −{removed}":
+  zh-Hans: "1 个文件 +{added} −{removed}"
+"{n} files +{added} −{removed}":
+  zh-Hans: "{n} 个文件 +{added} −{removed}"
+"binary":
+  zh-Hans: "二进制"
+"also changed during this turn":
+  zh-Hans: "本轮期间还修改了"
+"… and more: only the first {n} files are listed":
+  zh-Hans: "… 还有更多：只列出前 {n} 个文件"
+"(includes changes made between this turn and the previous one)":
+  zh-Hans: "（包括上一轮与本轮之间的修改）"
+"this machine has no checkout of the thread's project":
+  zh-Hans: "本机没有此话题项目的检出"
+"fetching the checkpoints from {host}":
+  zh-Hans: "从 {host} 获取检查点"
+"the diff lives on {host}: this machine's checkout has no checkpoints for this turn":
+  zh-Hans: "差异在 {host} 上：本机的检出没有这一轮的检查点"
+"the diff lives on another machine: this machine's checkout has no checkpoints for this turn":
+  zh-Hans: "差异在另一台机器上：本机的检出没有这一轮的检查点"
+"{agent} · turn {n} · {headline}":
+  zh-Hans: "{agent} · 第 {n} 轮 · {headline}"
+"review sent to {agent} ({how})":
+  zh-Hans: "评审已发给 {agent}（{how}）"
+"not sent: {error}":
+  zh-Hans: "未发送：{error}"
+"telling the agent: {error}":
+  zh-Hans: "通知智能体：{error}"
+"restored: {files} as before turn {n} (snapshot {snapshot})":
+  zh-Hans: "已恢复：{files} 回到第 {n} 轮之前的状态（快照 {snapshot}）"
+"no undo: {why}":
+  zh-Hans: "无法撤销：{why}"
+"undone: {files} back to before turn {n} (snapshot {snapshot})":
+  zh-Hans: "已撤销：{files} 回到第 {n} 轮之前（快照 {snapshot}）"
+"later work overlaps {files}: nothing changed. R restores the turn's files to before it":
+  zh-Hans: "之后的工作与 {files} 重叠：未做任何更改。按 R 可将这一轮的文件恢复到它之前的状态"
+"nothing":
+  zh-Hans: "无"
+"{a} and {b}":
+  zh-Hans: "{a} 和 {b}"
+"{a} and {n} more":
+  zh-Hans: "{a} 及另外 {n} 个"
+"no such session":
+  zh-Hans: "没有这个会话"
+"queued for its next turn":
+  zh-Hans: "排队等待它的下一轮"
+"into the running turn":
+  zh-Hans: "已送入正在进行的一轮"
+"as a prompt":
+  zh-Hans: "作为提示词"
+"summoned back onto the thread":
+  zh-Hans: "已召回到话题上"
+"the agent is mid-turn; wait for it to finish":
+  zh-Hans: "智能体正在进行一轮，请等它完成"
+"can't undo turn {n} of {agent}: {why}":
+  zh-Hans: "无法撤销 {agent} 的第 {n} 轮：{why}"
+"turn {n} of {agent} changed no files":
+  zh-Hans: "{agent} 的第 {n} 轮没有修改任何文件"
+"restore the files of turn {turn} of {agent}: 1 file ({files})?":
+  zh-Hans: "恢复 {agent} 第 {turn} 轮的文件：1 个文件（{files}）？"
+"restore the files of turn {turn} of {agent}: {n} files ({files})?":
+  zh-Hans: "恢复 {agent} 第 {turn} 轮的文件：{n} 个文件（{files}）？"
+"undo turn {turn} of {agent}: 1 file ({files})?":
+  zh-Hans: "撤销 {agent} 的第 {turn} 轮：1 个文件（{files}）？"
+"undo turn {turn} of {agent}: {n} files ({files})?":
+  zh-Hans: "撤销 {agent} 的第 {turn} 轮：{n} 个文件（{files}）？"
+"left as is":
+  zh-Hans: "保持原样"
+"later work overlaps {files}: nothing changed. `axel thread undo {thread} --turn {n} --restore` rewrites the turn's files to how they were before it":
+  zh-Hans: "之后的工作与 {files} 重叠：未做任何更改。`axel thread undo {thread} --turn {n} --restore` 会把这一轮的文件改写回它之前的状态"
+"restored: {files} (snapshot of the tree before: {snapshot})":
+  zh-Hans: "已恢复：{files}（之前工作树的快照：{snapshot}）"
+"undone: {files} (snapshot of the tree before: {snapshot})":
+  zh-Hans: "已撤销：{files}（之前工作树的快照：{snapshot}）"
+# cmd/links.rs, cmd/links/drivers.rs (the tool calls pane)
+"`axel-links://` links need macOS":
+  zh-Hans: "`axel-links://` 链接需要 macOS"
+"locating the axel binary":
+  zh-Hans: "查找 axel 可执行文件"
+"replacing {path}":
+  zh-Hans: "替换 {path}"
+"running {program}":
+  zh-Hans: "运行 {program}"
+"{program} failed: {error}":
+  zh-Hans: "{program} 失败：{error}"
+"not an Axel link: {url}":
+  zh-Hans: "不是 Axel 链接：{url}"
+"tool calls":
+  zh-Hans: "工具调用"
+"opening the tool calls in Rex":
+  zh-Hans: "在 Rex 中打开工具调用"
+"turn {n} changes":
+  zh-Hans: "第 {n} 轮的修改"
+"opening the diff in Rex":
+  zh-Hans: "在 Rex 中打开差异"
+"{path} is gone":
+  zh-Hans: "{path} 已不存在"
+"starting open":
+  zh-Hans: "启动 open"
+"open -R {path} failed":
+  zh-Hans: "open -R {path} 失败"
+"no tool call {item}":
+  zh-Hans: "没有工具调用 {item}"
+"tool call {item} ran no command":
+  zh-Hans: "工具调用 {item} 没有运行命令"
+"starting pbcopy":
+  zh-Hans: "启动 pbcopy"
+"pbcopy's input":
+  zh-Hans: "pbcopy 的输入"
+"pbcopy failed":
+  zh-Hans: "pbcopy 失败"
+"copied {n} bytes from {item}":
+  zh-Hans: "已从 {item} 复制 {n} 字节"
+"1 tool call":
+  zh-Hans: "1 次工具调用"
+"{n} tool calls":
+  zh-Hans: "{n} 次工具调用"
+"no thread {id}":
+  zh-Hans: "没有话题 {id}"
+"Esc or q closes · scroll as usual":
+  zh-Hans: "按 Esc 或 q 关闭 · 照常滚动"
+"failed":
+  zh-Hans: "失败"
+"{n} lines":
+  zh-Hans: "{n} 行"
+"lines {from}–{to}":
+  zh-Hans: "第 {from}–{to} 行"
+"from line {n}":
+  zh-Hans: "从第 {n} 行起"
+"first {n} lines":
+  zh-Hans: "前 {n} 行"
+"{n} more lines":
+  zh-Hans: "还有 {n} 行"
+"1 match":
+  zh-Hans: "1 处匹配"
+"{n} matches":
+  zh-Hans: "{n} 处匹配"
+"1 error":
+  zh-Hans: "1 个错误"
+"{n} errors":
+  zh-Hans: "{n} 个错误"
+"1 warning":
+  zh-Hans: "1 个警告"
+"{n} warnings":
+  zh-Hans: "{n} 个警告"
+"{n} failed":
+  zh-Hans: "{n} 个失败"
+"{n} passed":
+  zh-Hans: "{n} 个通过"
+# cmd/launch.rs
+"{program} not found on PATH; falling back to the pane runtime for {harness}":
+  zh-Hans: "PATH 中找不到 {program}；{harness} 改用窗格方式运行"
+"managed ({program})":
+  zh-Hans: "托管（{program}）"
+"pane ({program} not found on PATH)":
+  zh-Hans: "窗格（PATH 中找不到 {program}）"
+"pane":
+  zh-Hans: "窗格"
+"starting the session host":
+  zh-Hans: "启动会话宿主"
+"workspace directory does not exist: {path}":
+  zh-Hans: "工作区目录不存在：{path}"
+"agent {key} not found":
+  zh-Hans: "找不到智能体 {key}"
+"refusing to launch {name}: its key is missing from the keystore":
+  zh-Hans: "拒绝启动 {name}：密钥库中没有它的密钥"
+"refusing to launch {name}":
+  zh-Hans: "拒绝启动 {name}"
+"preparing Claude Code config at {path}":
+  zh-Hans: "在 {path} 准备 Claude Code 配置"
+"could not prepare Claude Code config for {path}: {error}":
+  zh-Hans: "无法为 {path} 准备 Claude Code 配置：{error}"
+"starting the session host in Rex":
+  zh-Hans: "在 Rex 中启动会话宿主"
+"opening a Rex window for the agent":
+  zh-Hans: "为智能体打开 Rex 窗口"
+"the project is not a git repository":
+  zh-Hans: "项目不是 git 仓库"
+"creating the worktree":
+  zh-Hans: "创建 worktree"
+"no home directory":
+  zh-Hans: "没有主目录"
+"Claude Code state must be a JSON object":
+  zh-Hans: "Claude Code 状态文件必须是一个 JSON 对象"
+"missing Claude state directory":
+  zh-Hans: "缺少 Claude 状态文件所在目录"
+"failed to exec {program}: {error}":
+  zh-Hans: "无法执行 {program}：{error}"
+"installing skills":
+  zh-Hans: "安装技能"
+"could not read {path}: {error}; skill links stay visible to git":
+  zh-Hans: "无法读取 {path}：{error}；技能链接对 git 仍然可见"
+"could not update {path}: {error}; skill links stay visible to git":
+  zh-Hans: "无法更新 {path}：{error}；技能链接对 git 仍然可见"
+"skills: {warning}":
+  zh-Hans: "技能：{warning}"
+# cmd/ui.rs
+"opening the prompt pane in Rex":
+  zh-Hans: "在 Rex 中打开提示词窗格"
+"could not open the threads pane: {error}":
+  zh-Hans: "无法打开话题窗格：{error}"
+"opening the usage pane in Rex":
+  zh-Hans: "在 Rex 中打开用量窗格"
+"reading the current directory":
+  zh-Hans: "读取当前目录"
+"--screen thread needs --thread ID":
+  zh-Hans: "--screen thread 需要 --thread ID"
+"log at {path}":
+  zh-Hans: "日志位于 {path}"
+"hosting the managed session; open the thread with `axel thread open {thread}`":
+  zh-Hans: "正在托管会话；用 `axel thread open {thread}` 打开话题"
+"launched in Rex window {window}":
+  zh-Hans: "已在 Rex 窗口 {window} 中启动"
+"could not close the floating layer: {error}":
+  zh-Hans: "无法关闭浮动层：{error}"
+"could not inspect the session: {error}":
+  zh-Hans: "无法查看会话：{error}"
+"not inside Rex":
+  zh-Hans: "不在 Rex 中"
+"no composer below this message pane":
+  zh-Hans: "此消息窗格下方没有输入框"
+"listing processes":
+  zh-Hans: "列出进程"
+"could not open the question: {error}":
+  zh-Hans: "无法打开问题：{error}"
+"could not open the thread controls: {error}":
+  zh-Hans: "无法打开话题控制面板：{error}"
+"floating terminals need Rex":
+  zh-Hans: "浮动终端需要 Rex"
+"reading the thread's working directory":
+  zh-Hans: "读取话题的工作目录"
+"opening the thread's terminal":
+  zh-Hans: "打开话题的终端"
+"this agent is paused; resume it in Ctrl+D → Agents":
+  zh-Hans: "此智能体已暂停；请在 Ctrl+D → 智能体 中恢复它"
+"this agent runs in its own pane; press o to open it":
+  zh-Hans: "此智能体在自己的窗格中运行；按 o 打开它"
+"the session host is not ready yet":
+  zh-Hans: "会话宿主尚未就绪"
+"its session had stopped; send a message to resume it":
+  zh-Hans: "它的会话已停止；发送一条消息即可恢复"
+"host unreachable: {error}":
+  zh-Hans: "无法连接主机：{error}"
+"its session had stopped, and resuming it failed: {error}":
+  zh-Hans: "它的会话已停止，恢复失败：{error}"
+# cmd/host.rs (remote hosts; what the other host answers stays as it sends it)
+"running ssh":
+  zh-Hans: "运行 ssh"
+"ssh {target}: reply larger than {max} bytes":
+  zh-Hans: "ssh {target}：回复超过 {max} 字节"
+"host {host} has no ssh target":
+  zh-Hans: "主机 {host} 没有 ssh 目标"
+"bad reply from {host}: {reply}":
+  zh-Hans: "{host} 的回复无效：{reply}"
+"{target} is {there}, this machine is {here}: copying this axel binary won't run there":
+  zh-Hans: "{target} 是 {there}，本机是 {here}：复制过去的 axel 可执行文件无法在那里运行"
+"{target}: {there}, reachable":
+  zh-Hans: "{target}：{there}，可以连接"
+"installed axel {version} in ~/.local/bin":
+  zh-Hans: "已将 axel {version} 安装到 ~/.local/bin"
+"copied your skills ({path})":
+  zh-Hans: "已复制你的技能（{path}）"
+"unexpected reply to hello":
+  zh-Hans: "hello 收到了意外的回复"
+"{label}: host key {key} ({remote})":
+  zh-Hans: "{label}：主机密钥 {key}（{remote}）"
+"Rex host {label}: remote jobs will run in its `{session}` session":
+  zh-Hans: "Rex 主机 {label}：远程任务将在它的 `{session}` 会话中运行"
+"ready. If Claude Code has never run on {target}, log in once: rex -S {label} run -- claude":
+  zh-Hans: "已就绪。如果 Claude Code 从未在 {target} 上运行过，请先登录一次：rex -S {label} run -- claude"
+"missing on {target}: {missing}. Rerun with --install, or install them yourself.":
+  zh-Hans: "{target} 上缺少：{missing}。请加上 --install 重新运行，或自行安装。"
+"git is missing on {target}: install the Xcode command line tools there (xcode-select --install)":
+  zh-Hans: "{target} 上没有 git：请在那里安装 Xcode 命令行工具（xcode-select --install）"
+"{path} is outside your home":
+  zh-Hans: "{path} 不在你的主目录下"
+"no hosts; add one with `axel host add LABEL`":
+  zh-Hans: "没有主机；用 `axel host add LABEL` 添加一个"
+"1 live session":
+  zh-Hans: "1 个活跃会话"
+"{n} live sessions":
+  zh-Hans: "{n} 个活跃会话"
+"removed {label}; its delegations expire on their own":
+  zh-Hans: "已移除 {label}；它的委托会自行过期"
+"no host named {name}":
+  zh-Hans: "没有名为 {name} 的主机"
+"unexpected reply":
+  zh-Hans: "意外的回复"
+"no host to follow":
+  zh-Hans: "没有可跟随的主机"
+"{host}: sent {sent}, received {received} events and {items} item changes":
+  zh-Hans: "{host}：发送 {sent} 个事件，接收 {received} 个事件和 {items} 项条目变更"
+"not a remote session":
+  zh-Hans: "不是远程会话"
+"{name}'s key isn't on this machine, so it can't delegate":
+  zh-Hans: "{name} 的密钥不在本机，无法委托"
+"{name} has a machine-local Claude config directory and must run locally":
+  zh-Hans: "{name} 使用本机专属的 Claude 配置目录，只能在本机运行"
+"{path} isn't a git repository; remote agents need git to carry the code":
+  zh-Hans: "{path} 不是 git 仓库；远程智能体需要用 git 传递代码"
+"that session has ended; start a new one with `axel thread spawn` or `axel thread resume`":
+  zh-Hans: "该会话已结束；请用 `axel thread spawn` 或 `axel thread resume` 开始一个新会话"
+"only Claude sessions can move: Axel carries their conversation file":
+  zh-Hans: "只有 Claude 会话可以迁移：Axel 会带上它们的对话文件"
+"this session hasn't started its conversation yet; there's nothing to carry":
+  zh-Hans: "此会话尚未开始对话，没有可带走的内容"
+"{name} already runs here":
+  zh-Hans: "{name} 已在本机运行"
+"{name} already runs on {host}":
+  zh-Hans: "{name} 已在 {host} 上运行"
+"{name} runs on {from}; bring it here first (`--to local`), then send it to {to}":
+  zh-Hans: "{name} 在 {from} 上运行；请先把它迁回本机（`--to local`），再迁到 {to}"
+"{host} has no conversation file for this session":
+  zh-Hans: "{host} 上没有此会话的对话文件"
+"{name} can't run as a managed session here (is its ACP adapter installed?)":
+  zh-Hans: "{name} 无法在此以托管会话运行（是否安装了它的 ACP 适配器？）"
+"can't find Claude's conversation file {file}":
+  zh-Hans: "找不到 Claude 的对话文件 {file}"
+"this thread has no directory on this machine to work in":
+  zh-Hans: "此话题在本机没有可工作的目录"
+"branch {branch} didn't come back from {host}":
+  zh-Hans: "分支 {branch} 没有从 {host} 传回"
+"{path} has local changes that conflict with the work coming back":
+  zh-Hans: "{path} 有本地修改，与传回的工作冲突"
+"reading attachment {path}":
+  zh-Hans: "读取附件 {path}"
+"attachments for a remote agent are limited to {n} MB":
+  zh-Hans: "发给远程智能体的附件上限为 {n} MB"
+"pushing the code to {host}: {error}":
+  zh-Hans: "将代码推送到 {host}：{error}"
 
 # --- acp ---

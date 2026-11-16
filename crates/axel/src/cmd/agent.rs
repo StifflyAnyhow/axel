@@ -1,11 +1,13 @@
 //! `axel agent …`
 
 use anyhow::{Context, Result, bail};
+use axel_i18n::t;
 use axel_identity::{Keypair, attest};
 use axel_store::{Agent, AgentColor, AgentPolicy, Effort, Harness, NewAgent, Reach, RuntimeMode, SpendLimit};
 
 use super::{Ctx, claude_profile::ClaudeProfile};
 use super::policy::reach_label;
+use super::text::{pad, pad_left};
 use crate::cli::{AgentColorArg, AgentCommand, EffortArg, PolicyArgs, ReachArg, RuntimeModeArg};
 
 pub fn run(cmd: AgentCommand) -> Result<()> {
@@ -20,9 +22,9 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
         AgentCommand::Ls { json } => list(&ctx, json),
         AgentCommand::Show { name } => show(&ctx, &name),
         AgentCommand::Archive { name } => {
-            let a = ctx.store.agent_by_name(&name)?.with_context(|| format!("no agent named {name:?}"))?;
+            let a = ctx.store.agent_by_name(&name)?.with_context(|| t!("no agent named {name}", name = format!("{name:?}")))?;
             ctx.store.archive_agent(&a.pubkey)?;
-            println!("archived {}", a.name);
+            println!("{}", t!("archived {name}", name = a.name));
             Ok(())
         }
     }
@@ -73,7 +75,7 @@ fn new_agent(ctx: &Ctx, args: NewArgs) -> Result<()> {
     let (harness, model) = harness_and_model(runs.as_deref().or(harness.as_deref()), model)?;
     let profile = claude_config_dir.as_deref().map(|dir| ClaudeProfile::parse(dir, &harness)).transpose()?;
     if profile.is_some() && host_id.is_some() {
-        bail!("agents with a Claude config directory run locally");
+        bail!("{}", t!("agents with a Claude config directory run locally"));
     }
     let agent = create(ctx, &name, harness, model, parse_skills(&skills), prompt, color.map(AgentColor::from), runtime_mode.into())?;
     ctx.store.set_agent_policy(&agent.pubkey, &p)?;
@@ -97,7 +99,7 @@ fn edit_agent(ctx: &Ctx, args: EditArgs) -> Result<()> {
     if super::policy::caller_agent().is_some() {
         bail!("agents can't edit agents; ask the owner to run this");
     }
-    let a = ctx.store.agent_by_name(&name)?.with_context(|| format!("no agent named {name:?}"))?;
+    let a = ctx.store.agent_by_name(&name)?.with_context(|| t!("no agent named {name}", name = format!("{name:?}")))?;
     let harness_change = runs.as_deref().map(|spec| harness_and_model(Some(spec), model.clone())).transpose()?;
     let harness = harness_change.as_ref().map_or(&a.harness, |(harness, _)| harness);
     let new_profile = claude_config_dir.as_deref().map(|dir| ClaudeProfile::parse(dir, harness)).transpose()?;
@@ -105,13 +107,13 @@ fn edit_agent(ctx: &Ctx, args: EditArgs) -> Result<()> {
     let selected_profile = new_profile.as_ref().or(current_profile.as_ref()).filter(|_| !inherit_claude_config);
     let host_id = host.as_deref().map(|h| host_choice(ctx, h)).transpose()?;
     if selected_profile.is_some() && *harness != Harness::Claude {
-        bail!("use --inherit-claude-config when switching to a different harness");
+        bail!("{}", t!("use --inherit-claude-config when switching to a different harness"));
     }
     if selected_profile.is_some() && match &host_id {
         Some(host) => host.is_some(),
         None => ctx.store.agent_host(&a.pubkey)?.is_some(),
     } {
-        bail!("agents with a Claude config directory run locally");
+        bail!("{}", t!("agents with a Claude config directory run locally"));
     }
     let mut p = ctx.store.agent_policy(&a.pubkey)?;
     apply_policy(ctx, &a.name, &mut p, &policy)?;
@@ -142,8 +144,8 @@ fn edit_agent(ctx: &Ctx, args: EditArgs) -> Result<()> {
     } else if inherit_claude_config {
         ClaudeProfile::clear(&a.pubkey)?;
     }
-    let a = ctx.store.agent_by_pubkey(&a.pubkey)?.context("agent vanished")?;
-    println!("{}  {}  mode {}", a.name, runs_label(&a.harness, a.model.as_deref()), a.runtime_mode);
+    let a = ctx.store.agent_by_pubkey(&a.pubkey)?.context(t!("the agent vanished"))?;
+    println!("{}", t!("{name}  {runs}  mode {mode}", name = a.name, runs = runs_label(&a.harness, a.model.as_deref()), mode = a.runtime_mode));
     print_policy(ctx, &p);
     print_effort(&a.harness, a.effort);
     print_host(ctx, &a.pubkey)?;
@@ -157,10 +159,10 @@ fn rename(ctx: &Ctx, agent: &Agent, new_name: &str) -> Result<()> {
         return Ok(());
     }
     if ctx.store.agent_by_name(new_name)?.is_some() {
-        bail!("an agent named {new_name} already exists");
+        bail!("{}", t!("an agent named {name} already exists", name = new_name));
     }
     ctx.store.rename_agent(&agent.pubkey, new_name)?;
-    println!("{} is now {new_name}; sessions already running keep calling it {} until they restart", agent.name, agent.name);
+    println!("{}", t!("{old} is now {new}; sessions already running keep calling it {old} until they restart", old = agent.name, new = new_name));
     Ok(())
 }
 
@@ -175,16 +177,17 @@ fn list(ctx: &Ctx, json: bool) -> Result<()> {
         let unread = ctx.store.unread_count(&a.pubkey).unwrap_or(0);
         let p = ctx.store.agent_policy(&a.pubkey)?;
         let host = ctx.store.agent_host(&a.pubkey)?.map(|h| format!("@{}", h.label)).unwrap_or_default();
+        // Padded by terminal columns: names and the translated cells may be Chinese.
+        let unread = t!("{n} unread", n = pad_left(&unread.to_string(), 3));
+        let reach = t!("reach {who}", who = pad(&reach_label(ctx, &p.reach), 18));
         println!(
-            "{:<16} {:<6} {:<9} {:<10} {:<6} {:<10} {:>3} unread  reach {:<18} {}",
-            a.name,
-            host,
-            a.harness,
-            a.model.as_deref().unwrap_or("-"),
-            a.effort.map_or("-", Effort::as_str),
-            a.runtime_mode,
-            unread,
-            reach_label(ctx, &p.reach),
+            "{} {} {} {} {} {} {unread}  {reach} {}",
+            pad(&a.name, 16),
+            pad(&host, 6),
+            pad(&a.harness.to_string(), 9),
+            pad(a.model.as_deref().unwrap_or("-"), 10),
+            pad(a.effort.map_or("-", Effort::as_str), 6),
+            pad(&a.runtime_mode.to_string(), 10),
             a.pubkey
         );
     }
@@ -192,23 +195,24 @@ fn list(ctx: &Ctx, json: bool) -> Result<()> {
 }
 
 fn show(ctx: &Ctx, name: &str) -> Result<()> {
-    let a = ctx.store.agent_by_name(name)?.with_context(|| format!("no agent named {name:?}"))?;
+    let a = ctx.store.agent_by_name(name)?.with_context(|| t!("no agent named {name}", name = format!("{name:?}")))?;
     println!("{}", serde_json::to_string_pretty(&a)?);
     if let Some(profile) = ClaudeProfile::load(&a.pubkey)? {
-        println!("Claude config directory: {}", profile.label());
+        println!("{}", t!("Claude config directory: {dir}", dir = profile.label()));
     }
     let has_key = ctx.keystore.agent(&a.pubkey.parse()?)?.is_some();
-    println!("key in keystore: {}", if has_key { "yes" } else { "MISSING" });
+    println!("{}", if has_key { t!("key in keystore: yes") } else { t!("key in keystore: MISSING") });
     let p = ctx.store.agent_policy(&a.pubkey)?;
     print_policy(ctx, &p);
     print_effort(&a.harness, a.effort);
     print_host(ctx, &a.pubkey)?;
     let spent = ctx.store.agent_spend_since(&a.pubkey, axel_store::local_day_start())?;
-    println!("spent today: ${spent:.2} (estimated; managed sessions don't report usage yet)");
+    println!("{}", t!("spent today: ${spent} (estimated; managed sessions don't report usage yet)", spent = format!("{spent:.2}")));
     if let Some(tag) = &a.auth_tag {
         let tag = axel_identity::AuthTag::from_tag(tag)?;
         let ok = axel_identity::verify_attestation(&tag, &a.pubkey.parse()?).is_ok();
-        println!("owner attestation: {} (owner {})", if ok { "valid" } else { "INVALID" }, tag.owner);
+        let line = if ok { t!("owner attestation: valid (owner {owner})", owner = tag.owner) } else { t!("owner attestation: INVALID (owner {owner})", owner = tag.owner) };
+        println!("{line}");
     }
     Ok(())
 }
@@ -218,7 +222,7 @@ fn show(ctx: &Ctx, name: &str) -> Result<()> {
 fn valid_name(name: &str) -> Result<&str> {
     let name = name.trim();
     if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-        bail!("agent names are [A-Za-z0-9_-]+ so they work as @mentions");
+        bail!("{}", t!("agent names are letters, digits, - and _ so they work as @mentions"));
     }
     Ok(name)
 }
@@ -237,12 +241,12 @@ pub fn create(
 ) -> Result<Agent> {
     let name = valid_name(name)?;
     if ctx.store.agent_by_name(name)?.is_some() {
-        bail!("an agent named {name} already exists");
+        bail!("{}", t!("an agent named {name} already exists", name = name));
     }
     let kp = Keypair::generate();
-    ctx.keystore.put_agent(&kp).context("storing agent key")?;
+    ctx.keystore.put_agent(&kp).context(t!("storing the agent key"))?;
     let owner = ctx.owner()?;
-    let tag = attest(&owner, &kp.public(), "").context("attesting agent")?;
+    let tag = attest(&owner, &kp.public(), "").context(t!("attesting the agent"))?;
     let agent = ctx.store.insert_agent(&NewAgent {
         pubkey: kp.public().to_string(),
         name: name.to_string(),
@@ -263,11 +267,11 @@ pub fn create(
 fn harness_and_model(spec: Option<&str>, flag: Option<String>) -> Result<(Harness, Option<String>)> {
     let (harness, from_spec) = spec.map(axel_store::parse_harness_model).unwrap_or_default();
     let model = match (from_spec, flag) {
-        (Some(a), Some(b)) if a != b => bail!("two models: {a} (from {}) and --model {b}", spec.unwrap_or_default()),
+        (Some(a), Some(b)) if a != b => bail!("{}", t!("two models: {a} (from {spec}) and --model {b}", a = a, spec = spec.unwrap_or_default(), b = b)),
         (a, b) => a.or(b),
     };
     if !harness.is_builtin() && harness.program().is_empty() {
-        bail!("no harness named");
+        bail!("{}", t!("no harness named"));
     }
     Ok((harness, model))
 }
@@ -296,9 +300,9 @@ fn apply_policy(ctx: &Ctx, me: &str, p: &mut AgentPolicy, args: &PolicyArgs) -> 
     let resolve = |n: &str| -> Result<String> {
         let n = n.trim().trim_start_matches('@');
         if n.eq_ignore_ascii_case(me) {
-            bail!("{me} always reaches itself; --allow/--disallow take other agents");
+            bail!("{}", t!("{me} always reaches itself; --allow/--disallow take other agents", me = me));
         }
-        Ok(ctx.store.agent_by_name(n)?.with_context(|| format!("no agent named {n:?}"))?.pubkey)
+        Ok(ctx.store.agent_by_name(n)?.with_context(|| t!("no agent named {name}", name = format!("{n:?}")))?.pubkey)
     };
     for n in args.allow.iter().filter(|n| !n.trim().is_empty()) {
         let pk = resolve(n)?;
@@ -307,16 +311,16 @@ fn apply_policy(ctx: &Ctx, me: &str, p: &mut AgentPolicy, args: &PolicyArgs) -> 
     for n in args.disallow.iter().filter(|n| !n.trim().is_empty()) {
         let pk = resolve(n)?;
         if !p.reach.disallow(&pk) {
-            bail!("{me} can reach any agent; use --reach nobody --allow … to list who it may reach");
+            bail!("{}", t!("{me} can reach any agent; use --reach nobody --allow … to list who it may reach", me = me));
         }
     }
     if let Some(v) = &args.daily_usd {
         p.budget.spend = match v.trim().to_ascii_lowercase().as_str() {
             "unlimited" | "none" | "off" => SpendLimit::Unlimited,
             n => {
-                let usd: f64 = n.trim_start_matches('$').parse().with_context(|| format!("--daily-usd takes a number or `unlimited`, not {v}"))?;
+                let usd: f64 = n.trim_start_matches('$').parse().with_context(|| t!("--daily-usd takes a number or `unlimited`, not {value}", value = v))?;
                 if !(usd.is_finite() && usd >= 0.0) {
-                    bail!("--daily-usd must be zero or more");
+                    bail!("{}", t!("--daily-usd must be zero or more"));
                 }
                 SpendLimit::DailyUsd(usd)
             }
@@ -333,34 +337,34 @@ fn host_choice(ctx: &Ctx, label: &str) -> Result<Option<String>> {
     if super::host::is_here(ctx, label)? {
         return Ok(None);
     }
-    let h = ctx.store.host(label)?.with_context(|| format!("no host named {label:?}; add it with `axel host add {label}`"))?;
+    let h = ctx.store.host(label)?.with_context(|| t!("no host named {quoted}; add it with `axel host add {label}`", quoted = format!("{label:?}"), label = label))?;
     Ok(Some(h.id))
 }
 
 fn print_host(ctx: &Ctx, agent: &str) -> Result<()> {
     match ctx.store.agent_host(agent)? {
-        Some(h) => println!("  runs on {} (`@name@local` or `--host local` runs it here)", h.label),
-        None => println!("  runs here"),
+        Some(h) => println!("  {}", t!("runs on {host} (`@name@local` or `--host local` runs it here)", host = h.label)),
+        None => println!("  {}", t!("runs here")),
     }
     Ok(())
 }
 
 fn print_policy(ctx: &Ctx, p: &AgentPolicy) {
     let spend = match p.budget.spend {
-        SpendLimit::Unlimited => "unlimited".to_string(),
-        SpendLimit::DailyUsd(usd) => format!("${usd:.2}/day"),
+        SpendLimit::Unlimited => t!("unlimited").to_string(),
+        SpendLimit::DailyUsd(usd) => t!("${usd}/day", usd = format!("{usd:.2}")),
     };
-    println!("  reach   {}", reach_label(ctx, &p.reach));
-    println!("  budget  {spend} · summon depth ≤ {}", p.budget.max_depth);
+    println!("  {}", t!("reach   {who}", who = reach_label(ctx, &p.reach)));
+    println!("  {}", t!("budget  {spend} · summon depth ≤ {depth}", spend = spend, depth = p.budget.max_depth));
 }
 
 /// The effort when the agent has one, and a warning where its harness
 /// cannot be started at it.
 fn print_effort(harness: &Harness, effort: Option<Effort>) {
     if let Some(effort) = effort {
-        println!("  effort  {effort}");
+        println!("  {}", t!("effort  {effort}", effort = effort));
         if let Some(warning) = super::effort::warning(harness, effort) {
-            println!("  warning: {warning}");
+            println!("  {}", t!("warning: {warning}", warning = warning));
         }
     }
 }

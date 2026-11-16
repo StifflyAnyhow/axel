@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use axel_i18n::t;
 use axel_store::{SessionFilter, SessionState, StatusState, ThreadState};
 use axel_tui::ThreadOp;
 use axel_tui::manage::{ManageData, Outcome, SessionRow, run_manage};
@@ -44,41 +45,41 @@ fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> 
         Outcome::Move { agent, host } => move_agent(ctx, thread_id, agent, host)?,
         Outcome::Settle => {
             super::thread::set_state(ctx, thread_id, ThreadOp::Settle)?;
-            "settled".into()
+            t!("settled").into()
         }
         Outcome::Reopen => {
             super::thread::set_state(ctx, thread_id, ThreadOp::Reopen)?;
-            "reopened".into()
+            t!("reopened").into()
         }
         Outcome::Archive => {
             super::thread::set_state(ctx, thread_id, ThreadOp::Archive)?;
-            "archived".into()
+            t!("archived").into()
         }
         Outcome::PauseAgent { agent } => {
             let n = pause_agent(ctx, thread_id, agent, true)?;
-            format!("paused {agent}: {n} session(s)")
+            t!("paused {agent}: {n} session(s)", agent = agent, n = n)
         }
         Outcome::ResumeAgent { agent } => {
             let n = pause_agent(ctx, thread_id, agent, false)?;
-            format!("resumed {agent}: {n} session(s)")
+            t!("resumed {agent}: {n} session(s)", agent = agent, n = n)
         }
         Outcome::RemoveAgent { agent } => {
-            let a = ctx.store.agent_by_name(agent)?.with_context(|| format!("no agent named {agent:?}"))?;
+            let a = ctx.store.agent_by_name(agent)?.with_context(|| t!("no agent named {name}", name = format!("{agent:?}")))?;
             super::thread::stop_agent(ctx, thread_id, agent)?;
             ctx.store.remove_participant(&ctx.owner()?, thread_id, &a.pubkey)?;
-            format!("removed {agent} from this thread; history kept")
+            t!("removed {agent} from this thread; history kept", agent = agent)
         }
         Outcome::StopAgent { agent } => {
             let n = super::thread::stop_agent(ctx, thread_id, agent)?;
-            format!("stopped {agent}: {n} session{}", plural(n))
+            if n == 1 { t!("stopped {agent}: 1 session", agent = agent) } else { t!("stopped {agent}: {n} sessions", agent = agent, n = n) }
         }
         Outcome::Stop => {
             let n = super::thread::stop_thread(ctx, thread_id)?;
-            format!("stopped {n} session{}", plural(n))
+            if n == 1 { t!("stopped 1 session").to_string() } else { t!("stopped {n} sessions", n = n) }
         }
         Outcome::Rename(title) => {
             ctx.store.update_thread(&ctx.owner()?, thread_id, Some(title), None)?;
-            format!("renamed to {title}")
+            t!("renamed to {title}", title = title)
         }
         Outcome::HardReset => {
             // Ended as a hard reset: the next summon of these agents starts a
@@ -87,14 +88,13 @@ fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> 
             if super::ui::relaunch_thread_panes(ctx, thread_id)? {
                 return Ok(None);
             }
-            format!("hard reset: {stopped} session{} ended; the next message starts from scratch", plural(stopped))
+            if stopped == 1 {
+                t!("hard reset: 1 session ended; the next message starts from scratch").to_string()
+            } else {
+                t!("hard reset: {n} sessions ended; the next message starts from scratch", n = stopped)
+            }
         }
     }))
-}
-
-/// `s` for a count other than one.
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
 }
 
 /// Characters of a session id the footer shows.
@@ -114,13 +114,18 @@ fn reset(ctx: &Ctx, thread_id: &str, agent: &str) -> Result<Option<String>> {
     if super::ui::relaunch_thread_panes(ctx, thread_id)? {
         return Ok(None);
     }
-    Ok(Some(format!("reset: {stopped} session{} ended, {agent} starts fresh ({})", plural(stopped), short_session(&session))))
+    let session = short_session(&session);
+    Ok(Some(if stopped == 1 {
+        t!("reset: 1 session ended, {agent} starts fresh ({session})", agent = agent, session = session)
+    } else {
+        t!("reset: {n} sessions ended, {agent} starts fresh ({session})", n = stopped, agent = agent, session = session)
+    }))
 }
 
 /// Run `agent` on `host` from here on.  A live Claude session travels with
 /// its conversation; anything else starts over there with a recap.
 fn move_agent(ctx: &Ctx, thread_id: &str, agent: &str, host: &str) -> Result<String> {
-    let a = ctx.store.agent_by_name(agent)?.with_context(|| format!("no agent named {agent:?}"))?;
+    let a = ctx.store.agent_by_name(agent)?.with_context(|| t!("no agent named {name}", name = format!("{agent:?}")))?;
     let live = ctx
         .store
         .list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), agent_pubkey: Some(a.pubkey.clone()), ..Default::default() })?
@@ -129,19 +134,19 @@ fn move_agent(ctx: &Ctx, thread_id: &str, agent: &str, host: &str) -> Result<Str
     Ok(match live {
         Some(s) if s.harness == axel_store::Harness::Claude && super::host::host_of(ctx, &s)?.is_none() => {
             let (new_session, _) = super::host::move_session(ctx, &s.id, host)?;
-            format!("moved {agent} to {host} with its conversation ({})", short_session(&new_session))
+            t!("moved {agent} to {host} with its conversation ({session})", agent = agent, host = host, session = short_session(&new_session))
         }
         _ => {
             let text = recap(ctx, thread_id)?;
             super::thread::stop_thread(ctx, thread_id)?;
             let session = super::host::launch_remote(ctx, host, thread_id, agent, &text, &[])?;
-            format!("{agent} starts on {host} with a recap ({})", short_session(&session))
+            t!("{agent} starts on {host} with a recap ({session})", agent = agent, host = host, session = short_session(&session))
         }
     })
 }
 
 fn pause_agent(ctx: &Ctx, thread_id: &str, name: &str, paused: bool) -> Result<usize> {
-    let agent = ctx.store.agent_by_name(name)?.with_context(|| format!("no agent named {name:?}"))?;
+    let agent = ctx.store.agent_by_name(name)?.with_context(|| t!("no agent named {name}", name = format!("{name:?}")))?;
     let sessions = ctx.store.list_sessions(SessionFilter { thread_id: Some(thread_id.into()), agent_pubkey: Some(agent.pubkey), ..Default::default() })?;
     let mut changed = 0;
     for session in sessions.iter().filter(|s| s.ended_at.is_none() && (s.state == SessionState::Paused) != paused) {
@@ -197,7 +202,7 @@ const SPARK_MINUTES: usize = 60;
 /// What the pane shows, from the store.
 fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> {
     let now = chrono::Utc::now().timestamp();
-    let summary = ctx.store.thread_summary(thread_id)?.context("no such thread")?;
+    let summary = ctx.store.thread_summary(thread_id)?.context(t!("no such thread"))?;
     let t = &summary.thread;
     let agents: HashMap<String, axel_store::Agent> = ctx.store.list_agents()?.into_iter().map(|a| (a.pubkey.clone(), a)).collect();
     let roster = ctx.store.thread_agents(thread_id)?;

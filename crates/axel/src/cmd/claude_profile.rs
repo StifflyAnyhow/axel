@@ -2,6 +2,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use axel_i18n::t;
 use axel_store::Harness;
 
 const CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
@@ -24,20 +25,20 @@ pub enum ClaudeProfile {
 impl ClaudeProfile {
     pub fn parse(value: &str, harness: &Harness) -> Result<Self> {
         if *harness != Harness::Claude {
-            bail!("--claude-config-dir requires the Claude harness");
+            bail!("{}", t!("--claude-config-dir requires the Claude harness"));
         }
         if value == "default" {
             return Ok(Self::Default);
         }
         let path = Path::new(value);
         if !path.is_absolute() || !path.is_dir() {
-            bail!("use an existing absolute Claude config directory or 'default'");
+            bail!("{}", t!("use an existing absolute Claude config directory or `default`"));
         }
         Ok(Self::Directory(path.to_path_buf()))
     }
 
     fn path(agent: &str) -> Result<PathBuf> {
-        let key: axel_identity::PublicKey = agent.parse().context("invalid agent public key")?;
+        let key: axel_identity::PublicKey = agent.parse().context(t!("invalid agent public key"))?;
         Ok(crate::paths::home()
             .join("claude-profiles")
             .join(key.to_string()))
@@ -49,16 +50,16 @@ impl ClaudeProfile {
         };
         match std::fs::read(&path) {
             Ok(bytes) => Ok(Some(
-                serde_json::from_slice(&bytes).context("reading the agent's Claude profile")?,
+                serde_json::from_slice(&bytes).context(t!("reading the agent's Claude profile"))?,
             )),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).context("reading the agent's Claude profile"),
+            Err(e) => Err(e).context(t!("reading the agent's Claude profile")),
         }
     }
 
     pub fn save(&self, agent: &str) -> Result<()> {
         let path = Self::path(agent)?;
-        let dir = path.parent().context("missing Claude profile directory")?;
+        let dir = path.parent().context(t!("missing Claude profile directory"))?;
         std::fs::create_dir_all(dir)?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         serde_json::to_writer(tmp.as_file_mut(), self)?;
@@ -70,7 +71,7 @@ impl ClaudeProfile {
         match std::fs::remove_file(Self::path(agent)?) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).context("removing the agent's Claude profile"),
+            Err(e) => Err(e).context(t!("removing the agent's Claude profile")),
         }
     }
 
@@ -88,7 +89,7 @@ impl ClaudeProfile {
                 Ok(path.join(".claude.json"))
             }
             Self::Directory(path) => {
-                bail!("Claude config directory is unavailable: {}", path.display())
+                bail!("{}", t!("Claude config directory is unavailable: {path}", path = path.display()))
             }
         }
     }
@@ -123,7 +124,7 @@ impl ClaudeProfile {
         if let Self::Directory(path) = self {
             let value = path
                 .to_str()
-                .context("Claude config directory must be UTF-8")?;
+                .context(t!("Claude config directory must be UTF-8"))?;
             prefix.push(format!("{CONFIG_DIR}={value}"));
         }
         prefix.push(std::mem::replace(program, "/usr/bin/env".into()));

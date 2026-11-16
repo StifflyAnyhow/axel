@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use axel_i18n::t;
 use axel_store::{ChangeStatus, FileChange, Turn, TurnChanges};
 use axel_tui::diff::{DiffData, Draft, FileEntry, Outcome, parse_patch, run_diff};
 
@@ -32,7 +33,7 @@ pub fn pick(ctx: &Ctx, thread_id: &str, session: Option<&str>, turn: Option<i64>
     if let Some(s) = session {
         turns.retain(|t| t.session_id.starts_with(s));
         if turns.is_empty() {
-            bail!("no session {s}… on this thread");
+            bail!("{}", t!("no session {prefix}… on this thread", prefix = s));
         }
     }
     if let Some(n) = turn {
@@ -40,16 +41,16 @@ pub fn pick(ctx: &Ctx, thread_id: &str, session: Option<&str>, turn: Option<i64>
     }
     // Newest last; with a turn asked for, the newest session that has it.
     let chosen = match turn {
-        Some(n) => turns.pop().with_context(|| format!("no turn {n} on this thread"))?,
+        Some(n) => turns.pop().with_context(|| t!("no turn {n} on this thread", n = n))?,
         None => turns
             .into_iter()
             .rev()
             .find(|t| t.summary.changes.as_ref().is_some_and(|c| !c.files.is_empty()))
-            .context("no turn on this thread changed a file (or none left checkpoints)")?,
+            .context(t!("no turn on this thread changed a file (or none left checkpoints)"))?,
     };
-    let agent = agent_name(ctx, &chosen.session_id).unwrap_or_else(|| "agent".into());
+    let agent = agent_name(ctx, &chosen.session_id).unwrap_or_else(|| t!("agent").into());
     let Some(changes) = chosen.summary.changes.clone() else {
-        bail!("turn {} of {agent} left no checkpoints (not a git workspace, or an older build)", chosen.summary.ordinal);
+        bail!("{}", t!("turn {n} of {agent} left no checkpoints (not a git workspace, or an older build)", n = chosen.summary.ordinal, agent = agent));
     };
     Ok(Pick { turn: chosen, changes, agent })
 }
@@ -62,34 +63,39 @@ fn agent_name(ctx: &Ctx, session_id: &str) -> Option<String> {
 /// `3 files +42 −7`.
 pub fn headline(c: &TurnChanges) -> String {
     let (a, r) = c.totals();
-    format!("{} file{} +{a} −{r}", c.files.len(), if c.files.len() == 1 { "" } else { "s" })
+    if c.files.len() == 1 {
+        t!("1 file +{added} −{removed}", added = a, removed = r)
+    } else {
+        t!("{n} files +{added} −{removed}", n = c.files.len(), added = a, removed = r)
+    }
 }
 
 /// The file list: the agent's own files, then (when there are others) the
 /// rest under their own heading.  Plain text, one file per line.
 pub fn stat(c: &TurnChanges) -> String {
-    let width = c.files.iter().map(|f| label(f).chars().count()).max().unwrap_or(0).min(80);
+    // Terminal columns, not chars: a path may be Chinese.
+    let width = c.files.iter().map(|f| unicode_width::UnicodeWidthStr::width(label(f).as_str())).max().unwrap_or(0).min(80);
     let line = |f: &FileChange| {
         let counts = match (f.added, f.removed) {
             (Some(a), Some(r)) => format!("+{a} −{r}"),
-            _ => "binary".to_string(),
+            _ => t!("binary").to_string(),
         };
-        format!("{} {:<width$}  {counts}\n", f.status.letter(), label(f))
+        format!("{} {}  {counts}\n", f.status.letter(), super::text::pad(&label(f), width))
     };
     let split = c.files.iter().any(|f| f.authored) && c.files.iter().any(|f| !f.authored);
     let mut out = String::new();
     if split {
         c.files.iter().filter(|f| f.authored).for_each(|f| out.push_str(&line(f)));
-        out.push_str("── also changed during this turn ──\n");
+        out.push_str(&format!("── {} ──\n", t!("also changed during this turn")));
         c.files.iter().filter(|f| !f.authored).for_each(|f| out.push_str(&line(f)));
     } else {
         c.files.iter().for_each(|f| out.push_str(&line(f)));
     }
     if c.truncated {
-        out.push_str(&format!("… and more: only the first {} files are listed\n", TurnChanges::MAX_FILES));
+        out.push_str(&format!("{}\n", t!("… and more: only the first {n} files are listed", n = TurnChanges::MAX_FILES)));
     }
     if c.between_turns {
-        out.push_str("(includes changes made between this turn and the previous one)\n");
+        out.push_str(&format!("{}\n", t!("(includes changes made between this turn and the previous one)")));
     }
     out
 }
@@ -119,19 +125,21 @@ fn has_checkpoints(dir: &Path, c: &TurnChanges) -> bool {
 /// workspace here, after fetching them from the host that ran the turn when
 /// they aren't here yet.  `Err` says where they are.
 fn repo_with_checkpoints(ctx: &Ctx, thread_id: &str, turn: &Turn, c: &TurnChanges) -> Result<PathBuf> {
-    let dir = super::links::thread_dir(ctx, thread_id).context("this machine has no checkout of the thread's project")?;
+    let dir = super::links::thread_dir(ctx, thread_id).context(t!("this machine has no checkout of the thread's project"))?;
     if has_checkpoints(&dir, c) {
         return Ok(dir);
     }
     let session = ctx.store.get_session(&turn.session_id)?;
     if let Some(host) = session.as_ref().and_then(|s| super::host::host_of(ctx, s).ok().flatten()) {
-        super::host::fetch_checkpoints(&host, &dir, thread_id).with_context(|| format!("fetching the checkpoints from {}", host.label))?;
+        super::host::fetch_checkpoints(&host, &dir, thread_id).with_context(|| t!("fetching the checkpoints from {host}", host = host.label))?;
         if has_checkpoints(&dir, c) {
             return Ok(dir);
         }
     }
-    let label = session.map(|s| s.environment_label).unwrap_or_else(|| "another machine".into());
-    bail!("the diff lives on {label}: this machine's checkout has no checkpoints for this turn")
+    match session {
+        Some(s) => bail!("{}", t!("the diff lives on {host}: this machine's checkout has no checkpoints for this turn", host = s.environment_label)),
+        None => bail!("{}", t!("the diff lives on another machine: this machine's checkout has no checkpoints for this turn")),
+    }
 }
 
 /// `git diff before after` in `dir`, coloured when `color`.
@@ -158,7 +166,7 @@ pub fn run(thread: &str, session: Option<&str>, turn: Option<i64>, stat_only: bo
         return res;
     }
     let p = pick(&ctx, &t.id, session, turn)?;
-    println!("{} · turn {} · {}", p.agent, p.turn.summary.ordinal, headline(&p.changes));
+    println!("{}", t!("{agent} · turn {n} · {headline}", agent = p.agent, n = p.turn.summary.ordinal, headline = headline(&p.changes)));
     print!("{}", stat(&p.changes));
     if stat_only || p.changes.files.is_empty() {
         return Ok(());
@@ -234,9 +242,9 @@ fn run_pane(ctx: &Ctx, t: &axel_store::Thread, session: Option<&str>, turn: Opti
                 note = Some(match deliver(ctx, &t.id, &session_id, &text) {
                     Ok(how) => {
                         save_drafts(&session_id, ordinal, &[])?;
-                        format!("review sent to {} ({how})", p.agent)
+                        t!("review sent to {agent} ({how})", agent = p.agent, how = how)
                     }
-                    Err(e) => format!("not sent: {e:#}"),
+                    Err(e) => t!("not sent: {error}", error = format!("{e:#}")),
                 });
             }
             Outcome::Undo => {
@@ -248,9 +256,9 @@ fn run_pane(ctx: &Ctx, t: &axel_store::Thread, session: Option<&str>, turn: Opti
                 let dir = dir?;
                 let done = undo::restore(&dir, &t.id, &p.changes)?;
                 if let Err(e) = undo::notify(ctx, &t.id, &session_id, ordinal, &done.files, true) {
-                    eprintln!("axel: telling the agent: {e:#}");
+                    eprintln!("axel: {}", t!("telling the agent: {error}", error = format!("{e:#}")));
                 }
-                note = Some(format!("restored: {} as before turn {ordinal} (snapshot {})", files_phrase(&done.files), short_ref(&done.snapshot_ref)));
+                note = Some(t!("restored: {files} as before turn {n} (snapshot {snapshot})", files = files_phrase(&done.files), n = ordinal, snapshot = short_ref(&done.snapshot_ref)));
             }
         }
     }
@@ -290,7 +298,7 @@ fn diff_data(ctx: &Ctx, t: &axel_store::Thread, p: &Pick, dir: &Result<PathBuf>,
     if let Some(why) = blocked
         && data.note.is_none()
     {
-        data.note = Some(format!("no undo: {why}"));
+        data.note = Some(t!("no undo: {why}", why = why));
     }
     Ok(data)
 }
@@ -302,12 +310,12 @@ fn undo_turn(ctx: &Ctx, thread_id: &str, p: &Pick, dir: &Path) -> Result<(String
     Ok(match undo::undo(dir, thread_id, &p.changes)? {
         undo::UndoResult::Done(done) => {
             if let Err(e) = undo::notify(ctx, thread_id, &p.turn.session_id, ordinal, &done.files, false) {
-                eprintln!("axel: telling the agent: {e:#}");
+                eprintln!("axel: {}", t!("telling the agent: {error}", error = format!("{e:#}")));
             }
-            (format!("undone: {} back to before turn {ordinal} (snapshot {})", files_phrase(&done.files), short_ref(&done.snapshot_ref)), false)
+            (t!("undone: {files} back to before turn {n} (snapshot {snapshot})", files = files_phrase(&done.files), n = ordinal, snapshot = short_ref(&done.snapshot_ref)), false)
         }
         undo::UndoResult::Conflicts(files) => {
-            (format!("later work overlaps {}: nothing changed. R restores the turn's files to before it", files_phrase(&files)), true)
+            (t!("later work overlaps {files}: nothing changed. R restores the turn's files to before it", files = files_phrase(&files)), true)
         }
     })
 }
@@ -318,10 +326,10 @@ fn entry(f: &FileChange) -> FileEntry {
 
 fn files_phrase(files: &[String]) -> String {
     match files {
-        [] => "nothing".into(),
+        [] => t!("nothing").into(),
         [one] => one.clone(),
-        [a, b] => format!("{a} and {b}"),
-        [a, rest @ ..] => format!("{a} and {} more", rest.len()),
+        [a, b] => t!("{a} and {b}", a = a, b = b),
+        [a, rest @ ..] => t!("{a} and {n} more", a = a, n = rest.len()),
     }
 }
 
@@ -334,15 +342,15 @@ fn short_ref(name: &str) -> String {
 /// session, else by summoning it back onto the thread (it resumes its
 /// conversation).  Says how it went.
 fn deliver(ctx: &Ctx, thread_id: &str, session_id: &str, text: &str) -> Result<&'static str> {
-    let session = ctx.store.get_session(session_id)?.context("no such session")?;
+    let session = ctx.store.get_session(session_id)?.context(t!("no such session"))?;
     let live = session.ended_at.is_none() && session.runtime == axel_store::SessionRuntime::Managed;
     if live {
         let cmd = axel_tui::SendCommand::Prompt { text: text.to_string(), attachments: vec![], steer: false };
         match super::ui::send_to_session(ctx, session_id, cmd)? {
             axel_tui::SendReply::Error { message } => bail!("{message}"),
-            axel_tui::SendReply::Queued { .. } => return Ok("queued for its next turn"),
-            axel_tui::SendReply::Steering { .. } => return Ok("into the running turn"),
-            _ => return Ok("as a prompt"),
+            axel_tui::SendReply::Queued { .. } => return Ok(t!("queued for its next turn")),
+            axel_tui::SendReply::Steering { .. } => return Ok(t!("into the running turn")),
+            _ => return Ok(t!("as a prompt")),
         }
     }
     // SAFETY: single-threaded CLI; set before the send reads it.
@@ -351,7 +359,7 @@ fn deliver(ctx: &Ctx, thread_id: &str, session_id: &str, text: &str) -> Result<&
     if let Some(d) = report.deliveries.iter().find(|d| matches!(d.outcome, axel_mcp::Outcome::Failed { .. })) {
         bail!("{}", d.outcome.describe());
     }
-    Ok("summoned back onto the thread")
+    Ok(t!("summoned back onto the thread"))
 }
 
 // ---------------------------------------------------------------- drafts

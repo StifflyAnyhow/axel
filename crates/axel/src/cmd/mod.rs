@@ -21,6 +21,7 @@ mod setup;
 mod skills;
 mod links;
 mod status;
+mod text;
 mod thread;
 mod ui;
 mod undo;
@@ -29,6 +30,7 @@ mod update;
 mod mcp;
 
 use anyhow::{Context, Result};
+use axel_i18n::t;
 use axel_identity::Keystore;
 use axel_store::Store;
 
@@ -43,8 +45,8 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn open() -> Result<Ctx> {
-        let store = Store::open_default().context("opening ~/.axel/axel.db")?;
-        let keystore = Keystore::open().context("opening keystore")?;
+        let store = Store::open_default().context(t!("opening ~/.axel/axel.db"))?;
+        let keystore = Keystore::open().context(t!("opening the keystore"))?;
         let rex = axel_rex::detect().map(axel_rex::Rex::new);
         Ok(Ctx { store, keystore, rex })
     }
@@ -52,7 +54,7 @@ impl Ctx {
     /// Owner keypair, created on first use.  On a remote host this is also
     /// the host key that agents delegate to.
     pub fn owner(&self) -> Result<axel_identity::Keypair> {
-        self.keystore.owner().context("loading owner key")
+        self.keystore.owner().context(t!("loading the owner key"))
     }
 
     /// The key that signs for `agent` on `thread`: the agent's own key when
@@ -70,7 +72,7 @@ impl Ctx {
         {
             return Ok(kp);
         }
-        anyhow::bail!("no key for agent {agent} here, and no delegation from it for this thread")
+        anyhow::bail!("{}", t!("no key for agent {agent} here, and no delegation from it for this thread", agent = agent))
     }
 }
 
@@ -117,7 +119,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Mcp) => mcp::run(),
         Some(Command::Links { command: crate::cli::LinksCommand::Install }) => {
             let app = links::install()?;
-            println!("axel-links:// links open through {}", app.display());
+            println!("{}", t!("axel-links:// links open through {app}", app = app.display()));
             Ok(())
         }
         Some(Command::OpenUrl { url }) => links::open_url(&url),

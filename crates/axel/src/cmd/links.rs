@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use axel_i18n::t;
 use axel_tui::util::{CopyLink, DiffLink, RevealLink, ToolsLink};
 
 use crate::paths;
@@ -51,12 +52,12 @@ pub fn installed() -> bool {
 /// `axel links install`: build the handler app and register it for `axel-links://`.
 pub fn install() -> Result<PathBuf> {
     if !cfg!(target_os = "macos") {
-        bail!("`axel-links://` links need macOS");
+        bail!("{}", t!("`axel-links://` links need macOS"));
     }
-    let exe = std::env::current_exe().context("locating the axel binary")?;
+    let exe = std::env::current_exe().context(t!("locating the axel binary"))?;
     let app = app_path();
     if app.exists() {
-        std::fs::remove_dir_all(&app).with_context(|| format!("replacing {}", app.display()))?;
+        std::fs::remove_dir_all(&app).with_context(|| t!("replacing {path}", path = app.display()))?;
     }
     std::fs::create_dir_all(app.parent().expect("the app path is inside a directory"))?;
     std::fs::create_dir_all(log_path().parent().expect("log_path joins onto the logs directory"))?;
@@ -93,9 +94,9 @@ pub fn ensure_installed() {
 }
 
 fn run(cmd: &mut Command, what: &str) -> Result<()> {
-    let out = cmd.output().with_context(|| format!("running {what}"))?;
+    let out = cmd.output().with_context(|| t!("running {program}", program = what))?;
     if !out.status.success() {
-        bail!("{what} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!("{}", t!("{program} failed: {error}", program = what, error = String::from_utf8_lossy(&out.stderr).trim()));
     }
     Ok(())
 }
@@ -112,12 +113,12 @@ pub fn open_url(url: &str) -> Result<()> {
     if let Some(diff) = DiffLink::parse(url) {
         return open_diff(&diff);
     }
-    let link = ToolsLink::parse(url).with_context(|| format!("not an Axel link: {url}"))?;
+    let link = ToolsLink::parse(url).with_context(|| t!("not an Axel link: {url}", url = url))?;
     let rex = axel_rex::Rex::new(axel_rex::RexEnv { server: link.server.clone(), session: link.session.clone(), block: String::new() });
     let exe = std::env::current_exe()?.to_string_lossy().into_owned();
     let cmd = vec![exe, "thread".into(), "tools".into(), link.thread.clone(), link.fold.clone()];
-    let label = super::Ctx::open().ok().and_then(|ctx| pane_label(&ctx, &link)).unwrap_or_else(|| TOOLS_LABEL.to_string());
-    rex.new_floating_terminal_with_focus(&label, TOOLS_BOUNDS, &cmd, None, &[], true).context("opening the tool calls in Rex")?;
+    let label = super::Ctx::open().ok().and_then(|ctx| pane_label(&ctx, &link)).unwrap_or_else(|| t!("tool calls").to_string());
+    rex.new_floating_terminal_with_focus(&label, TOOLS_BOUNDS, &cmd, None, &[], true).context(t!("opening the tool calls in Rex"))?;
     Ok(())
 }
 
@@ -140,20 +141,20 @@ fn open_diff(link: &DiffLink) -> Result<()> {
     let label = super::Ctx::open()
         .ok()
         .and_then(|ctx| super::diff::pick(&ctx, &link.thread, Some(&link.session_id), Some(link.turn)).ok())
-        .map(|p| format!("{} · turn {} · {}", p.agent, p.turn.summary.ordinal, super::diff::headline(&p.changes)))
-        .unwrap_or_else(|| format!("turn {} changes", link.turn));
-    rex.new_floating_terminal_with_focus(&label, TOOLS_BOUNDS, &cmd, None, &[], true).context("opening the diff in Rex")?;
+        .map(|p| t!("{agent} · turn {n} · {headline}", agent = p.agent, n = p.turn.summary.ordinal, headline = super::diff::headline(&p.changes)))
+        .unwrap_or_else(|| t!("turn {n} changes", n = link.turn));
+    rex.new_floating_terminal_with_focus(&label, TOOLS_BOUNDS, &cmd, None, &[], true).context(t!("opening the diff in Rex"))?;
     Ok(())
 }
 
 /// Show an attached file selected in Finder.
 fn reveal_file(path: &Path) -> Result<()> {
     if !path.exists() {
-        bail!("{} is gone", path.display());
+        bail!("{}", t!("{path} is gone", path = path.display()));
     }
     // By its path: the handler app runs with a minimal PATH.
-    if !Command::new("/usr/bin/open").arg("-R").arg(path).status().context("starting open")?.success() {
-        bail!("open -R {} failed", path.display());
+    if !Command::new("/usr/bin/open").arg("-R").arg(path).status().context(t!("starting open"))?.success() {
+        bail!("{}", t!("open -R {path} failed", path = path.display()));
     }
     Ok(())
 }
@@ -161,16 +162,16 @@ fn reveal_file(path: &Path) -> Result<()> {
 /// Put the command a tool call ran on the clipboard, exactly as it ran.
 fn copy_command(item: &str) -> Result<()> {
     let ctx = super::Ctx::open()?;
-    let it = ctx.store.item(item)?.with_context(|| format!("no tool call {item}"))?;
-    let cmd = command_of(&it).with_context(|| format!("tool call {item} ran no command"))?;
+    let it = ctx.store.item(item)?.with_context(|| t!("no tool call {item}", item = item))?;
+    let cmd = command_of(&it).with_context(|| t!("tool call {item} ran no command", item = item))?;
     use std::io::Write;
     // By its path: the handler app runs with a minimal PATH.
-    let mut pb = Command::new("/usr/bin/pbcopy").stdin(std::process::Stdio::piped()).spawn().context("starting pbcopy")?;
-    pb.stdin.take().context("pbcopy's input")?.write_all(cmd.as_bytes())?;
+    let mut pb = Command::new("/usr/bin/pbcopy").stdin(std::process::Stdio::piped()).spawn().context(t!("starting pbcopy"))?;
+    pb.stdin.take().context(t!("pbcopy's input"))?.write_all(cmd.as_bytes())?;
     if !pb.wait()?.success() {
-        bail!("pbcopy failed");
+        bail!("{}", t!("pbcopy failed"));
     }
-    eprintln!("copied {} bytes from {item}", cmd.len());
+    eprintln!("{}", t!("copied {n} bytes from {item}", n = cmd.len(), item = item));
     Ok(())
 }
 
@@ -188,7 +189,7 @@ fn pane_label(ctx: &super::Ctx, link: &ToolsLink) -> Option<String> {
 }
 
 fn count(n: usize) -> String {
-    format!("{n} tool call{}", if n == 1 { "" } else { "s" })
+    if n == 1 { t!("1 tool call").to_string() } else { t!("{n} tool calls", n = n) }
 }
 
 fn agent_name(ctx: &super::Ctx, session_id: &str) -> Option<String> {
@@ -203,14 +204,14 @@ pub fn show_tools(thread_id: &str, fold: &str) -> Result<()> {
     // Probe before settled_width starts crossterm's event reader.
     let _ = axel_tui::theme::terminal_colors();
     let ctx = super::Ctx::open()?;
-    let thread = ctx.store.get_thread(thread_id)?.with_context(|| format!("no thread {thread_id}"))?;
+    let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
     let items = ctx.store.thread_items(&thread.id, 5_000)?;
     let calls = fold_calls(&items, fold);
     let linker = Linker::new(thread_dir(&ctx, &thread.id), Editor::from_env());
     // How long each took: until the next thing on the thread.
     let start = items.iter().position(|i| i.id == fold).unwrap_or(0);
     let took = |k: usize| items.get(start + k + 1).map(|n| n.at - items[start + k].at);
-    let who = calls.first().and_then(|c| agent_name(&ctx, &c.session_id)).unwrap_or_else(|| "agent".into());
+    let who = calls.first().and_then(|c| agent_name(&ctx, &c.session_id)).unwrap_or_else(|| t!("agent").into());
     let span = match (calls.first(), took(calls.len().saturating_sub(1))) {
         (Some(f), Some(last)) => {
             let end = calls.last().map_or(f.at, |l| l.at) + last;
@@ -230,7 +231,7 @@ pub fn show_tools(thread_id: &str, fold: &str) -> Result<()> {
             out.push_str(&describe_call(it, took(k), width, &linker));
         }
         out.push_str("\r\n");
-        out.push_str("\x1b[2mEsc or q closes · scroll as usual\x1b[0m\r\n");
+        out.push_str(&format!("\x1b[2m{}\x1b[0m\r\n", t!("Esc or q closes · scroll as usual")));
         out
     };
     // The pane opens at a default size and is then laid out: print at the
@@ -434,8 +435,7 @@ fn describe_call(it: &axel_store::ConversationItem, took: Option<i64>, width: us
     }
     // `completed · 2 errors · 1 warning`: how it went, then what the tool said.
     let mut tail = vec![status_look(it.status)];
-    if let Some(s) = tool.and_then(|t| drivers::summary(t, &output)) {
-        let bad = s.contains("error") || s.contains("failed");
+    if let Some((s, bad)) = tool.and_then(|t| drivers::summary(t, &output)) {
         tail.push((s, if bad { RED } else { "" }));
     }
     let tail: Vec<(String, &str)> = tail.into_iter().filter(|(t, _)| !t.is_empty()).collect();
@@ -476,7 +476,7 @@ fn status_look(status: Option<axel_store::ItemStatus>) -> (String, &'static str)
     use axel_store::ItemStatus as S;
     match status {
         Some(S::Completed) => ("✓".to_string(), GREEN),
-        Some(S::Failed) => ("✗ failed".to_string(), RED),
+        Some(S::Failed) => (format!("✗ {}", t!("failed")), RED),
         Some(s @ S::Allowed) => (s.as_str().to_string(), GREEN),
         Some(s @ (S::Denied | S::Cancelled)) => (s.as_str().to_string(), RED),
         Some(s @ (S::Running | S::Pending)) => (s.as_str().to_string(), YELLOW),
@@ -498,13 +498,13 @@ fn call_body(c: &serde_json::Value, input: &serde_json::Value, width: usize, lin
         out.push_str(&wrap_linked(path, links.url(path, None).as_deref(), width, INDENT, BOLD));
         out.push_str(&diff_view(old, new, Lang::File(path), width));
     } else if let (Some(path), Some(content)) = (path, field("content")) {
-        out.push_str(&wrap_linked(&format!("{path}  ({} lines)", content.lines().count()), links.url(path, None).as_deref(), width, INDENT, BOLD));
+        out.push_str(&wrap_linked(&format!("{path}  ({})", t!("{n} lines", n = content.lines().count())), links.url(path, None).as_deref(), width, INDENT, BOLD));
         out.push_str(&highlighted(&first_lines(content), Lang::File(path), width, ""));
     } else if let Some(path) = path {
         let range = match (input.get("offset").and_then(|v| v.as_i64()), input.get("limit").and_then(|v| v.as_i64())) {
-            (Some(o), Some(l)) => format!("  (lines {o}–{})", o.saturating_add(l)),
-            (Some(o), None) => format!("  (from line {o})"),
-            (None, Some(l)) => format!("  (first {l} lines)"),
+            (Some(o), Some(l)) => format!("  ({})", t!("lines {from}–{to}", from = o, to = o.saturating_add(l))),
+            (Some(o), None) => format!("  ({})", t!("from line {n}", n = o)),
+            (None, Some(l)) => format!("  ({})", t!("first {n} lines", n = l)),
             _ => String::new(),
         };
         let first = input.get("offset").and_then(|v| v.as_u64()).map(|o| usize::try_from(o.max(1)).unwrap_or(usize::MAX));
@@ -1035,7 +1035,7 @@ fn first_lines(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let mut s = lines.iter().take(MAX_LINES).copied().collect::<Vec<_>>().join("\n");
     if lines.len() > MAX_LINES {
-        s.push_str(&format!("\n… {} more lines", lines.len() - MAX_LINES));
+        s.push_str(&format!("\n… {}", t!("{n} more lines", n = lines.len() - MAX_LINES)));
     }
     s
 }
@@ -1719,7 +1719,6 @@ pub(super) fn wait_for_close_or_resize() -> Option<usize> {
 /// The tool calls pane: down the right of the window, above the composer,
 /// so the conversation stays readable beside it.
 const TOOLS_BOUNDS: [f64; 4] = [0.655, 0.015, 0.33, 0.82];
-const TOOLS_LABEL: &str = "tool calls";
 
 #[cfg(test)]
 mod tests {

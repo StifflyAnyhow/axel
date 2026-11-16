@@ -2,6 +2,7 @@
 //! in advance about a harness that will not take a level, and pane launches.
 //! Managed sessions get it through `HostConfig`.
 
+use axel_i18n::t;
 use axel_store::{Effort, Harness};
 
 /// What can be said before any session starts about a harness that will not
@@ -15,11 +16,13 @@ pub fn warning(harness: &Harness, effort: Effort) -> Option<String> {
             return None;
         }
         let top = Effort::ALL.iter().rev().find(|e| harness.native_effort(**e).is_some());
-        let stops = top.map(|top| format!(" (it stops at {top})")).unwrap_or_default();
-        return Some(format!("{label} has no `{effort}` reasoning effort{stops}; its sessions run at {label}'s default"));
+        return Some(match top {
+            Some(top) => t!("{label} has no `{effort}` reasoning effort (it stops at {top}); its sessions run at {label}'s default", label = label, effort = effort, top = top),
+            None => t!("{label} has no `{effort}` reasoning effort; its sessions run at {label}'s default", label = label, effort = effort),
+        });
     }
     harness.pane_effort_args(effort).is_none().then(|| {
-        format!("{label} panes cannot be started at effort {effort}; a managed (ACP) session applies it when the harness offers that level, and says so when it doesn't")
+        t!("{label} panes cannot be started at effort {effort}; a managed (ACP) session applies it when the harness offers that level, and says so when it doesn't", label = label, effort = effort)
     })
 }
 
@@ -32,7 +35,7 @@ pub fn pane(harness: &Harness, spec: &mut axel_config::launch::LaunchSpec, effor
             args.append(&mut spec.args);
             spec.args = args;
         }
-        None => warn(&warning(harness, effort).unwrap_or_else(|| format!("{} cannot take effort {effort}", harness.label()))),
+        None => warn(&warning(harness, effort).unwrap_or_else(|| t!("{label} cannot take effort {effort}", label = harness.label(), effort = effort))),
     }
 }
 

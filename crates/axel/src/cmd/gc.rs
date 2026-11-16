@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use axel_i18n::t;
 use axel_acp::checkpoint::REFS;
 use axel_store::{ThreadFilter, ThreadState};
 
@@ -170,7 +171,12 @@ pub fn run(ctx: &Ctx, quiet: bool) -> Result<usize> {
             Ok(gone) => {
                 total += gone.len();
                 if !quiet && !gone.is_empty() {
-                    println!("{}: {} checkpoint ref{} pruned", dir.display(), gone.len(), if gone.len() == 1 { "" } else { "s" });
+                    let message = if gone.len() == 1 {
+                        t!("{dir}: 1 checkpoint ref pruned", dir = dir.display())
+                    } else {
+                        t!("{dir}: {n} checkpoint refs pruned", dir = dir.display(), n = gone.len())
+                    };
+                    println!("{message}");
                 }
             }
             Err(e) => {
@@ -181,7 +187,8 @@ pub fn run(ctx: &Ctx, quiet: bool) -> Result<usize> {
         }
     }
     if !quiet {
-        println!("{total} checkpoint ref{} pruned", if total == 1 { "" } else { "s" });
+        let message = if total == 1 { t!("1 checkpoint ref pruned").to_string() } else { t!("{n} checkpoint refs pruned", n = total) };
+        println!("{message}");
     }
     Ok(total)
 }

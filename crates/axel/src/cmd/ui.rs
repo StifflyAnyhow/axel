@@ -6,6 +6,7 @@
 //! hand.  Calls that open the panes a command exists for are errors.
 
 use anyhow::{Context, Result};
+use axel_i18n::t;
 use axel_tui::{Deps, Outcome, Screen, SendCommand, SendReply};
 use axel_store::SessionRuntime;
 
@@ -81,7 +82,7 @@ pub fn open_launcher() -> Result<()> {
         return Ok(());
     }
 
-    let exe = std::env::current_exe().context("locating the axel binary")?;
+    let exe = std::env::current_exe().context(t!("locating the axel binary"))?;
     let exe = exe.to_string_lossy().into_owned();
     let cwd = std::env::current_dir().ok();
     // A window still called "Window 7ca9480b" takes the project's name.
@@ -96,12 +97,12 @@ pub fn open_launcher() -> Result<()> {
     let prompt_cmd = vec![exe.clone(), "ui".into(), "--screen".into(), "launch".into()];
     let layer = rex
         .new_floating_terminal_with_focus(PROMPT_LABEL, PROMPT_BOUNDS, &prompt_cmd, cwd.as_deref(), &env, true)
-        .context("opening the prompt pane in Rex")?;
+        .context(t!("opening the prompt pane in Rex"))?;
     // 2. `threads`: recent threads, split in under the prompt, unfocused.
     if let Some(prompt) = layer.block_ids.first() {
         let threads_cmd = vec![exe, "ui".into(), "--screen".into(), "threads".into()];
         if let Err(e) = rex.split_below(prompt, THREADS_LABEL, &threads_cmd, PROMPT_RATIO, cwd.as_deref(), &env, false) {
-            eprintln!("axel: could not open the threads pane: {e}");
+            eprintln!("axel: {}", t!("could not open the threads pane: {error}", error = e));
         }
     }
     Ok(())
@@ -140,11 +141,11 @@ pub fn toggle_usage() -> Result<()> {
         .ok()
         .filter(|s| s.columns > 0 && s.rows > 0)
         .map_or(TOKENS_FALLBACK, |s| corner_bounds(s.columns, s.rows));
-    let exe = std::env::current_exe().context("locating the axel binary")?.to_string_lossy().into_owned();
+    let exe = std::env::current_exe().context(t!("locating the axel binary"))?.to_string_lossy().into_owned();
     let cmd = vec![exe, "ui".into(), "--screen".into(), "usage".into()];
     let cwd = std::env::current_dir().ok();
     rex.new_floating_terminal_with_focus(TOKENS_LABEL, bounds, &cmd, cwd.as_deref(), &passthrough_env(), false)
-        .context("opening the usage pane in Rex")?;
+        .context(t!("opening the usage pane in Rex"))?;
     Ok(())
 }
 
@@ -200,7 +201,7 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
     let initial = resolve_initial(&ctx, screen, thread)?;
     if initial == Screen::Usage { super::usage::start_reconciliation(); }
 
-    let cwd = std::env::current_dir().context("reading current directory")?;
+    let cwd = std::env::current_dir().context(t!("reading the current directory"))?;
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
     let summon = |thread_id: &str, agent: &str, text: &str, files: &[std::path::PathBuf]| -> Result<String> { summon(&ctx, thread_id, agent, text, files) };
     let runtime_label = |h: &axel_store::Harness| launch::runtime_label(h);
@@ -273,7 +274,7 @@ fn resolve_initial(ctx: &Ctx, screen: Option<ScreenArg>, thread: Option<String>)
             }
             Ok(Screen::Thread(id))
         }
-        (Some(ScreenArg::Thread), None) => anyhow::bail!("--screen thread needs --thread ID"),
+        (Some(ScreenArg::Thread), None) => anyhow::bail!("{}", t!("--screen thread needs --thread ID")),
         (other, _) => initial_screen(other),
     }
 }
@@ -323,7 +324,7 @@ fn finish(ctx: &Ctx, outcome: Outcome, peer: Option<&Peer>) -> Result<()> {
                 // As above: a window closed meanwhile simply isn't focused.
                 rex.focus_window(w).ok();
             } else {
-                eprintln!("axel: log at {}", super::session::log_path(&session_id).display());
+                eprintln!("axel: {}", t!("log at {path}", path = super::session::log_path(&session_id).display()));
             }
             Ok(())
         }
@@ -343,7 +344,7 @@ fn launch_from_launcher(ctx: &Ctx, req: axel_tui::LaunchRequest) -> Result<()> {
     // An agent that runs on a host: the thread is recorded here, the
     // agent starts there, and this pane becomes the thread view.
     if let super::host::Placement::Host(h) = super::host::placement(ctx, &req.agent_pubkey, None)? {
-        let agent = ctx.store.agent_by_pubkey(&req.agent_pubkey)?.context("agent vanished")?;
+        let agent = ctx.store.agent_by_pubkey(&req.agent_pubkey)?.context(t!("the agent vanished"))?;
         let (thread_id, _) = super::host::new_thread_remote(ctx, &h.label, &req.title, &req.projects, &agent.name, &req.attachments)?;
         return open_thread_here(ctx, &thread_id);
     }
@@ -353,12 +354,12 @@ fn launch_from_launcher(ctx: &Ctx, req: axel_tui::LaunchRequest) -> Result<()> {
     match launch::launch(ctx, req, opts)? {
         launch::Launched::Managed { thread_id, host_spec: Some(spec), .. } => {
             // Outside Rex: this terminal becomes the host; the view is `axel thread open`.
-            eprintln!("axel: hosting managed session; open the thread with `axel thread open {thread_id}`");
+            eprintln!("axel: {}", t!("hosting the managed session; open the thread with `axel thread open {thread}`", thread = thread_id));
             launch::exec_inline(spec)
         }
         launch::Launched::Managed { thread_id, .. } => open_thread_here(ctx, &thread_id),
         launch::Launched::RexWindow { window_id, .. } => {
-            eprintln!("axel: launched in Rex window {window_id}");
+            eprintln!("axel: {}", t!("launched in Rex window {window}", window = window_id));
             close_own_layer(ctx);
             Ok(())
         }
@@ -427,11 +428,11 @@ pub(crate) fn close_own_layer(ctx: &Ctx) {
     match layer_of_block(rex, &block) {
         Ok(Some(layer_id)) => {
             if let Err(e) = rex.close_layer(&layer_id) {
-                eprintln!("axel: could not close floating layer: {e}");
+                eprintln!("axel: {}", t!("could not close the floating layer: {error}", error = e));
             }
         }
         Ok(None) => {}
-        Err(e) => eprintln!("axel: could not inspect session: {e}"),
+        Err(e) => eprintln!("axel: {}", t!("could not inspect the session: {error}", error = e)),
     }
 }
 
@@ -542,7 +543,7 @@ fn split_here(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
 fn stream_with_input(ctx: &Ctx, thread_id: &str) -> Result<()> {
     let owner_pk = ctx.owner()?.public().to_string();
     let redirect = |input: axel_tui::StreamInput| -> Result<()> {
-        let rex = ctx.rex.as_ref().context("not inside Rex")?;
+        let rex = ctx.rex.as_ref().context(t!("not inside Rex"))?;
         let text = match input {
             axel_tui::StreamInput::Text(text) => text,
             axel_tui::StreamInput::Controls => {
@@ -558,7 +559,7 @@ fn stream_with_input(ctx: &Ctx, thread_id: &str) -> Result<()> {
             }
         };
         let view = rex.view()?;
-        let composer = composer_below(&view, &rex.env().block).context("no composer below this message pane")?;
+        let composer = composer_below(&view, &rex.env().block).context(t!("no composer below this message pane"))?;
         // Paste into the owner's composer, never into an agent's terminal.
         // In particular, a digit must not answer a pending approval.
         rex.api_call("block.event", serde_json::json!({
@@ -588,7 +589,7 @@ fn composer_below(view: &serde_json::Value, stream: &str) -> Option<String> {
 /// Then Axel's floating panes close, this one last (which ends this process).
 pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
     let me = rex.env().block.clone();
-    let thread = ctx.store.get_thread(thread_id)?.with_context(|| format!("no thread {thread_id}"))?;
+    let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
     let stream: Vec<String> = vec![exe.clone(), "thread".into(), "stream".into(), thread.id.clone()];
     let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread.id.clone()];
@@ -628,7 +629,7 @@ pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Re
 /// it is known.  Returns what was done; `Ok(false)` when the thread has no
 /// panes open here.  Docking closes Axel's floating panes, this one included.
 pub(super) fn relaunch_thread_panes(ctx: &Ctx, thread_id: &str) -> Result<bool> {
-    let out = std::process::Command::new("ps").args(["-eo", "pid,command"]).output().context("listing processes")?;
+    let out = std::process::Command::new("ps").args(["-eo", "pid,command"]).output().context(t!("listing processes"))?;
     let needle = format!("axel thread compose {thread_id}");
     let mut composers: Vec<i32> = Vec::new();
     let mut origin: Option<String> = None;
@@ -766,8 +767,8 @@ fn find_split(node: &serde_json::Value, want: &dyn Fn(&str, &str) -> bool) -> Op
 
 /// A new Rex tab with the stream above and the composer below; the composer gets focus.
 fn open_split_tab(ctx: &Ctx, thread_id: &str) -> Result<()> {
-    let rex = ctx.rex.as_ref().context("not inside Rex")?;
-    let thread = ctx.store.get_thread(thread_id)?.with_context(|| format!("no thread {thread_id}"))?;
+    let rex = ctx.rex.as_ref().context(t!("not inside Rex"))?;
+    let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
     let stream: Vec<String> = vec![exe.clone(), "thread".into(), "stream".into(), thread.id.clone()];
     let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread.id.clone()];
@@ -858,7 +859,7 @@ pub(crate) fn label_renames_thread(label: &str, window_id: &str, title: &str) ->
 /// the stream above goes with it.
 pub fn run_compose(thread_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
-    let cwd = std::env::current_dir().context("reading current directory")?;
+    let cwd = std::env::current_dir().context(t!("reading the current directory"))?;
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
     let summon = |thread_id: &str, agent: &str, text: &str, files: &[std::path::PathBuf]| -> Result<String> { summon(&ctx, thread_id, agent, text, files) };
     let runtime_label = |h: &axel_store::Harness| launch::runtime_label(h);
@@ -1021,7 +1022,7 @@ fn open_question(rex: &axel_rex::Rex, thread_id: &str, item_id: &str) {
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
     let cmd = vec![exe, "thread".into(), "answer".into(), thread_id.to_string(), item_id.to_string()];
     if let Err(e) = rex.new_floating_terminal_with_focus(QUESTION_LABEL, QUESTION_BOUNDS, &cmd, None, &passthrough_env(), true) {
-        eprintln!("axel: could not open the question: {e}");
+        eprintln!("axel: {}", t!("could not open the question: {error}", error = e));
     }
 }
 
@@ -1033,28 +1034,28 @@ fn open_controls(rex: &axel_rex::Rex, thread_id: &str) {
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
     let cmd = vec![exe, "thread".into(), "manage".into(), thread_id.to_string()];
     if let Err(e) = rex.new_floating_terminal_with_focus(CONTROLS_LABEL, CONTROLS_BOUNDS, &cmd, None, &passthrough_env(), true) {
-        eprintln!("axel: could not open the thread controls: {e}");
+        eprintln!("axel: {}", t!("could not open the thread controls: {error}", error = e));
     }
 }
 
 /// The owner's shell, at the same project or worktree the thread works in.
 fn open_thread_terminal(ctx: &Ctx, thread_id: &str) -> Result<()> {
-    let rex = ctx.rex.as_ref().context("floating terminals need Rex")?;
+    let rex = ctx.rex.as_ref().context(t!("floating terminals need Rex"))?;
     let cwd = super::links::thread_dir(ctx, thread_id)
         .map(Ok)
         .unwrap_or_else(std::env::current_dir)
-        .context("reading the thread's working directory")?;
+        .context(t!("reading the thread's working directory"))?;
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
     let command = vec![shell, "-i".into()];
     rex.new_floating_terminal_with_focus("terminal", DASHBOARD_BOUNDS, &command, Some(&cwd), &passthrough_env(), true)
-        .context("opening the thread's terminal")?;
+        .context(t!("opening the thread's terminal"))?;
     Ok(())
 }
 
 /// `axel thread answer`: one question, alone; the floating layer closes with it.
 pub fn run_answer(thread_id: &str, item_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
-    let cwd = std::env::current_dir().context("reading current directory")?;
+    let cwd = std::env::current_dir().context(t!("reading the current directory"))?;
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
     let summon = |_: &str, _: &str, _: &str, _: &[std::path::PathBuf]| -> Result<String> { anyhow::bail!("not from here") };
     let runtime_label = |h: &axel_store::Harness| launch::runtime_label(h);
@@ -1260,17 +1261,17 @@ fn passthrough_env() -> Vec<(String, String)> {
 
 /// Deliver a composer command to a managed session over its socket.
 pub(super) fn send_to_session(ctx: &Ctx, session_id: &str, cmd: SendCommand) -> Result<SendReply> {
-    let session = ctx.store.get_session(session_id)?.with_context(|| format!("no session {session_id}"))?;
+    let session = ctx.store.get_session(session_id)?.with_context(|| t!("no session {id}", id = session_id))?;
     if session.state == axel_store::SessionState::Paused {
-        return Ok(SendReply::Error { message: "this agent is paused; resume it in Ctrl+D → Agents".into() });
+        return Ok(SendReply::Error { message: t!("this agent is paused; resume it in Ctrl+D → Agents").into() });
     }
     if session.runtime != SessionRuntime::Managed {
-        return Ok(SendReply::Error { message: "this agent runs in its own pane; press o to open it".into() });
+        return Ok(SendReply::Error { message: t!("this agent runs in its own pane; press o to open it").into() });
     }
     let remote = super::host::host_of(ctx, &session)?.is_some();
     let sock = session.socket_path.clone();
     if !remote && sock.is_none() {
-        return Ok(SendReply::Error { message: "session host not ready yet".into() });
+        return Ok(SendReply::Error { message: t!("the session host is not ready yet").into() });
     }
     let cmd = match cmd {
         SendCommand::Prompt { text, attachments, steer } => axel_acp::socket::Command::Prompt { text, attachments, steer, from: None },
@@ -1293,7 +1294,7 @@ pub(super) fn send_to_session(ctx: &Ctx, session_id: &str, cmd: SendCommand) -> 
                     axel_acp::socket::Command::Prompt { text, attachments, .. } => revive(ctx, &session, &text, &attachments),
                     _ => {
                         end_dead_session(ctx, &session);
-                        Ok(SendReply::Error { message: "its session had stopped; send a message to resume it".into() })
+                        Ok(SendReply::Error { message: t!("its session had stopped; send a message to resume it").into() })
                     }
                 };
             }
@@ -1306,7 +1307,7 @@ pub(super) fn send_to_session(ctx: &Ctx, session_id: &str, cmd: SendCommand) -> 
         Ok(axel_acp::socket::Reply::Steering { item_id }) => SendReply::Steering { item_id },
         Ok(axel_acp::socket::Reply::Status { .. }) => SendReply::Ok,
         Ok(axel_acp::socket::Reply::Error { message }) => SendReply::Error { message },
-        Err(e) => SendReply::Error { message: format!("host unreachable: {e}") },
+        Err(e) => SendReply::Error { message: t!("host unreachable: {error}", error = e) },
     })
 }
 
@@ -1329,7 +1330,7 @@ fn end_dead_session(ctx: &Ctx, session: &axel_store::Session) {
 /// one) with the message as the first prompt.
 fn revive(ctx: &Ctx, session: &axel_store::Session, text: &str, attachments: &[std::path::PathBuf]) -> Result<SendReply> {
     end_dead_session(ctx, session);
-    let thread = ctx.store.get_thread(&session.thread_id)?.with_context(|| format!("no thread {}", session.thread_id))?;
+    let thread = ctx.store.get_thread(&session.thread_id)?.with_context(|| t!("no thread {id}", id = session.thread_id))?;
     let req = axel_tui::LaunchRequest {
         title: thread.title.clone(),
         projects: vec![],
@@ -1350,7 +1351,7 @@ fn revive(ctx: &Ctx, session: &axel_store::Session, text: &str, attachments: &[s
     match launch::launch(ctx, req, opts) {
         Ok(launch::Launched::Managed { host_spec: Some(spec), session_id, .. }) => launch::spawn_detached(&spec, &session_id)?,
         Ok(_) => {}
-        Err(e) => return Ok(SendReply::Error { message: format!("its session had stopped, and resuming it failed: {e:#}") }),
+        Err(e) => return Ok(SendReply::Error { message: t!("its session had stopped, and resuming it failed: {error}", error = format!("{e:#}")) }),
     }
     Ok(SendReply::Ok)
 }
@@ -1369,11 +1370,11 @@ pub(crate) fn summon_with(ctx: &Ctx, thread_id: &str, agent_name: &str, text: &s
         Some((a, h)) => (a, Some(h)),
         None => (agent_name, None),
     };
-    let agent = ctx.store.agent_by_name(name)?.with_context(|| format!("no agent named {name:?}"))?;
+    let agent = ctx.store.agent_by_name(name)?.with_context(|| t!("no agent named {name}", name = format!("{name:?}")))?;
     if let super::host::Placement::Host(h) = super::host::placement(ctx, &agent.pubkey, asked)? {
         return super::host::launch_remote(ctx, &h.label, thread_id, &agent.name, text, files);
     }
-    let thread = ctx.store.get_thread(thread_id)?.with_context(|| format!("no thread {thread_id}"))?;
+    let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
     // Back on a thread it worked on: it picks up its own conversation there,
     // unless a reset asked for a fresh one.
     let resume = if fresh { None } else { previous_conversation(ctx, &thread.id, &agent.pubkey) };
@@ -1421,9 +1422,9 @@ pub fn resolve_thread_id(ctx: &Ctx, id_or_prefix: &str) -> Result<String> {
     let all = ctx.store.list_threads(axel_store::ThreadFilter::default())?;
     let hits: Vec<_> = all.into_iter().filter(|t| t.id.starts_with(id_or_prefix) || t.title.to_lowercase().contains(&id_or_prefix.to_lowercase())).collect();
     match hits.len() {
-        0 => anyhow::bail!("no thread matches {id_or_prefix}"),
+        0 => anyhow::bail!("{}", t!("no thread matches {query}", query = id_or_prefix)),
         1 => Ok(hits.into_iter().next().expect("one hit, checked by the arm").id),
-        n => anyhow::bail!("{n} threads match {id_or_prefix}; be more specific"),
+        n => anyhow::bail!("{}", t!("{n} threads match {query}; be more specific", n = n, query = id_or_prefix)),
     }
 }
 

@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use axel_i18n::t;
 use axel_acp::socket;
 use axel_inbox::Envelope;
 use axel_store::{Environment, ItemChange, SessionState, SyncStream};
@@ -105,7 +106,7 @@ fn ssh(target: &str, remote_cmd: &str, stdin: &[u8]) -> Result<Vec<u8>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("running ssh")?;
+        .context(t!("running ssh"))?;
     child.stdin.take().expect("stdin is piped above").write_all(stdin)?;
     // stderr drains on its own thread so a chatty remote can't block stdout.
     let mut stderr = child.stderr.take().expect("stderr is piped above");
@@ -123,7 +124,7 @@ fn ssh(target: &str, remote_cmd: &str, stdin: &[u8]) -> Result<Vec<u8>> {
         // Already failing; whether the kill lands changes nothing.
         let _ = child.kill();
         let _ = child.wait();
-        bail!("ssh {target}: reply larger than {RPC_MESSAGE_BYTES_MAX} bytes");
+        bail!("{}", t!("ssh {target}: reply larger than {max} bytes", target = target, max = RPC_MESSAGE_BYTES_MAX));
     }
     let status = child.wait()?;
     let stderr = stderr_reader.join().unwrap_or_default();
@@ -325,10 +326,10 @@ pub struct RemoteBranch {
 }
 
 fn call(host: &Environment, req: &Request) -> Result<Response> {
-    let target = host.ssh_target.as_deref().with_context(|| format!("host {} has no ssh target", host.label))?;
+    let target = host.ssh_target.as_deref().with_context(|| t!("host {host} has no ssh target", host = host.label))?;
     let out = ssh(target, &remote_axel("host rpc"), &serde_json::to_vec(req)?)?;
     let resp: Response = serde_json::from_slice(&out)
-        .with_context(|| format!("bad reply from {}: {}", host.label, String::from_utf8_lossy(&out).chars().take(300).collect::<String>()))?;
+        .with_context(|| t!("bad reply from {host}: {reply}", host = host.label, reply = String::from_utf8_lossy(&out).chars().take(300).collect::<String>()))?;
     if let Response::Error { message } = resp {
         bail!("{}: {message}", host.label);
     }
@@ -459,9 +460,9 @@ pub fn add(label: &str, ssh_target: Option<&str>, install: bool) -> Result<()> {
     let here = String::from_utf8(Command::new("uname").arg("-sm").output()?.stdout)?.trim().to_string();
     let there = String::from_utf8(ssh(target, "uname -sm", b"")?)?.trim().to_string();
     if here != there {
-        bail!("{target} is {there}, this machine is {here}: copying this axel binary won't run there");
+        bail!("{}", t!("{target} is {there}, this machine is {here}: copying this axel binary won't run there", target = target, there = there, here = here));
     }
-    println!("{target}: {there}, reachable");
+    println!("{}", t!("{target}: {there}, reachable", target = target, there = there));
 
     let exe = std::fs::read(std::env::current_exe()?)?;
     ssh(
@@ -469,12 +470,12 @@ pub fn add(label: &str, ssh_target: Option<&str>, install: bool) -> Result<()> {
         "mkdir -p .local/bin && cat > .local/bin/axel.new && chmod +x .local/bin/axel.new && mv .local/bin/axel.new .local/bin/axel",
         &exe,
     )?;
-    println!("installed axel {} in ~/.local/bin", env!("CARGO_PKG_VERSION"));
+    println!("{}", t!("installed axel {version} in ~/.local/bin", version = env!("CARGO_PKG_VERSION")));
 
     let skills = paths::global_skills_dir();
     if skills.is_dir() {
         copy_dir(target, &skills)?;
-        println!("copied your skills ({})", skills.display());
+        println!("{}", t!("copied your skills ({path})", path = skills.display()));
     }
 
     let probe = Environment {
@@ -487,7 +488,7 @@ pub fn add(label: &str, ssh_target: Option<&str>, install: bool) -> Result<()> {
         host_pubkey: None,
     };
     let Response::Hello { environment_id, label: remote_label, host_pubkey, missing, .. } = call(&probe, &Request::Hello)? else {
-        bail!("unexpected reply to hello");
+        bail!("{}", t!("unexpected reply to hello"));
     };
     let mut missing = missing;
     if !missing.is_empty() && install {
@@ -498,14 +499,14 @@ pub fn add(label: &str, ssh_target: Option<&str>, install: bool) -> Result<()> {
     }
     let rex_host = rex_host_label(label);
     ctx.store.put_host(&environment_id, label, target, &host_pubkey, rex_host.as_deref())?;
-    println!("{label}: host key {host_pubkey} ({remote_label})");
+    println!("{}", t!("{label}: host key {key} ({remote})", label = label, key = host_pubkey, remote = remote_label));
     if rex_host.is_some() {
-        println!("Rex host {label}: remote jobs will run in its \"{REX_SESSION}\" session");
+        println!("{}", t!("Rex host {label}: remote jobs will run in its `{session}` session", label = label, session = REX_SESSION));
     }
     if missing.is_empty() {
-        println!("ready. If Claude Code has never run on {target}, log in once: rex -S {label} run -- claude");
+        println!("{}", t!("ready. If Claude Code has never run on {target}, log in once: rex -S {label} run -- claude", target = target, label = label));
     } else {
-        println!("missing on {target}: {}. Rerun with --install, or install them yourself.", missing.join(", "));
+        println!("{}", t!("missing on {target}: {missing}. Rerun with --install, or install them yourself.", target = target, missing = missing.join(", ")));
     }
     Ok(())
 }
@@ -519,7 +520,7 @@ fn install_deps(target: &str, missing: &[String]) -> Result<()> {
         steps.push("npm install -g @anthropic-ai/claude-code");
     }
     if missing.iter().any(|m| m == "git") {
-        bail!("git is missing on {target}: install the Xcode command line tools there (xcode-select --install)");
+        bail!("{}", t!("git is missing on {target}: install the Xcode command line tools there (xcode-select --install)", target = target));
     }
     for step in steps {
         println!("{target}: {step}");
@@ -542,8 +543,8 @@ fn rex_host_label(label: &str) -> Option<String> {
 
 /// Copy `dir` to the same path under the host's home.
 fn copy_dir(target: &str, dir: &Path) -> Result<()> {
-    let home = dirs::home_dir().context("no home directory")?;
-    let rel = dir.strip_prefix(&home).with_context(|| format!("{} is outside your home", dir.display()))?;
+    let home = dirs::home_dir().context(t!("no home directory"))?;
+    let rel = dir.strip_prefix(&home).with_context(|| t!("{path} is outside your home", path = dir.display()))?;
     let tar = Command::new("tar").arg("-C").arg(dir).args(["-cf", "-", "."]).output()?;
     if !tar.status.success() {
         bail!("tar {}: {}", dir.display(), String::from_utf8_lossy(&tar.stderr));
@@ -557,17 +558,16 @@ pub fn list() -> Result<()> {
     let ctx = Ctx::open()?;
     let hosts = ctx.store.hosts()?;
     if hosts.is_empty() {
-        println!("no hosts; add one with `axel host add LABEL`");
+        println!("{}", t!("no hosts; add one with `axel host add LABEL`"));
     }
     for h in hosts {
         let live = live_sessions_on(&ctx, &h)?.len();
+        let live = if live == 1 { t!("1 live session").to_string() } else { t!("{n} live sessions", n = live) };
         println!(
-            "{:<10} ssh {:<14} {:<4} {} live session{}",
-            h.label,
-            h.ssh_target.as_deref().unwrap_or("-"),
+            "{} ssh {} {:<4} {live}",
+            super::text::pad(&h.label, 10),
+            super::text::pad(h.ssh_target.as_deref().unwrap_or("-"), 14),
             if h.rex_host_id.is_some() { "rex" } else { "" },
-            live,
-            if live == 1 { "" } else { "s" }
         );
     }
     Ok(())
@@ -576,9 +576,9 @@ pub fn list() -> Result<()> {
 pub fn remove(label: &str) -> Result<()> {
     let ctx = Ctx::open()?;
     if !ctx.store.remove_host(label)? {
-        bail!("no host named {label:?}");
+        bail!("{}", t!("no host named {name}", name = format!("{label:?}")));
     }
-    println!("removed {label}; its delegations expire on their own");
+    println!("{}", t!("removed {label}; its delegations expire on their own", label = label));
     Ok(())
 }
 
@@ -620,7 +620,7 @@ pub fn sync_host(ctx: &Ctx, host: &Environment, with_git: bool) -> Result<SyncRe
     let mut cursor = ctx.store.peer_cursor(&host.id, SyncStream::EventsIn)?;
     let mut notes = Vec::new();
     for _ in 0..SYNC_BATCHES_MAX {
-        let Response::Events { events } = call(host, &Request::PullEvents { cursor })? else { bail!("unexpected reply") };
+        let Response::Events { events } = call(host, &Request::PullEvents { cursor })? else { bail!("{}", t!("unexpected reply")) };
         let n = events.len();
         for (seq, e) in &events {
             let r = ctx.store.append(e)?;
@@ -639,7 +639,7 @@ pub fn sync_host(ctx: &Ctx, host: &Environment, with_git: bool) -> Result<SyncRe
     }
     let mut cursor = ctx.store.peer_cursor(&host.id, SyncStream::ItemsIn)?;
     for _ in 0..SYNC_BATCHES_MAX {
-        let Response::Items { changes } = call(host, &Request::PullItems { cursor })? else { bail!("unexpected reply") };
+        let Response::Items { changes } = call(host, &Request::PullItems { cursor })? else { bail!("{}", t!("unexpected reply")) };
         let n = changes.len();
         for c in &changes {
             ctx.store.import_item_change(c)?;
@@ -670,16 +670,16 @@ pub fn sync_host(ctx: &Ctx, host: &Environment, with_git: bool) -> Result<SyncRe
 pub fn sync_cmd(label: Option<&str>, follow: bool) -> Result<()> {
     let ctx = Ctx::open()?;
     let hosts: Vec<Environment> = match label {
-        Some(l) => vec![ctx.store.host(l)?.with_context(|| format!("no host named {l:?}"))?],
+        Some(l) => vec![ctx.store.host(l)?.with_context(|| t!("no host named {name}", name = format!("{l:?}")))?],
         None => ctx.store.hosts()?,
     };
     if follow {
-        let host = hosts.into_iter().next().context("no host to follow")?;
+        let host = hosts.into_iter().next().context(t!("no host to follow"))?;
         return follow_host(&ctx, &host);
     }
     for h in &hosts {
         let r = sync_host(&ctx, h, true)?;
-        println!("{}: sent {}, received {} events and {} item changes", h.label, r.pushed, r.pulled, r.items);
+        println!("{}", t!("{host}: sent {sent}, received {received} events and {items} item changes", host = h.label, sent = r.pushed, received = r.pulled, items = r.items));
         for b in r.branches {
             println!("  {b}");
         }
@@ -818,7 +818,7 @@ pub fn host_of(ctx: &Ctx, session: &axel_store::Session) -> Result<Option<Enviro
 
 /// Send a session command to a session running on its host.
 pub fn relay(ctx: &Ctx, session: &axel_store::Session, cmd: &socket::Command) -> Result<socket::Reply> {
-    let host = host_of(ctx, session)?.context("not a remote session")?;
+    let host = host_of(ctx, session)?.context(t!("not a remote session"))?;
     let mut cmd = cmd.clone();
     let files = match &mut cmd {
         socket::Command::Prompt { attachments, .. } => pack_files(&std::mem::take(attachments))?,
@@ -828,19 +828,19 @@ pub fn relay(ctx: &Ctx, session: &axel_store::Session, cmd: &socket::Command) ->
     ensure_follower(&host);
     match resp {
         Response::Reply { reply } => Ok(reply),
-        _ => bail!("unexpected reply"),
+        _ => bail!("{}", t!("unexpected reply")),
     }
 }
 
 pub fn pause_remote(ctx: &Ctx, session: &axel_store::Session, paused: bool) -> Result<()> {
-    let host = host_of(ctx, session)?.context("not a remote session")?;
+    let host = host_of(ctx, session)?.context(t!("not a remote session"))?;
     call(&host, &Request::PauseSession { session_id: session.id.clone(), paused })?;
     Ok(())
 }
 
 /// Stop a session on its host.
 pub fn stop_remote(ctx: &Ctx, session: &axel_store::Session) -> Result<()> {
-    let host = host_of(ctx, session)?.context("not a remote session")?;
+    let host = host_of(ctx, session)?.context(t!("not a remote session"))?;
     call(&host, &Request::StopSession { session_id: session.id.clone() })?;
     Ok(())
 }
@@ -861,7 +861,7 @@ pub fn placement(ctx: &Ctx, agent: &str, asked: Option<&str>) -> Result<Placemen
         if is_here(ctx, h)? {
             return Ok(Placement::Here);
         }
-        let host = ctx.store.host(h)?.with_context(|| format!("no host named {h:?}; add it with `axel host add {h}`"))?;
+        let host = ctx.store.host(h)?.with_context(|| t!("no host named {quoted}; add it with `axel host add {label}`", quoted = format!("{h:?}"), label = h))?;
         return Ok(Placement::Host(host));
     }
     // Delegated work runs where it was sent; only the agent's home re-routes.
@@ -882,7 +882,7 @@ pub fn is_here(ctx: &Ctx, label: &str) -> Result<bool> {
 /// checks, then the thread, the agent's delegation and the code go to the
 /// host.
 pub fn launch_remote(ctx: &Ctx, host_label: &str, thread_id: &str, agent_name: &str, prompt: &str, files: &[PathBuf]) -> Result<String> {
-    let host = ctx.store.host(host_label)?.with_context(|| format!("no host named {host_label:?}; add it with `axel host add {host_label}`"))?;
+    let host = ctx.store.host(host_label)?.with_context(|| t!("no host named {quoted}; add it with `axel host add {label}`", quoted = format!("{host_label:?}"), label = host_label))?;
     start_remote(ctx, &host, thread_id, agent_name, prompt, files, None)
 }
 
@@ -894,15 +894,15 @@ struct Carry {
 }
 
 fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str, prompt: &str, files: &[PathBuf], carry: Option<Carry>) -> Result<String> {
-    let thread = ctx.store.get_thread(thread_id)?.with_context(|| format!("no thread {thread_id}"))?;
-    let agent = ctx.store.agent_by_name(agent_name)?.with_context(|| format!("no agent named {agent_name:?}"))?;
-    super::policy::check_summon(ctx, &agent.pubkey).with_context(|| format!("refusing to launch {}", agent.name))?;
+    let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
+    let agent = ctx.store.agent_by_name(agent_name)?.with_context(|| t!("no agent named {name}", name = format!("{agent_name:?}")))?;
+    super::policy::check_summon(ctx, &agent.pubkey).with_context(|| t!("refusing to launch {name}", name = agent.name))?;
     let agent_kp = ctx
         .keystore
         .agent(&agent.pubkey.parse()?)?
-        .with_context(|| format!("{}'s key isn't on this machine, so it can't delegate", agent.name))?;
+        .with_context(|| t!("{name}'s key isn't on this machine, so it can't delegate", name = agent.name))?;
     if super::claude_profile::ClaudeProfile::load(&agent.pubkey)?.is_some() {
-        bail!("{} has a machine-local Claude config directory and must run locally", agent.name);
+        bail!("{}", t!("{name} has a machine-local Claude config directory and must run locally", name = agent.name));
     }
     let attachments = pack_files(files)?;
 
@@ -915,7 +915,7 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
 
     let workspace = send_workspace(ctx, host, &thread, &agent.name, carry.as_ref())?;
 
-    let Response::JobKey { pubkey: job_key } = call(host, &Request::JobKey)? else { bail!("unexpected reply") };
+    let Response::JobKey { pubkey: job_key } = call(host, &Request::JobKey)? else { bail!("{}", t!("unexpected reply")) };
     let now_secs = u64::try_from(axel_tui::util::now_secs()).context("the clock is before 1970")?;
     let delegation = axel_identity::delegate(
         &agent_kp,
@@ -951,7 +951,7 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
         peers,
     };
     let Response::Started { session_id } = call(host, &Request::StartJob { job: Box::new(job) })? else {
-        bail!("unexpected reply");
+        bail!("{}", t!("unexpected reply"));
     };
     // A first sync is a head start; the follower started next syncs anyway.
     let _ = sync_host(ctx, host, false);
@@ -969,7 +969,7 @@ fn send_workspace(ctx: &Ctx, host: &Environment, thread: &axel_store::Thread, ag
     let moved_from = carry.and_then(|c| c.work_dir.clone()).filter(|d| d.join(".git").exists() || git(d, &["rev-parse", "--git-dir"]).is_ok());
     let Some(dir) = moved_from.or(local_project_dir(ctx, &thread.id)?) else { return Ok(None) };
     if git(&dir, &["rev-parse", "--git-dir"]).is_err() {
-        bail!("{} isn't a git repository; remote agents need git to carry the code", dir.display());
+        bail!("{}", t!("{path} isn't a git repository; remote agents need git to carry the code", path = dir.display()));
     }
     let mut ws = push_workspace(host, &dir, thread, agent_name)?;
     ws.reset = carry.is_some();
@@ -1017,19 +1017,19 @@ Your conversation so far is above; the files are the same, including uncommitted
 /// resume its conversation, with its code, on the other machine.  Returns
 /// the new session's id and where it runs.
 pub fn move_session(ctx: &Ctx, session_id: &str, to: &str) -> Result<(String, String)> {
-    let s = ctx.store.get_session(session_id)?.with_context(|| format!("no session {session_id}"))?;
+    let s = ctx.store.get_session(session_id)?.with_context(|| t!("no session {id}", id = session_id))?;
     if s.ended_at.is_some() {
-        bail!("that session has ended; start a new one with `axel thread spawn` or `axel thread resume`");
+        bail!("{}", t!("that session has ended; start a new one with `axel thread spawn` or `axel thread resume`"));
     }
-    let agent = ctx.store.agent_by_pubkey(&s.agent_pubkey)?.context("agent vanished")?;
+    let agent = ctx.store.agent_by_pubkey(&s.agent_pubkey)?.context(t!("the agent vanished"))?;
     if agent.harness != axel_store::Harness::Claude {
-        bail!("only Claude sessions can move: Axel carries their conversation file");
+        bail!("{}", t!("only Claude sessions can move: Axel carries their conversation file"));
     }
-    let native = s.harness_session_id.clone().context("this session hasn't started its conversation yet; there's nothing to carry")?;
+    let native = s.harness_session_id.clone().context(t!("this session hasn't started its conversation yet; there's nothing to carry"))?;
     match (host_of(ctx, &s)?, placement(ctx, &agent.pubkey, Some(to))?) {
-        (None, Placement::Here) => bail!("{} already runs here", agent.name),
-        (Some(h), Placement::Host(d)) if h.id == d.id => bail!("{} already runs on {}", agent.name, h.label),
-        (Some(h), Placement::Host(d)) => bail!("{} runs on {}; bring it here first (`--to local`), then send it to {}", agent.name, h.label, d.label),
+        (None, Placement::Here) => bail!("{}", t!("{name} already runs here", name = agent.name)),
+        (Some(h), Placement::Host(d)) if h.id == d.id => bail!("{}", t!("{name} already runs on {host}", name = agent.name, host = h.label)),
+        (Some(h), Placement::Host(d)) => bail!("{}", t!("{name} runs on {from}; bring it here first (`--to local`), then send it to {to}", name = agent.name, from = h.label, to = d.label)),
         (None, Placement::Host(dest)) => move_to_host(ctx, &s, &agent, &native, dest),
         (Some(from), Placement::Here) => move_here(ctx, &s, &agent, from),
     }
@@ -1042,7 +1042,7 @@ const MOVE_HERE_SETTLE_MS: u64 = 1500;
 /// A session running here goes to `dest`, with its conversation and code.
 fn move_to_host(ctx: &Ctx, s: &axel_store::Session, agent: &axel_store::Agent, native: &str, dest: Environment) -> Result<(String, String)> {
     if super::claude_profile::ClaudeProfile::load(&agent.pubkey)?.is_some() {
-        bail!("{} has a machine-local Claude config directory and must run locally", agent.name);
+        bail!("{}", t!("{name} has a machine-local Claude config directory and must run locally", name = agent.name));
     }
     stop_local(ctx, s);
     ctx.store.end_session(&ctx.owner()?, &s.id, Some(&format!("moved to {}", dest.label)))?;
@@ -1060,11 +1060,11 @@ fn move_here(ctx: &Ctx, s: &axel_store::Session, agent: &axel_store::Agent, from
     ctx.store.end_session(&ctx.owner()?, &s.id, Some(&format!("moved to {}", here.label)))?;
     std::thread::sleep(std::time::Duration::from_millis(MOVE_HERE_SETTLE_MS));
     let Response::Transcript { transcript } = call(&from, &Request::Transcript { session_id: s.id.clone() })? else {
-        bail!("unexpected reply")
+        bail!("{}", t!("unexpected reply"))
     };
-    let transcript = transcript.with_context(|| format!("{} has no conversation file for this session", from.label))?;
+    let transcript = transcript.with_context(|| t!("{host} has no conversation file for this session", host = from.label))?;
     sync_host(ctx, &from, true)?;
-    let thread = ctx.store.get_thread(&s.thread_id)?.context("thread vanished")?;
+    let thread = ctx.store.get_thread(&s.thread_id)?.context(t!("the thread vanished"))?;
     let work_dir = match local_project_dir(ctx, &thread.id)? {
         Some(dir) if git(&dir, &["rev-parse", "--git-dir"]).is_ok() => checkout_returned(&dir, &from, &job_branch(&thread, &agent.name))?,
         Some(dir) => dir,
@@ -1100,7 +1100,7 @@ fn move_here(ctx: &Ctx, s: &axel_store::Session, agent: &axel_store::Agent, from
             session_id
         }
         launch::Launched::Managed { session_id, .. } => session_id,
-        _ => bail!("{} can't run as a managed session here (is its ACP adapter installed?)", agent.name),
+        _ => bail!("{}", t!("{name} can't run as a managed session here (is its ACP adapter installed?)", name = agent.name)),
     };
     Ok((id, here.label))
 }
@@ -1135,7 +1135,7 @@ fn wait_for_transcript(native: &str, hint: Option<&str>) -> Result<Transcript> {
             (now, _) => last = now,
         }
     }
-    last.with_context(|| format!("can't find Claude's conversation file {native}.jsonl"))
+    last.with_context(|| t!("can't find Claude's conversation file {file}", file = format!("{native}.jsonl")))
 }
 
 fn same_transcript(a: &Transcript, b: &Transcript) -> bool {
@@ -1149,7 +1149,7 @@ fn scratch_dir(ctx: &Ctx, thread_id: &str) -> Result<PathBuf> {
         .into_iter()
         .map(|tp| tp.path_hint)
         .find(|p| p.is_dir())
-        .with_context(|| "this thread has no directory on this machine to work in".to_string())
+        .context(t!("this thread has no directory on this machine to work in"))
 }
 
 /// A worktree here on the job branch that came back from `host`, with the
@@ -1161,7 +1161,7 @@ fn checkout_returned(dir: &Path, host: &Environment, branch: &str) -> Result<Pat
 fn checkout_returned_in(dir: &Path, host: &str, branch: &str, worktrees: &Path) -> Result<PathBuf> {
     let root = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"])?);
     git(&root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
-        .with_context(|| format!("branch {branch} didn't come back from {host}"))?;
+        .with_context(|| t!("branch {branch} didn't come back from {host}", branch = branch, host = host))?;
     let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
     let dest = worktrees.join(name).join(branch.replace('/', "-"));
     let wt = axel_config::git::ensure_worktree(&root, branch, &dest)?;
@@ -1170,7 +1170,7 @@ fn checkout_returned_in(dir: &Path, host: &str, branch: &str, worktrees: &Path) 
     let beside = format!("refs/axel/{host}/heads/{branch}");
     if let Ok(theirs) = git(&root, &["rev-parse", "--verify", "--quiet", &beside]) {
         git(&wt, &["merge", "--quiet", "--ff-only", &theirs])
-            .with_context(|| format!("{} has local changes that conflict with the work coming back", wt.display()))?;
+            .with_context(|| t!("{path} has local changes that conflict with the work coming back", path = wt.display()))?;
         git(&root, &["update-ref", "-d", &beside])?;
     }
     let head = git(&wt, &["rev-parse", "HEAD"])?;
@@ -1253,10 +1253,10 @@ fn pack_files(files: &[PathBuf]) -> Result<Vec<FileBlob>> {
     files
         .iter()
         .map(|p| {
-            let data = std::fs::read(p).with_context(|| format!("reading attachment {}", p.display()))?;
+            let data = std::fs::read(p).with_context(|| t!("reading attachment {path}", path = p.display()))?;
             total += data.len();
             if total > MAX_FILES_BYTES {
-                bail!("attachments for a remote agent are limited to {} MB", MAX_FILES_BYTES >> 20);
+                bail!("{}", t!("attachments for a remote agent are limited to {n} MB", n = MAX_FILES_BYTES >> 20));
             }
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
             Ok(FileBlob { name, data: base64::engine::general_purpose::STANDARD.encode(data) })
@@ -1325,7 +1325,7 @@ fn job_branch(thread: &axel_store::Thread, agent: &str) -> String {
 /// Push a snapshot of `dir`'s working state to the host's copy of the repo.
 fn push_workspace(host: &Environment, dir: &Path, thread: &axel_store::Thread, agent: &str) -> Result<JobWorkspace> {
     let repo = repo_name(dir);
-    let Response::Repo { path } = call(host, &Request::PrepareRepo { repo: repo.clone() })? else { bail!("unexpected reply") };
+    let Response::Repo { path } = call(host, &Request::PrepareRepo { repo: repo.clone() })? else { bail!("{}", t!("unexpected reply")) };
     let start = snapshot_commit(dir, "axel: working state handed to a remote agent")?;
     let target = host.ssh_target.as_deref().unwrap_or(&host.label);
     let start_ref = format!("refs/axel/start/{}-{agent}", id_prefix(&thread.id));
@@ -1336,7 +1336,7 @@ fn push_workspace(host: &Environment, dir: &Path, thread: &axel_store::Thread, a
         .args(["push", "--quiet", "--force", &format!("{target}:{path}"), &format!("{start}:{start_ref}")])
         .output()?;
     if !out.status.success() {
-        bail!("pushing the code to {}: {}", host.label, String::from_utf8_lossy(&out.stderr).trim());
+        bail!("{}", t!("pushing the code to {host}: {error}", host = host.label, error = String::from_utf8_lossy(&out.stderr).trim()));
     }
     Ok(JobWorkspace { repo, start, branch: job_branch(thread, agent), reset: false })
 }
@@ -1345,8 +1345,8 @@ fn push_workspace(host: &Environment, dir: &Path, thread: &axel_store::Thread, a
 /// repository into `dir`'s, under the same ref names, so a turn that ran
 /// there can be read and undone here.
 pub fn fetch_checkpoints(host: &Environment, dir: &Path, thread_id: &str) -> Result<()> {
-    let target = host.ssh_target.as_deref().with_context(|| format!("host {} has no ssh target", host.label))?;
-    let Response::Repo { path } = call(host, &Request::PrepareRepo { repo: repo_name(dir) })? else { bail!("unexpected reply") };
+    let target = host.ssh_target.as_deref().with_context(|| t!("host {host} has no ssh target", host = host.label))?;
+    let Response::Repo { path } = call(host, &Request::PrepareRepo { repo: repo_name(dir) })? else { bail!("{}", t!("unexpected reply")) };
     let spec = format!("+{refs}/{thread_id}/*:{refs}/{thread_id}/*", refs = axel_acp::checkpoint::REFS);
     let out = Command::new("git")
         .arg("-C")
@@ -1368,7 +1368,7 @@ fn fetch_results(ctx: &Ctx, host: &Environment, thread_id: &str) -> Result<Vec<S
         return Ok(vec![]);
     }
     let Response::Branches { branches } = call(host, &Request::Snapshot { thread_id: thread_id.to_string() })? else {
-        bail!("unexpected reply")
+        bail!("{}", t!("unexpected reply"))
     };
     let target = host.ssh_target.as_deref().unwrap_or(&host.label);
     let checked_out = git(&dir, &["worktree", "list", "--porcelain"]).unwrap_or_default();
@@ -1393,7 +1393,7 @@ fn fetch_results(ctx: &Ctx, host: &Environment, thread_id: &str) -> Result<Vec<S
         if specs.is_empty() {
             continue;
         }
-        let Response::Repo { path } = call(host, &Request::PrepareRepo { repo: repo_name(&dir) })? else { bail!("unexpected reply") };
+        let Response::Repo { path } = call(host, &Request::PrepareRepo { repo: repo_name(&dir) })? else { bail!("{}", t!("unexpected reply")) };
         let repo = format!("{target}:{path}");
         let fetched = Command::new("git")
             .arg("-C")
