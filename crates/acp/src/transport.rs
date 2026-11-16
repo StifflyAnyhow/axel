@@ -64,7 +64,7 @@ pub fn spawn(
     let mut child = command.spawn().map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("failed to spawn adapter `{program}`: {e}"),
+            axel_i18n::t!("failed to spawn adapter `{program}`: {error}", program = program, error = e),
         )
     })?;
 
@@ -105,7 +105,7 @@ fn forward_stderr(stderr: tokio::process::ChildStderr, stderr_tx: UnboundedSende
             // Stderr is for people: shown as well as it can be, never refused.
             let line = match read {
                 LineRead::Line(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                LineRead::TooLong { length_bytes } => format!("[a {length_bytes}-byte line, not shown]"),
+                LineRead::TooLong { length_bytes } => axel_i18n::t!("[a {length_bytes}-byte line, not shown]", length_bytes = length_bytes),
             };
             if stderr_tx.send(line).is_err() {
                 break;

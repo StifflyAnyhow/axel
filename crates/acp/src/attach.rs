@@ -63,16 +63,16 @@ fn attachment_block(abs: &Path, caps: PromptCaps, warn: &mut dyn FnMut(String)) 
     let mime = mime_for(abs);
     let size = std::fs::metadata(abs).map(|m| m.len()).ok();
     if size.is_none() {
-        warn(format!("attachment not found: {}", abs.display()));
+        warn(axel_i18n::t!("attachment not found: {path}", path = abs.display()));
     }
     if caps.image
         && is_image(abs)
         && let Some(len) = size
     {
         if len > MAX_INLINE_IMAGE_BYTES {
-            warn(format!(
-                "{} is {len} bytes (> {MAX_INLINE_IMAGE_BYTES}); sending as a link",
-                abs.display()
+            warn(axel_i18n::t!(
+                "{path} is {size} bytes (> {limit}); sending as a link",
+                path = abs.display(), size = len, limit = MAX_INLINE_IMAGE_BYTES,
             ));
         } else {
             match std::fs::read(abs) {
@@ -82,7 +82,7 @@ fn attachment_block(abs: &Path, caps: PromptCaps, warn: &mut dyn FnMut(String)) 
                         acp::ImageContent::new(data, mime.unwrap_or("image/*")).uri(file_uri(abs)),
                     );
                 }
-                Err(e) => warn(format!("cannot read {}: {e}; sending as a link", abs.display())),
+                Err(e) => warn(axel_i18n::t!("cannot read {path}: {error}; sending as a link", path = abs.display(), error = e)),
             }
         }
     }

@@ -90,7 +90,10 @@ impl std::fmt::Display for ToolKind {
 pub enum Decision {
     /// Pick the first `allow_*` option (preferring `allow_once`).
     Allow,
-    /// Pick the first `reject_*` option, with a reason for the log.
+    /// Pick the first `reject_*` option, with a reason for the owner (the
+    /// pane and the `Permission` item; the agent is never sent it). Reasons
+    /// of [`decide`]'s own are in the owner's language; those of
+    /// [`shell_deny_reason`] stay English, as the guard hook tells them to agents.
     Deny { reason: String },
     /// Park a `Permission` item and wait for a human answer.
     Ask,
@@ -117,7 +120,7 @@ pub fn decide(
 ) -> Decision {
     if let Some(tool) = disallowed_match(title, raw_input, disallowed_tools) {
         return Decision::Deny {
-            reason: format!("tool {tool} is disallowed for this agent"),
+            reason: axel_i18n::t!("tool {tool} is disallowed for this agent", tool = tool),
         };
     }
     if let Some(cmd) = shell_command(raw_input)
@@ -150,7 +153,7 @@ pub fn decide(
                 Decision::Allow
             }
             _ => Decision::Deny {
-                reason: format!("{tool_kind} is not allowed in plan mode"),
+                reason: axel_i18n::t!("{tool_kind} is not allowed in plan mode", tool_kind = tool_kind),
             },
         },
     }

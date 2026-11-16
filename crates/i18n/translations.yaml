@@ -1441,3 +1441,154 @@
   zh-Hans: "将代码推送到 {host}：{error}"
 
 # --- acp ---
+# The session host's pane lines.
+"adapter: {command}":
+  zh-Hans: "适配器：{command}"
+"removing {path}: {error}":
+  zh-Hans: "删除 {path} 失败：{error}"
+"setup failed: {error}":
+  zh-Hans: "初始化失败：{error}"
+"session {session} · cwd {cwd}":
+  zh-Hans: "会话 {session} · 工作目录 {cwd}"
+"initialized: {agent} (protocol v{protocol})":
+  zh-Hans: "已初始化：{agent}（协议 v{protocol}）"
+"agent cannot load sessions; starting a new one":
+  zh-Hans: "智能体无法加载会话，将新建一个会话"
+"model {model}":
+  zh-Hans: "模型 {model}"
+"effort {level}":
+  zh-Hans: "推理强度 {level}"
+"agent has no {mode} mode; staying in {current}":
+  zh-Hans: "智能体没有 {mode} 模式，保持 {current}"
+"mode {mode} ({runtime_mode})":
+  zh-Hans: "模式 {mode}（{runtime_mode}）"
+"runtime mode → {mode}":
+  zh-Hans: "运行模式 → {mode}"
+"store: {error}":
+  zh-Hans: "存储：{error}"
+"usage: {error}":
+  zh-Hans: "用量：{error}"
+"status: {error}":
+  zh-Hans: "状态：{error}"
+"permission: {error}":
+  zh-Hans: "权限：{error}"
+"note from {name}  {text}":
+  zh-Hans: "来自 {name} 的留言  {text}"
+"dequeued {item}":
+  zh-Hans: "已移出队列 {item}"
+"edited {item}":
+  zh-Hans: "已编辑 {item}"
+"withdrew {item}":
+  zh-Hans: "已撤回 {item}"
+"cancelling turn {turn}":
+  zh-Hans: "正在取消第 {turn} 轮"
+"steering  {text}":
+  zh-Hans: "优先发送  {text}"
+"queued  {text}":
+  zh-Hans: "已排队  {text}"
+"into the turn  {text}":
+  zh-Hans: "已送入当前轮次  {text}"
+"read  {text}":
+  zh-Hans: "已读  {text}"
+"answer returned to {name}":
+  zh-Hans: "已将回答返回给 {name}"
+"returning the answer to {name}: {error}":
+  zh-Hans: "向 {name} 返回回答失败：{error}"
+"prompt {turn}  {text}":
+  zh-Hans: "提示词 {turn}  {text}"
+"prompt {turn}  {text} {files}":
+  zh-Hans: "提示词 {turn}  {text} {files}"
+"+{count} file(s)":
+  zh-Hans: "+{count} 个文件"
+"1 file +{added} −{removed}":
+  zh-Hans: "1 个文件 +{added} −{removed}"
+"{count} files +{added} −{removed}":
+  zh-Hans: "{count} 个文件 +{added} −{removed}"
+"turn {turn} failed: {error}":
+  zh-Hans: "第 {turn} 轮失败：{error}"
+"turn {turn} cancelled · {tools} tools · {seconds}s{changes}":
+  zh-Hans: "第 {turn} 轮已取消 · {tools} 次工具调用 · {seconds} 秒{changes}"
+"turn {turn} done · {tools} tools · {seconds}s{changes}":
+  zh-Hans: "第 {turn} 轮完成 · {tools} 次工具调用 · {seconds} 秒{changes}"
+"turn {turn} done · {tools} tools · {seconds}s{changes} · {stop_reason}":
+  zh-Hans: "第 {turn} 轮完成 · {tools} 次工具调用 · {seconds} 秒{changes} · {stop_reason}"
+"· agent mode is now {mode}":
+  zh-Hans: "· 智能体模式现为 {mode}"
+"plan · {count} steps":
+  zh-Hans: "计划 · {count} 步"
+"· thinking…":
+  zh-Hans: "· 思考中…"
+"allow: {tool}":
+  zh-Hans: "允许：{tool}"
+"deny: {tool} {reason}":
+  zh-Hans: "拒绝：{tool} {reason}"
+"permission: {tool}":
+  zh-Hans: "请求权限：{tool}"
+"allowed: {tool}":
+  zh-Hans: "已允许：{tool}"
+"denied: {tool}":
+  zh-Hans: "已拒绝：{tool}"
+"permission cancelled: {tool} {reason}":
+  zh-Hans: "权限请求已取消：{tool} {reason}"
+"turn {turn} checkpoint skipped: {error}":
+  zh-Hans: "第 {turn} 轮跳过了检查点：{error}"
+"checkpoint took {seconds}s: a large file that isn't ignored? add it to .gitignore":
+  zh-Hans: "检查点耗时 {seconds} 秒：是否有未被忽略的大文件？可将它加入 .gitignore"
+"turn {turn} changes unknown: {error}":
+  zh-Hans: "第 {turn} 轮的改动未知：{error}"
+"session ended: {reason}":
+  zh-Hans: "会话已结束：{reason}"
+"attachment not found: {path}":
+  zh-Hans: "找不到附件：{path}"
+"{path} is {size} bytes (> {limit}); sending as a link":
+  zh-Hans: "{path} 大小为 {size} 字节（超过 {limit}），改为以链接发送"
+"cannot read {path}: {error}; sending as a link":
+  zh-Hans: "无法读取 {path}：{error}，改为以链接发送"
+"failed to spawn adapter `{program}`: {error}":
+  zh-Hans: "无法启动适配器 `{program}`：{error}"
+"[a {length_bytes}-byte line, not shown]":
+  zh-Hans: "[一行 {length_bytes} 字节的输出，未显示]"
+"tool {tool} is disallowed for this agent":
+  zh-Hans: "此智能体不允许使用工具 {tool}"
+"{tool_kind} is not allowed in plan mode":
+  zh-Hans: "计划模式下不允许 {tool_kind}"
+
+# Error items on the thread, written in the owner's language when stored.
+"{harness} isn't logged in, so the agent couldn't start. To log in, {login}; then send your message again.":
+  zh-Hans: "{harness} 尚未登录，智能体无法启动。登录方法：{login}；然后重新发送你的消息。"
+"{harness} couldn't start: {reason}":
+  zh-Hans: "{harness} 无法启动：{reason}"
+"could not switch the agent to model {model} ({error}); it runs its default":
+  zh-Hans: "无法将智能体切换到模型 {model}（{error}），它将使用默认模型"
+"could not switch the agent to model {model} ({error}); it runs {current}":
+  zh-Hans: "无法将智能体切换到模型 {model}（{error}），它仍在使用 {current}"
+"{message} · available: {models}":
+  zh-Hans: "{message} · 可用：{models}"
+"could not switch the agent to {mode} for {runtime_mode} ({error}); it stays in {current}, so background sub-agents may be refused":
+  zh-Hans: "无法为 {runtime_mode} 将智能体切换到 {mode}（{error}），它仍处于 {current}，后台子智能体可能会被拒绝"
+"could not set effort {effort}: {harness} has no such level; it runs at its default":
+  zh-Hans: "无法将推理强度设为 {effort}：{harness} 没有这一档，将以默认强度运行"
+"could not set effort {effort}: {harness} offers no effort option; its effort is unchanged":
+  zh-Hans: "无法将推理强度设为 {effort}：{harness} 没有推理强度选项，推理强度保持不变"
+"could not set effort {effort}: {harness} offers {levels}; it stays at {current}":
+  zh-Hans: "无法将推理强度设为 {effort}：{harness} 只提供 {levels}，仍为 {current}"
+"could not set effort {effort}: {harness} offers {levels}; its effort is unchanged":
+  zh-Hans: "无法将推理强度设为 {effort}：{harness} 只提供 {levels}，推理强度保持不变"
+"could not set effort {effort} on {harness} ({error}); it stays at {current}":
+  zh-Hans: "无法在 {harness} 上将推理强度设为 {effort}（{error}），仍为 {current}"
+"could not set effort {effort} on {harness} ({error}); its effort is unchanged":
+  zh-Hans: "无法在 {harness} 上将推理强度设为 {effort}（{error}），推理强度保持不变"
+
+# Desktop notifications and the pane's program status.
+"{who} hit an error":
+  zh-Hans: "{who} 遇到错误"
+"{who} stopped":
+  zh-Hans: "{who} 已停止"
+"{who} finished":
+  zh-Hans: "{who} 已完成"
+"{who} finished: {answer}":
+  zh-Hans: "{who} 已完成：{answer}"
+"{who} needs permission: {title}":
+  zh-Hans: "{who} 请求权限：{title}"
+"the turn failed":
+  zh-Hans: "本轮次失败"
