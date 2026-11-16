@@ -31,7 +31,7 @@ pub mod tools;
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -329,22 +329,7 @@ impl Agent {
             .map_err(RpcError::internal)?;
         codex.stdin.send(&json!({ "method": "initialized" }));
 
-        let (approval, _, sandbox) = policy(Mode::Default);
-        let mut thread = json!({ "cwd": cwd, "approvalPolicy": approval, "sandbox": sandbox });
-        if let Some(append) = params.pointer("/_meta/systemPrompt/append").and_then(Value::as_str) {
-            thread["developerInstructions"] = json!(append);
-        } else if let Some(sp) = params.pointer("/_meta/systemPrompt").and_then(Value::as_str) {
-            thread["baseInstructions"] = json!(sp);
-        }
-        let mcp = mcp_config(params);
-        if !mcp.is_empty() {
-            thread["config"] = json!({ "mcp_servers": mcp });
-        }
-        // The agent's reasoning effort, from the host (`_meta.axel.effort`):
-        // the same override as `-c model_reasoning_effort=LEVEL`.
-        if let Some(effort) = crate::host::meta_effort(params).and_then(|e| axel_store::Harness::Codex.native_effort(e)) {
-            thread["config"]["model_reasoning_effort"] = json!(effort);
-        }
+        let mut thread = thread_params(params, &cwd);
         let started = match &resume {
             Some(id) => {
                 thread["threadId"] = json!(id);
@@ -365,23 +350,7 @@ impl Agent {
             meter: Mutex::new(CodexMeter::new(current_model.clone())),
         });
         self.sessions.lock().expect("sessions lock").insert(thread_id.clone(), session.clone());
-        // Where the plan's limits stand, without holding up the session.
-        {
-            let (codex, client) = (codex.clone(), self.client.clone());
-            std::thread::spawn(move || {
-                match codex.request("account/rateLimits/read", Value::Null, REQUEST_TIMEOUT) {
-                    Ok(reply) => {
-                        let limits = codex_limits(&reply);
-                        if !limits.is_empty() {
-                            client.notify("_axel/limits", limits_params(&limits));
-                        }
-                    }
-                    // The limits show once Codex reports them on its own.
-                    Err(e) => eprintln!("[axel codex-acp] account/rateLimits/read: {e}"),
-                }
-            });
-        }
-
+        self.read_limits_later(&codex);
         if resume.is_some() {
             let mut items = Items::default();
             for turn in started.pointer("/thread/turns").and_then(Value::as_array).into_iter().flatten() {
@@ -390,37 +359,40 @@ impl Agent {
                 }
             }
         }
+        let models = list_models(&codex, current_model);
+        self.send_commands_later(&thread_id);
+        Ok(json!({
+            "sessionId": thread_id,
+            "modes": modes(Mode::Default),
+            "models": models,
+        }))
+    }
 
-        // Without the list the session still runs, on Codex's default model.
-        let listed = codex.request("model/list", json!({}), START_TIMEOUT).unwrap_or_else(|e| {
-            eprintln!("[axel codex-acp] model/list: {e}");
-            Value::Null
+    /// Where the plan's limits stand, without holding up the session.
+    fn read_limits_later(&self, codex: &Arc<Codex>) {
+        let (codex, client) = (codex.clone(), self.client.clone());
+        std::thread::spawn(move || {
+            match codex.request("account/rateLimits/read", Value::Null, REQUEST_TIMEOUT) {
+                Ok(reply) => {
+                    let limits = codex_limits(&reply);
+                    if !limits.is_empty() {
+                        client.notify("_axel/limits", limits_params(&limits));
+                    }
+                }
+                // The limits show once Codex reports them on its own.
+                Err(e) => eprintln!("[axel codex-acp] account/rateLimits/read: {e}"),
+            }
         });
-        let models: Vec<Value> = listed
-            .get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|m| !m.get("hidden").and_then(Value::as_bool).unwrap_or(false))
-            .map(|m| json!({ "modelId": m.get("id"), "name": m.get("displayName"), "description": m.get("description") }))
-            .collect();
-        let current = current_model.or_else(|| {
-            listed.get("data").and_then(Value::as_array)?.iter().find(|m| m.get("isDefault").and_then(Value::as_bool) == Some(true))?.get("id")?.as_str().map(String::from)
-        });
+    }
 
-        // codex-acp's slash commands, once the reply is out.
+    /// codex-acp's slash commands, once the session reply is out.
+    fn send_commands_later(&self, session_id: &str) {
         let client = self.client.clone();
-        let sid = thread_id.clone();
+        let sid = session_id.to_string();
         std::thread::spawn(move || {
             std::thread::sleep(COMMANDS_DELAY);
             client.update(&sid, json!({ "sessionUpdate": "available_commands_update", "availableCommands": commands() }));
         });
-
-        Ok(json!({
-            "sessionId": thread_id,
-            "modes": modes(Mode::Default),
-            "models": { "availableModels": models, "currentModelId": current },
-        }))
     }
 
     /// One prompt: a turn (or a review or compaction), relayed until it ends.
@@ -474,76 +446,59 @@ impl Agent {
                 self.answer(s, &mut items, &method, &id, &p);
                 continue;
             }
-            match method.as_str() {
-                "item/started" => self.item_started(s, &mut items, p.get("item").unwrap_or(&Value::Null)),
-                "item/completed" => self.item_completed(s, &mut items, p.get("item").unwrap_or(&Value::Null)),
-                "item/agentMessage/delta" => {
-                    items.streamed.insert(p.get("itemId").and_then(Value::as_str).unwrap_or("").to_string());
-                    self.text(s, "agent_message_chunk", p.get("delta").and_then(Value::as_str).unwrap_or(""));
-                }
-                "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-                    items.streamed.insert(p.get("itemId").and_then(Value::as_str).unwrap_or("").to_string());
-                    self.text(s, "agent_thought_chunk", p.get("delta").and_then(Value::as_str).unwrap_or(""));
-                }
-                "item/reasoning/summaryPartAdded" => self.text(s, "agent_thought_chunk", "\n\n"),
-                "item/commandExecution/outputDelta" => {
-                    let id = p.get("itemId").and_then(Value::as_str).unwrap_or("").to_string();
-                    items.output.entry(id).or_default().push(p.get("delta").and_then(Value::as_str).unwrap_or(""));
-                }
-                "turn/plan/updated" => {
-                    let entries: Vec<Value> = p
-                        .get("plan")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .map(|step| {
-                            let status = match step.get("status").and_then(Value::as_str) {
-                                Some("inProgress") => "in_progress",
-                                Some("completed") => "completed",
-                                _ => "pending",
-                            };
-                            json!({ "content": step.get("step"), "priority": "medium", "status": status })
-                        })
-                        .collect();
-                    self.client.update(&s.id, json!({ "sessionUpdate": "plan", "entries": entries }));
-                }
-                "account/rateLimits/updated" => self.notify_limits(&p),
-                "thread/tokenUsage/updated" => {
-                    let usage = p.get("tokenUsage").cloned().unwrap_or(Value::Null);
-                    let progress = {
-                        let mut meter = s.meter.lock().expect("meter lock");
-                        meter.observe(&usage);
-                        meter.progress(std::time::Instant::now())
-                    };
-                    // A long turn's spend shows as it happens, not at its end.
-                    if let Some(p) = progress {
-                        self.client.notify("_axel/usage", p.into_reply(json!({ "sessionId": s.id })));
-                    }
-                    if let Some(size) = usage.get("modelContextWindow").and_then(Value::as_u64) {
-                        let used = usage.pointer("/last/totalTokens").and_then(Value::as_u64).unwrap_or(0);
-                        self.client.update(&s.id, json!({ "sessionUpdate": "usage_update", "used": used, "size": size }));
-                    }
-                }
-                "warning" | "guardianWarning" => {
-                    if let Some(m) = p.get("message").and_then(Value::as_str) {
-                        self.text(s, "agent_message_chunk", m);
-                    }
-                }
-                "thread/compacted" if turn_id.is_none() => return Ok(json!({ "stopReason": "end_turn" })),
-                "turn/completed" => {
-                    let turn = p.get("turn").cloned().unwrap_or(Value::Null);
-                    let id = turn.get("id").and_then(Value::as_str);
-                    if turn_id.is_some() && id != turn_id {
-                        continue;
-                    }
-                    return match turn.get("status").and_then(Value::as_str) {
-                        Some("interrupted") => Ok(json!({ "stopReason": "cancelled" })),
-                        Some("failed") => Err(RpcError::internal(turn.pointer("/error/message").and_then(Value::as_str).unwrap_or("Codex failed the turn"))),
-                        _ => Ok(json!({ "stopReason": "end_turn" })),
-                    };
-                }
-                _ => {}
+            if let Some(end) = self.relay_event(s, &mut items, &method, &p, turn_id) {
+                return end;
             }
+        }
+    }
+
+    /// One of Codex's notifications.  `Some` when it ends the turn.
+    fn relay_event(&self, s: &Session, items: &mut Items, method: &str, p: &Value, turn_id: Option<&str>) -> Option<RpcResult> {
+        let delta = || p.get("delta").and_then(Value::as_str).unwrap_or("");
+        let item_id = || p.get("itemId").and_then(Value::as_str).unwrap_or("").to_string();
+        match method {
+            "item/started" => self.item_started(s, items, p.get("item").unwrap_or(&Value::Null)),
+            "item/completed" => self.item_completed(s, items, p.get("item").unwrap_or(&Value::Null)),
+            "item/agentMessage/delta" => {
+                items.streamed.insert(item_id());
+                self.text(s, "agent_message_chunk", delta());
+            }
+            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                items.streamed.insert(item_id());
+                self.text(s, "agent_thought_chunk", delta());
+            }
+            "item/reasoning/summaryPartAdded" => self.text(s, "agent_thought_chunk", "\n\n"),
+            "item/commandExecution/outputDelta" => items.output.entry(item_id()).or_default().push(delta()),
+            "turn/plan/updated" => self.client.update(&s.id, json!({ "sessionUpdate": "plan", "entries": plan_entries(p) })),
+            "account/rateLimits/updated" => self.notify_limits(p),
+            "thread/tokenUsage/updated" => self.on_token_usage(s, p),
+            "warning" | "guardianWarning" => {
+                if let Some(m) = p.get("message").and_then(Value::as_str) {
+                    self.text(s, "agent_message_chunk", m);
+                }
+            }
+            "thread/compacted" if turn_id.is_none() => return Some(Ok(json!({ "stopReason": "end_turn" }))),
+            "turn/completed" => return turn_end(p, turn_id),
+            _ => {}
+        }
+        None
+    }
+
+    /// A token report: the turn's spend so far, and how full the context is.
+    fn on_token_usage(&self, s: &Session, p: &Value) {
+        let usage = p.get("tokenUsage").cloned().unwrap_or(Value::Null);
+        let progress = {
+            let mut meter = s.meter.lock().expect("meter lock");
+            meter.observe(&usage);
+            meter.progress(std::time::Instant::now())
+        };
+        // A long turn's spend shows as it happens, not at its end.
+        if let Some(p) = progress {
+            self.client.notify("_axel/usage", p.into_reply(json!({ "sessionId": s.id })));
+        }
+        if let Some(size) = usage.get("modelContextWindow").and_then(Value::as_u64) {
+            let used = usage.pointer("/last/totalTokens").and_then(Value::as_u64).unwrap_or(0);
+            self.client.update(&s.id, json!({ "sessionUpdate": "usage_update", "used": used, "size": size }));
         }
     }
 
@@ -604,25 +559,7 @@ impl Agent {
                 let summary: Vec<&str> = item.get("summary").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
                 self.text(s, "agent_thought_chunk", &summary.join("\n\n"));
             }
-            "commandExecution" => {
-                let status = item.get("status").and_then(Value::as_str);
-                let mut output = items.output.remove(&id).map(|o| o.text).unwrap_or_default();
-                if output.is_empty() {
-                    output = item.get("aggregatedOutput").and_then(Value::as_str).unwrap_or("").to_string();
-                }
-                let ext = items.extension.remove(&id).flatten();
-                let mut u = json!({
-                    "sessionUpdate": "tool_call_update",
-                    "toolCallId": id,
-                    // codex-acp: completed, or exited 0; failed and declined fail.
-                    "status": if status == Some("completed") || item.get("exitCode").and_then(Value::as_i64) == Some(0) || !failed(status) { "completed" } else { "failed" },
-                    "rawOutput": item,
-                });
-                if let Some(c) = tools::command_output(&output, ext.as_deref()) {
-                    u["content"] = json!([c]);
-                }
-                self.client.update(&s.id, u);
-            }
+            "commandExecution" => self.command_completed(s, items, &id, item),
             "fileChange" => {
                 let (title, locations, content) = tools::file_changes(item);
                 let status = if failed(item.get("status").and_then(Value::as_str)) { "failed" } else { "completed" };
@@ -666,6 +603,28 @@ impl Agent {
             "contextCompaction" => self.text(s, "agent_message_chunk", "Context compacted\n"),
             _ => {}
         }
+    }
+
+    /// A command that ended: its status, and the output collected while it ran.
+    fn command_completed(&self, s: &Session, items: &mut Items, id: &str, item: &Value) {
+        let status = item.get("status").and_then(Value::as_str);
+        let failed = matches!(status, Some("failed" | "declined"));
+        let mut output = items.output.remove(id).map(|o| o.text).unwrap_or_default();
+        if output.is_empty() {
+            output = item.get("aggregatedOutput").and_then(Value::as_str).unwrap_or("").to_string();
+        }
+        let ext = items.extension.remove(id).flatten();
+        let mut u = json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": id,
+            // codex-acp: completed, or exited 0; failed and declined fail.
+            "status": if status == Some("completed") || item.get("exitCode").and_then(Value::as_i64) == Some(0) || !failed { "completed" } else { "failed" },
+            "rawOutput": item,
+        });
+        if let Some(c) = tools::command_output(&output, ext.as_deref()) {
+            u["content"] = json!([c]);
+        }
+        self.client.update(&s.id, u);
     }
 
     /// A saved item, for `session/load`: messages as chunks, tools as finished calls.
@@ -802,6 +761,81 @@ fn spawn_codex(cwd: &PathBuf) -> Result<Arc<Codex>, RpcError> {
         reader.pending.lock().expect("pending lock").clear();
     });
     Ok(codex)
+}
+
+/// The thread's settings: approval and sandbox for the default mode, the
+/// instructions, MCP servers and reasoning effort the host asks for.
+fn thread_params(params: &Value, cwd: &Path) -> Value {
+    let (approval, _, sandbox) = policy(Mode::Default);
+    let mut thread = json!({ "cwd": cwd, "approvalPolicy": approval, "sandbox": sandbox });
+    if let Some(append) = params.pointer("/_meta/systemPrompt/append").and_then(Value::as_str) {
+        thread["developerInstructions"] = json!(append);
+    } else if let Some(sp) = params.pointer("/_meta/systemPrompt").and_then(Value::as_str) {
+        thread["baseInstructions"] = json!(sp);
+    }
+    let mcp = mcp_config(params);
+    if !mcp.is_empty() {
+        thread["config"] = json!({ "mcp_servers": mcp });
+    }
+    // The agent's reasoning effort, from the host (`_meta.axel.effort`):
+    // the same override as `-c model_reasoning_effort=LEVEL`.
+    if let Some(effort) = crate::host::meta_effort(params).and_then(|e| axel_store::Harness::Codex.native_effort(e)) {
+        thread["config"]["model_reasoning_effort"] = json!(effort);
+    }
+    thread
+}
+
+/// The ACP `models` for a session reply: what Codex lists (but hides), and
+/// the thread's model, else Codex's default.
+fn list_models(codex: &Codex, current_model: Option<String>) -> Value {
+    // Without the list the session still runs, on Codex's default model.
+    let listed = codex.request("model/list", json!({}), START_TIMEOUT).unwrap_or_else(|e| {
+        eprintln!("[axel codex-acp] model/list: {e}");
+        Value::Null
+    });
+    let models: Vec<Value> = listed
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|m| !m.get("hidden").and_then(Value::as_bool).unwrap_or(false))
+        .map(|m| json!({ "modelId": m.get("id"), "name": m.get("displayName"), "description": m.get("description") }))
+        .collect();
+    let current = current_model.or_else(|| {
+        listed.get("data").and_then(Value::as_array)?.iter().find(|m| m.get("isDefault").and_then(Value::as_bool) == Some(true))?.get("id")?.as_str().map(String::from)
+    });
+    json!({ "availableModels": models, "currentModelId": current })
+}
+
+/// ACP plan entries from `turn/plan/updated`.
+fn plan_entries(p: &Value) -> Vec<Value> {
+    p.get("plan")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|step| {
+            let status = match step.get("status").and_then(Value::as_str) {
+                Some("inProgress") => "in_progress",
+                Some("completed") => "completed",
+                _ => "pending",
+            };
+            json!({ "content": step.get("step"), "priority": "medium", "status": status })
+        })
+        .collect()
+}
+
+/// How `turn/completed` ends the prompt: `None` when it is another turn's.
+fn turn_end(p: &Value, turn_id: Option<&str>) -> Option<RpcResult> {
+    let turn = p.get("turn").cloned().unwrap_or(Value::Null);
+    let id = turn.get("id").and_then(Value::as_str);
+    if turn_id.is_some() && id != turn_id {
+        return None;
+    }
+    Some(match turn.get("status").and_then(Value::as_str) {
+        Some("interrupted") => Ok(json!({ "stopReason": "cancelled" })),
+        Some("failed") => Err(RpcError::internal(turn.pointer("/error/message").and_then(Value::as_str).unwrap_or("Codex failed the turn"))),
+        _ => Ok(json!({ "stopReason": "end_turn" })),
+    })
 }
 
 /// The client's MCP servers as Codex `mcp_servers` config.
