@@ -81,6 +81,24 @@ pub fn spawn(
         .take()
         .ok_or_else(|| io::Error::other("no stderr"))?;
 
+    forward_stderr(stderr, stderr_tx);
+    let incoming = incoming_lines(stdout, log.clone());
+    let outgoing = futures::sink::unfold(stdin, move |mut w, line: String| {
+        let log = log.clone();
+        async move {
+            log.record(Dir::Out, &line);
+            let mut bytes = line.into_bytes();
+            bytes.push(b'\n');
+            w.write_all(&bytes).await?;
+            w.flush().await?;
+            Ok::<_, io::Error>(w)
+        }
+    });
+    Ok((child, Lines::new(outgoing, incoming)))
+}
+
+/// The adapter's stderr, line by line, to `stderr_tx` (for the pane).
+fn forward_stderr(stderr: tokio::process::ChildStderr, stderr_tx: UnboundedSender<String>) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
         while let Ok(Some(read)) = read_line_bounded(&mut reader, STDERR_LINE_LIMIT_BYTES).await {
@@ -94,10 +112,12 @@ pub fn spawn(
             }
         }
     });
+}
 
-    let log_in = log.clone();
-    let incoming = futures::stream::unfold(BufReader::new(stdout), move |mut reader| {
-        let log = log_in.clone();
+/// The adapter's stdout as a stream of JSON lines, each one recorded in `log`.
+fn incoming_lines(stdout: tokio::process::ChildStdout, log: Arc<FrameLog>) -> impl futures::Stream<Item = io::Result<String>> {
+    futures::stream::unfold(BufReader::new(stdout), move |mut reader| {
+        let log = log.clone();
         async move {
             loop {
                 match read_line_bounded(&mut reader, LINE_LIMIT_BYTES).await {
@@ -118,19 +138,5 @@ pub fn spawn(
                 }
             }
         }
-    });
-
-    let outgoing = futures::sink::unfold(stdin, move |mut w, line: String| {
-        let log = log.clone();
-        async move {
-            log.record(Dir::Out, &line);
-            let mut bytes = line.into_bytes();
-            bytes.push(b'\n');
-            w.write_all(&bytes).await?;
-            w.flush().await?;
-            Ok::<_, io::Error>(w)
-        }
-    });
-
-    Ok((child, Lines::new(outgoing, incoming)))
+    })
 }

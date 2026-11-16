@@ -459,30 +459,7 @@ impl Agent {
         }
 
         if tool == "ExitPlanMode" {
-            let outcome = self.ask(
-                session,
-                &tool_call,
-                json!([
-                    { "kind": "allow_always", "name": "Yes, and auto-accept edits", "optionId": "acceptEdits" },
-                    { "kind": "allow_once", "name": "Yes, and manually approve edits", "optionId": "default" },
-                    { "kind": "reject_once", "name": "No, keep planning", "optionId": "plan" }
-                ]),
-            )?;
-            if outcome.is_none() {
-                return Err("Tool use aborted".into());
-            }
-            return Ok(match outcome.as_deref().and_then(PermissionMode::parse) {
-                Some(mode @ (PermissionMode::Default | PermissionMode::AcceptEdits)) => {
-                    session.set_mode(mode);
-                    self.client.update(&session.id, json!({ "sessionUpdate": "current_mode_update", "currentModeId": mode.as_str() }));
-                    json!({
-                        "behavior": "allow",
-                        "updatedInput": input,
-                        "updatedPermissions": suggestions.unwrap_or_else(|| json!([{ "type": "setMode", "mode": mode.as_str(), "destination": "session" }])),
-                    })
-                }
-                _ => json!({ "behavior": "deny", "message": "User rejected request to exit plan mode.", "interrupt": true }),
-            });
+            return self.exit_plan_mode(session, &tool_call, input, suggestions);
         }
 
         let allowed_by_mode = match session.mode() {
@@ -514,6 +491,33 @@ impl Agent {
             Some("allow_always") => json!({ "behavior": "allow", "updatedInput": input, "updatedPermissions": suggestions.unwrap_or_else(|| always_rule(tool)) }),
             Some("allow") => json!({ "behavior": "allow", "updatedInput": input }),
             _ => json!({ "behavior": "deny", "message": "User refused permission to run tool", "interrupt": true }),
+        })
+    }
+
+    /// ExitPlanMode: ask how to go on, and switch to the mode picked
+    /// (accepting edits or not), or keep planning.
+    fn exit_plan_mode(&self, session: &Session, tool_call: &Value, input: Value, suggestions: Option<Value>) -> Result<Value, String> {
+        let outcome = self.ask(
+            session,
+            tool_call,
+            json!([
+                { "kind": "allow_always", "name": "Yes, and auto-accept edits", "optionId": PermissionMode::AcceptEdits.as_str() },
+                { "kind": "allow_once", "name": "Yes, and manually approve edits", "optionId": PermissionMode::Default.as_str() },
+                { "kind": "reject_once", "name": "No, keep planning", "optionId": PermissionMode::Plan.as_str() }
+            ]),
+        )?;
+        let Some(picked) = outcome else { return Err("Tool use aborted".into()) };
+        Ok(match PermissionMode::parse(&picked) {
+            Some(mode @ (PermissionMode::Default | PermissionMode::AcceptEdits)) => {
+                session.set_mode(mode);
+                self.client.update(&session.id, json!({ "sessionUpdate": "current_mode_update", "currentModeId": mode.as_str() }));
+                json!({
+                    "behavior": "allow",
+                    "updatedInput": input,
+                    "updatedPermissions": suggestions.unwrap_or_else(|| json!([{ "type": "setMode", "mode": mode.as_str(), "destination": "session" }])),
+                })
+            }
+            _ => json!({ "behavior": "deny", "message": "User rejected request to exit plan mode.", "interrupt": true }),
         })
     }
 

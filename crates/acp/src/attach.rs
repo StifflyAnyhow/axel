@@ -46,50 +46,7 @@ pub fn build_prompt_blocks(
     for path in attachments {
         let abs = absolutize(path);
         listed.push(abs.display().to_string());
-        let mime = mime_for(&abs);
-        let size = std::fs::metadata(&abs).map(|m| m.len()).ok();
-        if size.is_none() {
-            warn(format!("attachment not found: {}", abs.display()));
-        }
-        if caps.image
-            && is_image(&abs)
-            && let Some(len) = size
-        {
-            if len > MAX_INLINE_IMAGE_BYTES {
-                warn(format!(
-                    "{} is {len} bytes (> {MAX_INLINE_IMAGE_BYTES}); sending as a link",
-                    abs.display()
-                ));
-            } else {
-                match std::fs::read(&abs) {
-                    Ok(bytes) => {
-                        let data = base64::prelude::BASE64_STANDARD.encode(bytes);
-                        blocks.push(acp::ContentBlock::Image(
-                            acp::ImageContent::new(data, mime.unwrap_or("image/*"))
-                                .uri(file_uri(&abs)),
-                        ));
-                        continue;
-                    }
-                    Err(e) => warn(format!(
-                        "cannot read {}: {e}; sending as a link",
-                        abs.display()
-                    )),
-                }
-            }
-        }
-        let name = abs
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| abs.display().to_string());
-        let mut link = acp::ResourceLink::new(name, file_uri(&abs));
-        if let Some(m) = mime {
-            link = link.mime_type(m.to_string());
-        }
-        if let Some(len) = size {
-            // Saturating: no file is 2^63 bytes, and the size is only a hint.
-            link = link.size(i64::try_from(len).unwrap_or(i64::MAX));
-        }
-        blocks.push(acp::ContentBlock::ResourceLink(link));
+        blocks.push(attachment_block(&abs, caps, warn));
     }
     let mut listing = String::from("Attached files:");
     for p in &listed {
@@ -98,6 +55,50 @@ pub fn build_prompt_blocks(
     }
     blocks.push(acp::ContentBlock::Text(acp::TextContent::new(listing)));
     blocks
+}
+
+/// One attachment's block: the image inline when the agent takes images
+/// and it is small enough to read, else a link to the file.
+fn attachment_block(abs: &Path, caps: PromptCaps, warn: &mut dyn FnMut(String)) -> acp::ContentBlock {
+    let mime = mime_for(abs);
+    let size = std::fs::metadata(abs).map(|m| m.len()).ok();
+    if size.is_none() {
+        warn(format!("attachment not found: {}", abs.display()));
+    }
+    if caps.image
+        && is_image(abs)
+        && let Some(len) = size
+    {
+        if len > MAX_INLINE_IMAGE_BYTES {
+            warn(format!(
+                "{} is {len} bytes (> {MAX_INLINE_IMAGE_BYTES}); sending as a link",
+                abs.display()
+            ));
+        } else {
+            match std::fs::read(abs) {
+                Ok(bytes) => {
+                    let data = base64::prelude::BASE64_STANDARD.encode(bytes);
+                    return acp::ContentBlock::Image(
+                        acp::ImageContent::new(data, mime.unwrap_or("image/*")).uri(file_uri(abs)),
+                    );
+                }
+                Err(e) => warn(format!("cannot read {}: {e}; sending as a link", abs.display())),
+            }
+        }
+    }
+    let name = abs
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| abs.display().to_string());
+    let mut link = acp::ResourceLink::new(name, file_uri(abs));
+    if let Some(m) = mime {
+        link = link.mime_type(m.to_string());
+    }
+    if let Some(len) = size {
+        // Saturating: no file is 2^63 bytes, and the size is only a hint.
+        link = link.size(i64::try_from(len).unwrap_or(i64::MAX));
+    }
+    acp::ContentBlock::ResourceLink(link)
 }
 
 /// Absolute path strings for the `attachments` field of a UserMessage item.
