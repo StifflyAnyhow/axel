@@ -8,6 +8,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use axel_i18n::t;
 use axel_store::{AgentColor, Harness, RuntimeMode};
 use console::{Style, Term, style};
 use dialoguer::theme::ColorfulTheme;
@@ -103,7 +104,7 @@ const NAMES: [&str; 6] = ["atlas", "nova", "vega", "lyra", "orion", "juno"];
 
 pub fn run() -> Result<Next> {
     if !interactive() {
-        bail!("axel setup asks questions; run it in a terminal");
+        bail!("{}", t!("axel setup asks questions; run it in a terminal"));
     }
     let ctx = Ctx::open()?;
     let theme = theme();
@@ -115,9 +116,9 @@ pub fn run() -> Result<Next> {
     eprintln!(
         "  {}  {}",
         wordmark(),
-        dim("agent orchestration, designed for Rex")
+        dim(t!("agent orchestration, designed for Rex"))
     );
-    eprintln!("  {}", dim("Let's check this machine and create an agent."));
+    eprintln!("  {}", dim(t!("Let's check this machine and create an agent.")));
 
     let rex = check_machine();
     let installed = installed_harnesses();
@@ -135,13 +136,13 @@ pub fn run() -> Result<Next> {
             .map(|a| a.is_empty())
             .unwrap_or(true);
         if first {
-            heading("Your first agent");
+            heading(t!("Your first agent"));
             eprintln!(
                 "  {}",
-                dim("An agent is a name you can @mention, its own key, and how to run it.")
+                dim(t!("An agent is a name you can @mention, its own key, and how to run it."))
             );
         } else if !std::mem::replace(&mut again, true) {
-            heading("A new agent");
+            heading(t!("A new agent"));
         }
         eprintln!();
 
@@ -150,20 +151,20 @@ pub fn run() -> Result<Next> {
         // ---- next -----------------------------------------------------------------
         eprintln!();
         let choices = [
-            format!("Open Axel and give @{agent_name} something to do"),
-            "Create another agent".to_string(),
+            t!("Open Axel and give @{name} something to do", name = agent_name),
+            t!("Create another agent").to_string(),
         ];
         let pick = Select::with_theme(&theme)
-            .with_prompt("What next?")
+            .with_prompt(t!("What next?"))
             .items(&choices)
             .default(0)
             .interact()?;
         if pick == 1 {
             again = true;
-            heading("Another agent");
+            heading(t!("Another agent"));
             eprintln!(
                 "  {}",
-                dim("A builder and a reviewer on another model make a good pair.")
+                dim(t!("A builder and a reviewer on another model make a good pair."))
             );
             continue;
         }
@@ -174,15 +175,15 @@ pub fn run() -> Result<Next> {
 
 /// Report Rex and git; true when we run inside a Rex session.
 fn check_machine() -> bool {
-    heading("This machine");
+    heading(t!("This machine"));
     let rex = axel_rex::detect().is_some();
     check(
         rex,
         "Rex",
         if rex {
-            "you're in a Rex session".into()
+            t!("you're in a Rex session").into()
         } else {
-            dim("not here: Axel runs inline (superlogical.com/rex)")
+            dim(t!("not here: Axel runs inline (superlogical.com/rex)"))
         },
     );
     check(
@@ -190,7 +191,7 @@ fn check_machine() -> bool {
         "git",
         which("git")
             .map(|p| tilde(&p))
-            .unwrap_or_else(|| "not found".into()),
+            .unwrap_or_else(|| t!("not found").into()),
     );
     rex
 }
@@ -204,10 +205,10 @@ fn installed_harnesses() -> Vec<Harness> {
         let adapter = adapter(h);
         let managed = adapter.as_deref().and_then(which).is_some();
         let how = match &adapter {
-            _ if managed => "· managed".to_string(),
+            _ if managed => format!("· {}", t!("managed")),
             // Its adapter is a separate install (Pi's, Amp's): name it.
-            Some(a) if a != h.program() => format!("· in a pane until you install its ACP adapter, {a}"),
-            _ => "· in a pane (no ACP adapter)".to_string(),
+            Some(a) if a != h.program() => format!("· {}", t!("in a pane until you install its ACP adapter, {adapter}", adapter = a)),
+            _ => format!("· {}", t!("in a pane (no ACP adapter)")),
         };
         check(true, h.label(), format!("{}  {}", tilde(&found), dim(&how)));
         installed.push(h.clone());
@@ -220,11 +221,11 @@ fn explain_no_harness() {
     eprintln!();
     eprintln!(
         "  {}",
-        style("Axel runs your agents' own CLIs, and none is installed.").color256(DANGER)
+        style(t!("Axel runs your agents' own CLIs, and none is installed.")).color256(DANGER)
     );
     eprintln!(
         "  {}",
-        dim("Install one of them, log in once, then run `axel` again:")
+        dim(t!("Install one of them, log in once, then run `axel` again:"))
     );
     for h in &Harness::BUILTIN {
         eprintln!("    {:<13} {}", style(h.label()).bold(), dim(h.install()));
@@ -241,7 +242,7 @@ fn create_agent(ctx: &Ctx, theme: &ColorfulTheme, installed: &[Harness]) -> Resu
     // the agent can't start (Pi, say, refuses every session).
     eprintln!(
         "  {}",
-        dim(&format!("{} has to be logged in once: {}.", harness.label(), harness.login()))
+        dim(&t!("{harness} has to be logged in once: {how}.", harness = harness.label(), how = harness.login()))
     );
 
     let skills = pick_skills(theme)?;
@@ -258,14 +259,14 @@ fn create_agent(ctx: &Ctx, theme: &ColorfulTheme, installed: &[Harness]) -> Resu
         Some(color),
         mode,
     )
-    .context("creating the agent")?;
+    .context(t!("creating the agent"))?;
     let key: String = agent.pubkey.chars().take(6).collect();
     eprintln!();
     eprintln!(
         "  {} {} {}",
         style("✓").color256(OK),
         style(&agent.name).color256(color_index(color)).bold(),
-        dim(&format!("· key {key}… · attested by you"))
+        dim(&format!("· {}", t!("key {key}… · attested by you", key = key)))
     );
 
     // Claude Code asks once per machine to accept bypass mode, which autopilot uses.
@@ -284,7 +285,7 @@ fn ask_name(ctx: &Ctx, theme: &ColorfulTheme) -> Result<String> {
         .map(|n| n.to_string())
         .unwrap_or_default();
     let name: String = Input::with_theme(theme)
-        .with_prompt("Name")
+        .with_prompt(t!("Name"))
         .default(suggestion)
         .validate_with(|s: &String| -> Result<(), String> {
             let s = s.trim();
@@ -293,9 +294,9 @@ fn ask_name(ctx: &Ctx, theme: &ColorfulTheme) -> Result<String> {
                     .chars()
                     .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
             {
-                Err("letters, digits, - and _ only, so it works as @name".into())
+                Err(t!("letters, digits, - and _ only, so it works as @name").into())
             } else if ctx.store.agent_by_name(s).ok().flatten().is_some() {
-                Err(format!("there's already an agent named {s}"))
+                Err(t!("there's already an agent named {name}", name = s))
             } else {
                 Ok(())
             }
@@ -309,7 +310,7 @@ fn ask_harness(theme: &ColorfulTheme, installed: &[Harness]) -> Result<Harness> 
         eprintln!(
             "  {} {} {} {}",
             style("✓").color256(OK),
-            style("Harness").bold(),
+            style(t!("Harness")).bold(),
             dim("·"),
             style(only.label()).fg(YOU)
         );
@@ -317,7 +318,7 @@ fn ask_harness(theme: &ColorfulTheme, installed: &[Harness]) -> Result<Harness> 
     }
     let labels: Vec<String> = installed.iter().map(|h| h.label().to_string()).collect();
     let index = Select::with_theme(theme)
-        .with_prompt("Harness")
+        .with_prompt(t!("Harness"))
         .items(&labels)
         .default(0)
         .interact()?;
@@ -338,7 +339,7 @@ fn ask_color(ctx: &Ctx, theme: &ColorfulTheme) -> Result<AgentColor> {
         .position(|c| *c == AgentColor::Orange)
         .unwrap_or(0);
     let index = Select::with_theme(theme)
-        .with_prompt("Colour")
+        .with_prompt(t!("Colour"))
         .items(&color_items)
         .default((default_color + used) % colors.len())
         .interact()?;
@@ -350,26 +351,26 @@ fn ask_mode(theme: &ColorfulTheme) -> Result<RuntimeMode> {
         (
             RuntimeMode::Autopilot,
             "autopilot",
-            "never asks; the guard still refuses irreversible commands",
+            t!("never asks; the guard still refuses irreversible commands"),
         ),
         (
             RuntimeMode::Edits,
             "edits",
-            "file edits go through, anything else asks you",
+            t!("file edits go through, anything else asks you"),
         ),
         (
             RuntimeMode::Supervised,
             "supervised",
-            "asks before every action",
+            t!("asks before every action"),
         ),
-        (RuntimeMode::Plan, "plan", "read-only: looks and proposes"),
+        (RuntimeMode::Plan, "plan", t!("read-only: looks and proposes")),
     ];
     let mode_items: Vec<String> = modes
         .iter()
         .map(|(_, n, d)| format!("{n:<11} {d}"))
         .collect();
     let index = Select::with_theme(theme)
-        .with_prompt("Mode")
+        .with_prompt(t!("Mode"))
         .items(&mode_items)
         .default(0)
         .interact()?;
@@ -379,7 +380,7 @@ fn ask_mode(theme: &ColorfulTheme) -> Result<RuntimeMode> {
 fn offer_claude_bypass(theme: &ColorfulTheme) -> Result<()> {
     eprintln!();
     let yes = Confirm::with_theme(theme)
-        .with_prompt("Skip Claude Code's one-time autopilot prompt?")
+        .with_prompt(t!("Skip Claude Code's one-time autopilot prompt?"))
         .default(true)
         .interact()?;
     if yes {
@@ -387,12 +388,12 @@ fn offer_claude_bypass(theme: &ColorfulTheme) -> Result<()> {
             Ok(path) => check(
                 true,
                 "Claude Code",
-                dim(&format!("autopilot accepted in {}", tilde(&path))),
+                dim(&t!("autopilot accepted in {path}", path = tilde(&path))),
             ),
             Err(e) => check(
                 false,
                 "Claude Code",
-                format!("couldn't update its settings: {e:#}"),
+                t!("couldn't update its settings: {error}", error = format!("{e:#}")),
             ),
         }
     }
@@ -403,17 +404,17 @@ fn print_first_steps(agent_name: &str, rex: bool) {
     eprintln!();
     eprintln!(
         "  {}",
-        dim("Type what you want done in the prompt and press Enter, e.g.")
+        dim(t!("Type what you want done in the prompt and press Enter, e.g."))
     );
     eprintln!(
         "    {} {}",
         style("›").fg(ACCENT).bold(),
-        style(format!("@{agent_name} add a health check endpoint")).fg(YOU)
+        style(t!("@{name} add a health check endpoint", name = agent_name)).fg(YOU)
     );
     if !rex {
         eprintln!(
             "  {}",
-            dim("Inside Rex, `axel` floats over your window; here it runs inline.")
+            dim(t!("Inside Rex, `axel` floats over your window; here it runs inline."))
         );
     }
     eprintln!();
@@ -434,7 +435,8 @@ fn check(ok: bool, what: &str, detail: String) {
     } else {
         style("✗").color256(DANGER)
     };
-    eprintln!("  {mark} {:<16} {detail}", style(what).bold());
+    // Padded by terminal columns before styling: the escapes take none.
+    eprintln!("  {mark} {} {detail}", style(super::text::pad(what, 16)).bold());
 }
 
 /// The TUI's colour for an agent colour, as a 256-colour index.
@@ -461,26 +463,26 @@ fn pick_skills(theme: &ColorfulTheme) -> Result<Vec<String>> {
         eprintln!(
             "  {} {} {} {}",
             style("✓").color256(OK),
-            style("Skills").bold(),
+            style(t!("Skills")).bold(),
             dim("·"),
-            dim("none yet: all of them, once you add some")
+            dim(t!("none yet: all of them, once you add some"))
         );
-        eprintln!("    {}", dim(&format!("skills live in {}", tilde(&global))));
+        eprintln!("    {}", dim(&t!("skills live in {path}", path = tilde(&global))));
         return Ok(vec!["*".into()]);
     }
     let items: Vec<String> = found
         .values()
         .map(|s| match &s.description {
             Some(d) => format!(
-                "{:<20} {}",
-                s.name,
+                "{} {}",
+                super::text::pad(&s.name, 20),
                 d.chars().take(48).collect::<String>()
             ),
             None => s.name.clone(),
         })
         .collect();
     let picked = MultiSelect::with_theme(theme)
-        .with_prompt("Skills (Space picks, Enter when done)")
+        .with_prompt(t!("Skills (Space picks, Enter when done)"))
         .items(&items)
         .interact()?;
     let names: Vec<String> = found
@@ -518,16 +520,16 @@ fn claude_bypass_accepted() -> bool {
 }
 
 fn accept_claude_bypass() -> Result<PathBuf> {
-    let path = claude_settings_path().context("no home directory")?;
+    let path = claude_settings_path().context(t!("no home directory"))?;
     let mut v: serde_json::Value = match std::fs::read_to_string(&path) {
         Ok(s) if !s.trim().is_empty() => {
-            serde_json::from_str(&s).context("reading Claude Code's settings.json")?
+            serde_json::from_str(&s).context(t!("reading Claude Code's settings.json"))?
         }
         _ => serde_json::json!({}),
     };
     let obj = v
         .as_object_mut()
-        .context("Claude Code's settings.json isn't an object")?;
+        .context(t!("Claude Code's settings.json isn't an object"))?;
     obj.insert(
         "skipDangerousModePermissionPrompt".into(),
         serde_json::Value::Bool(true),

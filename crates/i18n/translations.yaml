@@ -1265,6 +1265,95 @@
   zh-Hans: "无法连接主机：{error}"
 "its session had stopped, and resuming it failed: {error}":
   zh-Hans: "它的会话已停止，恢复失败：{error}"
+# cmd/setup.rs (the first-run walkthrough)
+"axel setup asks questions; run it in a terminal":
+  zh-Hans: "axel setup 需要回答问题，请在终端中运行"
+"agent orchestration, designed for Rex":
+  zh-Hans: "为 Rex 设计的智能体编排工具"
+"Let's check this machine and create an agent.":
+  zh-Hans: "我们来检查一下这台机器，并创建一个智能体。"
+"Your first agent":
+  zh-Hans: "你的第一个智能体"
+"An agent is a name you can @mention, its own key, and how to run it.":
+  zh-Hans: "智能体由三部分组成：一个可以 @提及 的名字、它自己的密钥，以及运行它的方式。"
+"A new agent":
+  zh-Hans: "新的智能体"
+"Open Axel and give @{name} something to do":
+  zh-Hans: "打开 Axel，给 @{name} 安排点事做"
+"Create another agent":
+  zh-Hans: "再创建一个智能体"
+"What next?":
+  zh-Hans: "接下来做什么？"
+"Another agent":
+  zh-Hans: "另一个智能体"
+"A builder and a reviewer on another model make a good pair.":
+  zh-Hans: "一个负责构建、一个用另一个模型负责评审，是不错的搭配。"
+"This machine":
+  zh-Hans: "这台机器"
+"you're in a Rex session":
+  zh-Hans: "你正在 Rex 会话中"
+"not here: Axel runs inline (superlogical.com/rex)":
+  zh-Hans: "不在 Rex 中：Axel 将内联运行（superlogical.com/rex）"
+"managed":
+  zh-Hans: "托管"
+"in a pane until you install its ACP adapter, {adapter}":
+  zh-Hans: "在窗格中运行，直到你安装它的 ACP 适配器 {adapter}"
+"in a pane (no ACP adapter)":
+  zh-Hans: "在窗格中运行（没有 ACP 适配器）"
+"Axel runs your agents' own CLIs, and none is installed.":
+  zh-Hans: "Axel 运行的是各智能体自己的 CLI，但一个都没有安装。"
+"Install one of them, log in once, then run `axel` again:":
+  zh-Hans: "请安装其中一个，登录一次，然后再次运行 `axel`："
+"{harness} has to be logged in once: {how}.":
+  zh-Hans: "{harness} 需要先登录一次：{how}。"
+"creating the agent":
+  zh-Hans: "创建智能体"
+"key {key}… · attested by you":
+  zh-Hans: "密钥 {key}… · 由你签发证明"
+"Name":
+  zh-Hans: "名称"
+"letters, digits, - and _ only, so it works as @name":
+  zh-Hans: "只能使用字母、数字、- 和 _，以便用作 @名称"
+"there's already an agent named {name}":
+  zh-Hans: "已经有一个名为 {name} 的智能体"
+"Harness":
+  zh-Hans: "Harness"
+"Colour":
+  zh-Hans: "颜色"
+"never asks; the guard still refuses irreversible commands":
+  zh-Hans: "从不询问；守卫仍会拒绝不可逆的命令"
+"file edits go through, anything else asks you":
+  zh-Hans: "文件编辑直接通过，其他操作都会询问你"
+"asks before every action":
+  zh-Hans: "每个操作前都询问"
+"read-only: looks and proposes":
+  zh-Hans: "只读：只查看并提出方案"
+"Mode":
+  zh-Hans: "模式"
+"Skip Claude Code's one-time autopilot prompt?":
+  zh-Hans: "跳过 Claude Code 一次性的自动模式确认？"
+"autopilot accepted in {path}":
+  zh-Hans: "已在 {path} 中接受自动模式"
+"couldn't update its settings: {error}":
+  zh-Hans: "无法更新它的设置：{error}"
+"Type what you want done in the prompt and press Enter, e.g.":
+  zh-Hans: "在提示词框中输入你想完成的事，然后按 Enter，例如"
+"@{name} add a health check endpoint":
+  zh-Hans: "@{name} 添加一个健康检查接口"
+"Inside Rex, `axel` floats over your window; here it runs inline.":
+  zh-Hans: "在 Rex 中，`axel` 会浮在你的窗口上方；在这里它内联运行。"
+"Skills":
+  zh-Hans: "技能"
+"none yet: all of them, once you add some":
+  zh-Hans: "暂无：添加后将全部可用"
+"skills live in {path}":
+  zh-Hans: "技能存放在 {path}"
+"Skills (Space picks, Enter when done)":
+  zh-Hans: "技能（按 Space 选择，按 Enter 完成）"
+"reading Claude Code's settings.json":
+  zh-Hans: "读取 Claude Code 的 settings.json"
+"Claude Code's settings.json isn't an object":
+  zh-Hans: "Claude Code 的 settings.json 不是一个对象"
 # cmd/host.rs (remote hosts; what the other host answers stays as it sends it)
 "running ssh":
   zh-Hans: "运行 ssh"
