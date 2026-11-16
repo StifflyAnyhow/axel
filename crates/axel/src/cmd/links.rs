@@ -422,19 +422,6 @@ fn describe_call(it: &axel_store::ConversationItem, took: Option<i64>, width: us
         Some(cmd) => field("description").map(str::to_string).unwrap_or_else(|| drivers::title_of(cmd)),
         None => raw_title.trim().to_string(),
     };
-    let status = it.status.map(|s| s.as_str().to_string()).unwrap_or_default();
-    let status_col = match status.as_str() {
-        "completed" | "allowed" => GREEN,
-        "failed" | "denied" | "cancelled" => RED,
-        "running" | "pending" | "in_progress" => YELLOW,
-        _ => DIM,
-    };
-    // A tick says it went fine; anything else says what happened.
-    let status_label = match status.as_str() {
-        "completed" => "✓".to_string(),
-        "failed" => "✗ failed".to_string(),
-        s => s.replace('_', " "),
-    };
     let output = without_harness_notes(&output_text(c.get("raw_output")));
     let tool = field("command").map(drivers::tool_of);
     let mut meta = vec![clock(it.at)];
@@ -446,7 +433,7 @@ fn describe_call(it: &axel_store::ConversationItem, took: Option<i64>, width: us
         meta.push(kind.to_string());
     }
     // `completed · 2 errors · 1 warning`: how it went, then what the tool said.
-    let mut tail = vec![(status_label, status_col)];
+    let mut tail = vec![status_look(it.status)];
     if let Some(s) = tool.and_then(|t| drivers::summary(t, &output)) {
         let bad = s.contains("error") || s.contains("failed");
         tail.push((s, if bad { RED } else { "" }));
@@ -456,25 +443,71 @@ fn describe_call(it: &axel_store::ConversationItem, took: Option<i64>, width: us
     let inner = width.saturating_sub(2 * BAND_PAD).max(16);
     let copy = field("command").map(|_| CopyLink { item: it.id.clone() }.url());
     let head = header(&title, &meta.join(" · "), &tail, copy.as_deref(), inner);
-    let width = inner;
+    let body = call_body(c, &input, inner, links);
+    let path = field("file_path");
+    let mut out = String::new();
+    let output = output.replace('\t', "    ");
+    if !output.trim().is_empty() {
+        // What a read returns is the file, and so is the output of a command
+        // that only prints one file (`sed -n 15,45p src/help.rs`): highlight it
+        // as that file. Anything else stays plain.
+        match (kind, path, strip_line_numbers(&output), field("command").and_then(file_printed_by)) {
+            ("read", Some(p), Some(code), _) => out.push_str(&highlighted(&first_lines(&code), Lang::File(p), inner, "")),
+            (_, _, _, Some(p)) => out.push_str(&highlighted(&first_lines(output.trim_end()), Lang::File(p), inner, "")),
+            _ => match field("command").zip(tool).and_then(|(cmd, t)| drivers::tool_view(t, cmd, output.trim_end(), inner, links)) {
+                Some(view) => out.push_str(&view),
+                None => out.push_str(&wrap_plain(&first_lines(output.trim_end()), inner, INDENT, DIM)),
+            },
+        }
+    }
+    let mut sections = vec![Section { text: head, band: Band::Header }];
+    if !body.is_empty() {
+        sections.push(Section { text: body, band: Band::Body });
+    }
+    if !out.is_empty() {
+        sections.push(Section { text: out, band: Band::Result });
+    }
+    frame(&sections, inner + 2 * BAND_PAD)
+}
+
+/// How a call went, as its header says it and in which colour: a tick when
+/// it went fine, else what happened.
+fn status_look(status: Option<axel_store::ItemStatus>) -> (String, &'static str) {
+    use axel_store::ItemStatus as S;
+    match status {
+        Some(S::Completed) => ("✓".to_string(), GREEN),
+        Some(S::Failed) => ("✗ failed".to_string(), RED),
+        Some(s @ S::Allowed) => (s.as_str().to_string(), GREEN),
+        Some(s @ (S::Denied | S::Cancelled)) => (s.as_str().to_string(), RED),
+        Some(s @ (S::Running | S::Pending)) => (s.as_str().to_string(), YELLOW),
+        Some(s @ S::Answered) => (s.as_str().to_string(), DIM),
+        None => (String::new(), DIM),
+    }
+}
+
+/// What a call did, as its kind of tool reads best: a command, an edit's
+/// diff, a written file, a read's range, a search, a URL, a task; the raw
+/// input otherwise.  Then the places it names, when nothing above did.
+fn call_body(c: &serde_json::Value, input: &serde_json::Value, width: usize, links: &Linker) -> String {
+    let field = |k: &str| input.get(k).and_then(|v| v.as_str());
     let mut out = String::new();
     let path = field("file_path");
     if let Some(cmd) = field("command") {
-        out.push_str(&command_block(cmd, inner));
+        out.push_str(&command_block(cmd, width));
     } else if let (Some(path), Some(old), Some(new)) = (path, field("old_string"), field("new_string")) {
         out.push_str(&wrap_linked(path, links.url(path, None).as_deref(), width, INDENT, BOLD));
-        out.push_str(&diff_view(old, new, Lang::File(path), inner));
+        out.push_str(&diff_view(old, new, Lang::File(path), width));
     } else if let (Some(path), Some(content)) = (path, field("content")) {
         out.push_str(&wrap_linked(&format!("{path}  ({} lines)", content.lines().count()), links.url(path, None).as_deref(), width, INDENT, BOLD));
-        out.push_str(&highlighted(&first_lines(content), Lang::File(path), inner, ""));
+        out.push_str(&highlighted(&first_lines(content), Lang::File(path), width, ""));
     } else if let Some(path) = path {
         let range = match (input.get("offset").and_then(|v| v.as_i64()), input.get("limit").and_then(|v| v.as_i64())) {
-            (Some(o), Some(l)) => format!("  (lines {o}–{})", o + l),
+            (Some(o), Some(l)) => format!("  (lines {o}–{})", o.saturating_add(l)),
             (Some(o), None) => format!("  (from line {o})"),
             (None, Some(l)) => format!("  (first {l} lines)"),
             _ => String::new(),
         };
-        let first = input.get("offset").and_then(|v| v.as_u64()).map(|o| o.max(1) as usize);
+        let first = input.get("offset").and_then(|v| v.as_u64()).map(|o| usize::try_from(o.max(1)).unwrap_or(usize::MAX));
         out.push_str(&wrap_linked(&format!("{path}{range}"), links.url(path, first).as_deref(), width, INDENT, BOLD));
     } else if let Some(pattern) = field("pattern") {
         let place = [field("path"), field("glob")].into_iter().flatten().collect::<Vec<_>>().join("  ");
@@ -487,7 +520,7 @@ fn describe_call(it: &axel_store::ConversationItem, took: Option<i64>, width: us
             out.push_str(&wrap_plain(&first_lines(prompt), width, INDENT, DIM));
         }
     } else if !input.is_null() {
-        out.push_str(&highlighted(&serde_json::to_string_pretty(&input).unwrap_or_default(), Lang::Named("json"), inner, ""));
+        out.push_str(&highlighted(&serde_json::to_string_pretty(input).unwrap_or_default(), Lang::Named("json"), width, ""));
     }
     let paths: Vec<&str> = c.get("locations").and_then(|l| l.as_array()).into_iter().flatten().filter_map(|l| l.get("path").and_then(|p| p.as_str())).collect();
     if !paths.is_empty() && path.is_none() && field("command").is_none() {
@@ -495,29 +528,7 @@ fn describe_call(it: &axel_store::ConversationItem, took: Option<i64>, width: us
             out.push_str(&wrap_linked(p, links.url(p, None).as_deref(), width, INDENT, DIM));
         }
     }
-    let body = std::mem::take(&mut out);
-    let output = output.replace('\t', "    ");
-    if !output.trim().is_empty() {
-        // What a read returns is the file, and so is the output of a command
-        // that only prints one file (`sed -n 15,45p src/help.rs`): highlight it
-        // as that file. Anything else stays plain.
-        match (kind, path, strip_line_numbers(&output), field("command").and_then(file_printed_by)) {
-            ("read", Some(p), Some(code), _) => out.push_str(&highlighted(&first_lines(&code), Lang::File(p), inner, "")),
-            (_, _, _, Some(p)) => out.push_str(&highlighted(&first_lines(output.trim_end()), Lang::File(p), inner, "")),
-            _ => match field("command").zip(tool).and_then(|(cmd, t)| drivers::tool_view(t, cmd, output.trim_end(), inner, links)) {
-                Some(view) => out.push_str(&view),
-                None => out.push_str(&wrap_plain(&first_lines(output.trim_end()), width, INDENT, DIM)),
-            },
-        }
-    }
-    let mut sections = vec![Section { text: head, band: Band::Header }];
-    if !body.is_empty() {
-        sections.push(Section { text: body, band: Band::Body });
-    }
-    if !out.is_empty() {
-        sections.push(Section { text: out, band: Band::Result });
-    }
-    frame(&sections, inner + 2 * BAND_PAD)
+    out
 }
 
 /// A command's output without what the harness added after it (Claude Code's
