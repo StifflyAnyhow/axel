@@ -40,9 +40,9 @@ pub struct Peer {
 
 /// The newest entry is quoted up to this many characters: it is usually
 /// what the owner's message refers to.
-const NEWEST_CHARS: usize = 6000;
+const NEWEST_LIMIT_CHARS: usize = 6000;
 /// Older entries are quoted up to this many characters.
-const OLDER_CHARS: usize = 500;
+const OLDER_LIMIT_CHARS: usize = 500;
 /// At most this many entries, the newest.
 pub const MAX_ENTRIES: usize = 8;
 
@@ -65,14 +65,14 @@ pub fn render(entries: &[Entry], peers: &[Peer], first_turn: bool) -> Option<Str
             out.push_str(&format!("({skip} earlier left out)\n"));
         }
         for (i, e) in shown.iter().enumerate() {
-            let limit = if i + 1 == shown.len() { NEWEST_CHARS } else { OLDER_CHARS };
+            let limit_chars = if i + 1 == shown.len() { NEWEST_LIMIT_CHARS } else { OLDER_LIMIT_CHARS };
             let who = match &e.speaker {
                 Speaker::Owner { to } => format!("The owner, to {to}"),
                 Speaker::Agent { name } => format!("{name} replied"),
                 Speaker::Relay { from, to } => format!("{from}, to {to}"),
                 Speaker::Note { from } => format!("{from} left you a note (no reply needed)"),
             };
-            out.push_str(&format!("\n[{who}]\n{}\n", clip(e.text.trim(), limit)));
+            out.push_str(&format!("\n[{who}]\n{}\n", clip(e.text.trim(), limit_chars)));
         }
     }
     if !peers.is_empty() {
@@ -103,12 +103,12 @@ pub fn prepend(catch_up: Option<&str>, prompt: &str) -> String {
     }
 }
 
-/// At most `limit` characters, cut at a character boundary, with an ellipsis.
-fn clip(s: &str, limit: usize) -> String {
-    if s.chars().count() <= limit {
+/// At most `limit_chars` characters, cut at a character boundary, with an ellipsis.
+fn clip(s: &str, limit_chars: usize) -> String {
+    if s.chars().count() <= limit_chars {
         return s.to_string();
     }
-    let mut out: String = s.chars().take(limit).collect();
+    let mut out: String = s.chars().take(limit_chars).collect();
     out.push('…');
     out
 }
@@ -151,7 +151,7 @@ mod tests {
         assert!(c.contains("(5 earlier left out)"));
         assert!(!c.contains("reply 4 "), "only the last 8 entries");
         assert!(c.contains("reply 5 "));
-        assert!(c.contains(&format!("reply 5 {}…", "y".repeat(OLDER_CHARS - "reply 5 ".len()))), "older ones clipped");
+        assert!(c.contains(&format!("reply 5 {}…", "y".repeat(OLDER_LIMIT_CHARS - "reply 5 ".len()))), "older ones clipped");
         assert!(c.contains("[vega left you a note (no reply needed)]\nfyi: tests are green"));
     }
 

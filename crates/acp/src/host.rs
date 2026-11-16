@@ -676,7 +676,9 @@ struct Host<W: Write> {
     session_cost: f64,
     /// Standard cumulative cost takes precedence over adapter extensions.
     standard_cost_seen: bool,
-    cur_text: Option<TextItem>,
+    /// The message or thought being streamed, until another kind of
+    /// update closes it.
+    open_text: Option<TextItem>,
     /// Pending `Permission` items by item id.  Permission items carry
     /// `ref_id = "permission:<toolCallId>"` so tool-call updates never touch them.
     pending: HashMap<String, PendingPermission>,
@@ -736,7 +738,7 @@ impl<W: Write> Host<W> {
             turn_progress: false,
             session_cost,
             standard_cost_seen: false,
-            cur_text: None,
+            open_text: None,
             pending: HashMap::new(),
             queue: VecDeque::new(),
             can_steer: false,
@@ -1421,6 +1423,9 @@ impl<W: Write> Host<W> {
     /// Refuse another waiting prompt past [`QUEUED_MAX`].
     fn ensure_room_to_queue(&self) -> Result<()> {
         let waiting = self.queue.len() + self.steering.len();
+        // Every path that adds a waiting prompt comes through here, so the
+        // limit holds; a prompt going back from `steering` only moves.
+        debug_assert!(waiting <= QUEUED_MAX);
         anyhow::ensure!(waiting < QUEUED_MAX, "{waiting} messages are already waiting; send this once the agent has read some");
         Ok(())
     }
@@ -1451,6 +1456,7 @@ impl<W: Write> Host<W> {
         let Some(pos) = self.steering.iter().position(|q| q.item_id == item_id) else { return };
         let q = self.steering.remove(pos).expect("position checked");
         self.patch_item(item_id, json!({ "steering": null }));
+        debug_assert!(!self.queue.iter().chain(&self.steering).any(|w| w.item_id == item_id), "a prompt waits in one place only");
         if front {
             self.queue.push_front(q);
         } else {
@@ -1711,7 +1717,7 @@ impl<W: Write> Host<W> {
         self.turn_authored.clear();
         self.turn_progress_cost = 0.0;
         self.turn_progress = false;
-        self.cur_text = None;
+        self.open_text = None;
     }
 
     /// The session is working on `text`: its state, its status, and the
@@ -1833,7 +1839,7 @@ impl<W: Write> Host<W> {
         for id in unread.iter().rev() {
             self.unsteer_to_queue(id, true);
         }
-        debug_assert!(self.steering.is_empty() && self.pending.is_empty() && self.cur_text.is_none());
+        debug_assert!(self.steering.is_empty() && self.pending.is_empty() && self.open_text.is_none());
     }
 
     /// The turn's `TurnEnd` item on the thread and its signed `turn` record.
@@ -2104,7 +2110,7 @@ impl<W: Write> Host<W> {
         if text.is_empty() {
             return Ok(());
         }
-        if let Some(cur) = &self.cur_text
+        if let Some(cur) = &self.open_text
             && cur.kind != kind
         {
             self.finalize_text();
@@ -2112,7 +2118,7 @@ impl<W: Write> Host<W> {
         if kind == ItemKind::AssistantMessage {
             self.turn_assistant_text.push_str(text);
         }
-        match &mut self.cur_text {
+        match &mut self.open_text {
             Some(cur) => {
                 cur.text.push_str(text);
                 let (id, full) = (cur.id.clone(), cur.text.clone());
@@ -2126,7 +2132,7 @@ impl<W: Write> Host<W> {
                     None,
                     json!({ "text": text }),
                 )?;
-                self.cur_text = Some(TextItem {
+                self.open_text = Some(TextItem {
                     id: item.id,
                     kind,
                     text: text.to_string(),
@@ -2141,7 +2147,7 @@ impl<W: Write> Host<W> {
 
     /// Close the open text item (marks it Completed and prints the prose head).
     fn finalize_text(&mut self) {
-        if let Some(cur) = self.cur_text.take() {
+        if let Some(cur) = self.open_text.take() {
             if let Err(e) = self
                 .store
                 .update_item(&cur.id, Some(ItemStatus::Completed), None)
@@ -2710,20 +2716,22 @@ fn item_title(item: &ConversationItem) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Keep `v` if it serialises within `limit` bytes; otherwise its serialised head as a string.
-/// `v`, cut to about `limit` bytes. Text stays text: a string, or text
-/// blocks (`[{type: text, text}]`), is cut as text and stays readable; only
-/// other JSON is cut as its serialization (stored as a string).
-fn truncate_json(v: &Value, limit: usize) -> Value {
-    if v.to_string().len() <= limit {
+/// `v`, cut to about `limit_bytes`: kept whole when its serialization fits.
+/// Text stays text: a string, or text blocks (`[{type: text, text}]`), is
+/// cut as text and stays readable; only other JSON is cut as its
+/// serialization (stored as a string).
+fn truncate_json(v: &Value, limit_bytes: usize) -> Value {
+    if v.to_string().len() <= limit_bytes {
         return v.clone();
     }
     let cut = |s: &str| {
-        let mut end = limit.min(s.len());
+        let mut end = limit_bytes.min(s.len());
         while !s.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}…", &s[..end])
+        let out = format!("{}…", &s[..end]);
+        debug_assert!(out.len() <= limit_bytes + '…'.len_utf8());
+        out
     };
     match v {
         Value::String(s) => Value::String(cut(s)),
@@ -2735,11 +2743,12 @@ fn truncate_json(v: &Value, limit: usize) -> Value {
     }
 }
 
-/// First line of `s`, at most `n` chars.
-fn head(s: &str, n: usize) -> String {
+/// First line of `s`, at most `max_chars` chars, with an ellipsis when
+/// anything was left out.
+fn head(s: &str, max_chars: usize) -> String {
     let first = s.lines().next().unwrap_or("");
-    let mut out: String = first.chars().take(n).collect();
-    if first.chars().count() > n || s.lines().count() > 1 {
+    let mut out: String = first.chars().take(max_chars).collect();
+    if first.chars().count() > max_chars || s.lines().count() > 1 {
         out.push('…');
     }
     out

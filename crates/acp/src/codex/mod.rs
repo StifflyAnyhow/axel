@@ -72,7 +72,8 @@ impl Codex {
     fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
-        self.pending.lock().expect("pending lock").insert(id, tx);
+        let previous = self.pending.lock().expect("pending lock").insert(id, tx);
+        debug_assert!(previous.is_none(), "request ids come from a counter: never reused");
         self.stdin.send(&json!({ "id": id, "method": method, "params": params }));
         match rx.recv_timeout(timeout) {
             Ok(Ok(v)) => Ok(v),

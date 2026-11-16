@@ -71,6 +71,7 @@ impl TurnUsage {
         self.cache_read = self.cache_read.saturating_sub(other.cache_read);
         self.cache_write = self.cache_write.saturating_sub(other.cache_write);
         self.reasoning = self.reasoning.saturating_sub(other.reasoning).min(self.output);
+        debug_assert!(self.reasoning <= self.output, "reasoning is part of the output");
         self
     }
 

@@ -73,6 +73,8 @@ pub fn ref_name(thread_id: &str, session_id: &str, ordinal: i64, which: Which) -
 /// `same_as`, a tree equal to that snapshot's is that snapshot (so a turn
 /// that changed nothing has `after == before`).
 pub fn capture(dir: &Path, ref_name: &str, budget: Duration, same_as: Option<&Snapshot>) -> Result<Option<Snapshot>> {
+    // Never anywhere else: `refs/heads` would make a branch the user sees.
+    assert!(ref_name.starts_with(REFS), "checkpoints live under {REFS}");
     let deadline = Instant::now() + budget;
     let Some(mut snap) = take(dir, deadline)? else { return Ok(None) };
     if let Some(prev) = same_as.filter(|p| p.tree == snap.tree) {
@@ -147,6 +149,7 @@ pub fn changes(dir: &Path, before: &Snapshot, after: &Snapshot, authored: &[Path
     out.truncated = files.len() > TurnChanges::MAX_FILES;
     files.truncate(TurnChanges::MAX_FILES);
     out.files = files;
+    assert!(out.files.len() <= TurnChanges::MAX_FILES, "the turn envelope carries at most MAX_FILES files");
     Ok(out)
 }
 

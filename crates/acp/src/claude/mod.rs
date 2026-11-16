@@ -91,7 +91,8 @@ impl Session {
         let n = self.next_control.fetch_add(1, Ordering::SeqCst);
         let request_id = format!("axel-{n}");
         let (tx, rx) = mpsc::channel();
-        self.controls.lock().expect("controls lock").insert(request_id.clone(), tx);
+        let previous = self.controls.lock().expect("controls lock").insert(request_id.clone(), tx);
+        debug_assert!(previous.is_none(), "control request ids come from a counter: never reused");
         self.stdin.send(&json!({ "request_id": request_id, "type": "control_request", "request": request }));
         let resp = rx.recv_timeout(timeout).map_err(|_| {
             self.controls.lock().expect("controls lock").remove(&request_id);
@@ -1330,7 +1331,9 @@ fn new_uuid() -> String {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+    let uuid = format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]);
+    debug_assert_eq!(uuid.len(), 36, "the canonical 8-4-4-4-12 form");
+    uuid
 }
 
 /// A Claude user message for an ACP prompt: `promptToClaude`.

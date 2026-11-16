@@ -203,7 +203,8 @@ impl Client {
     pub fn request(&self, method: &str, params: Value) -> Result<Value, Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
-        self.pending.lock().expect("pending lock").insert(id, tx);
+        let previous = self.pending.lock().expect("pending lock").insert(id, tx);
+        debug_assert!(previous.is_none(), "request ids come from a counter: never reused");
         self.out.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         rx.recv().unwrap_or_else(|_| Err(json!({ "message": "client went away" })))
     }
