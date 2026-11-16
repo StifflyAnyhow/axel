@@ -170,29 +170,37 @@ pub fn run(thread: &str, session: Option<&str>, turn: Option<i64>, stat_only: bo
     Ok(())
 }
 
+/// The largest file whose two sides are highlighted: source files are far
+/// smaller, and a larger one is generated or data.
+const SYNTAX_FILE_BYTES_MAX: usize = 512 * 1024;
+/// The most source one diff pane highlights across all its files.
+const SYNTAX_TOTAL_BYTES_MAX: usize = 4 * 1024 * 1024;
+/// A line longer than this marks minified or generated text: no highlighting.
+const SYNTAX_LINE_BYTES_MAX: usize = 8192;
+
 /// Read bounded immutable blobs. Highlighting is optional: missing, binary,
 /// oversized or unusually long-lined sources keep the plain patch display.
-fn snapshot_syntax(dir: &Path, revision: &str, path: &str, budget: &mut usize) -> Option<Vec<Vec<axel_tui::diff::SyntaxSpan>>> {
+fn snapshot_syntax(dir: &Path, revision: &str, path: &str, budget_bytes: &mut usize) -> Option<Vec<Vec<axel_tui::diff::SyntaxSpan>>> {
     let object = format!("{revision}:{path}");
     let size = Command::new("git").arg("-C").arg(dir).args(["cat-file", "-s", &object]).stderr(Stdio::null()).output().ok()?;
     if !size.status.success() { return None }
     let size: usize = std::str::from_utf8(&size.stdout).ok()?.trim().parse().ok()?;
-    if size > 512 * 1024 || size > *budget { return None }
+    if size > SYNTAX_FILE_BYTES_MAX || size > *budget_bytes { return None }
     let output = Command::new("git").arg("-C").arg(dir).args(["cat-file", "blob", &object]).stderr(Stdio::null()).output().ok()?;
     if !output.status.success() { return None }
-    *budget = budget.saturating_sub(output.stdout.len());
+    *budget_bytes = budget_bytes.saturating_sub(output.stdout.len());
     let source = std::str::from_utf8(&output.stdout).ok()?;
-    if source.contains('\0') || source.lines().any(|line| line.len() > 8192) { return None }
+    if source.contains('\0') || source.lines().any(|line| line.len() > SYNTAX_LINE_BYTES_MAX) { return None }
     Some(super::links::diff_syntax(source, path))
 }
 
 fn checkpoint_syntax(dir: &Path, changes: &TurnChanges, patches: &[axel_tui::diff::FilePatch]) -> std::collections::BTreeMap<String, Vec<Vec<axel_tui::diff::SyntaxSpan>>> {
     use axel_tui::diff::LineKind;
-    let mut budget = 4 * 1024 * 1024;
+    let mut budget_bytes = SYNTAX_TOTAL_BYTES_MAX;
     patches.iter().map(|patch| {
         let original = changes.files.iter().find(|f| f.path == patch.path).and_then(|f| f.old_path.as_deref()).unwrap_or(&patch.path);
-        let old = snapshot_syntax(dir, &changes.before, original, &mut budget).unwrap_or_default();
-        let new = snapshot_syntax(dir, &changes.after, &patch.path, &mut budget).unwrap_or_default();
+        let old = snapshot_syntax(dir, &changes.before, original, &mut budget_bytes).unwrap_or_default();
+        let new = snapshot_syntax(dir, &changes.after, &patch.path, &mut budget_bytes).unwrap_or_default();
         let lines = patch.lines.iter().map(|line| {
             let (source, number) = if line.kind == LineKind::Del { (&old, line.old) } else { (&new, line.new) };
             number.and_then(|n| n.checked_sub(1)).and_then(|n| source.get(n)).cloned().unwrap_or_default()
@@ -206,40 +214,12 @@ fn run_pane(ctx: &Ctx, t: &axel_store::Thread, session: Option<&str>, turn: Opti
     let mut p = pick(ctx, &t.id, session, turn)?;
     let mut note: Option<String> = None;
     let mut offer_restore = false;
+    // Bounded by the person at the pane: each round waits for their next key.
     loop {
         let session_id = p.turn.session_id.clone();
         let ordinal = p.turn.summary.ordinal;
         let dir = repo_with_checkpoints(ctx, &t.id, &p.turn, &p.changes);
-        let mut data = DiffData {
-            agent: p.agent.clone(),
-            turn: ordinal,
-            title: t.title.clone(),
-            headline: headline(&p.changes),
-            files: p.changes.files.iter().map(entry).collect(),
-            patches: Vec::new(),
-            syntax: Default::default(),
-            between_turns: p.changes.between_turns,
-            truncated: p.changes.truncated,
-            note: note.take(),
-            offer_restore,
-            can_undo: false,
-        };
-        match &dir {
-            Ok(dir) => {
-                if !p.changes.files.is_empty() {
-                    data.patches = parse_patch(&patch(dir, &p.changes, false)?);
-                    data.syntax = checkpoint_syntax(dir, &p.changes, &data.patches);
-                    let blocked = undo::blocked_reason(ctx, &session_id)?;
-                    data.can_undo = blocked.is_none();
-                    if let Some(why) = blocked
-                        && data.note.is_none()
-                    {
-                        data.note = Some(format!("no undo: {why}"));
-                    }
-                }
-            }
-            Err(e) => data.note = Some(format!("{e:#}")),
-        }
+        let data = diff_data(ctx, t, &p, &dir, note.take(), offer_restore)?;
         let drafts = load_drafts(&session_id, ordinal);
         let (outcome, drafts) = run_diff(data, drafts)?;
         save_drafts(&session_id, ordinal, &drafts)?;
@@ -260,19 +240,9 @@ fn run_pane(ctx: &Ctx, t: &axel_store::Thread, session: Option<&str>, turn: Opti
                 });
             }
             Outcome::Undo => {
-                let dir = dir?;
-                note = Some(match undo::undo(&dir, &t.id, &p.changes)? {
-                    undo::UndoResult::Done(done) => {
-                        if let Err(e) = undo::notify(ctx, &t.id, &session_id, ordinal, &done.files, false) {
-                            eprintln!("axel: telling the agent: {e:#}");
-                        }
-                        format!("undone: {} back to before turn {ordinal} (snapshot {})", files_phrase(&done.files), short_ref(&done.snapshot_ref))
-                    }
-                    undo::UndoResult::Conflicts(files) => {
-                        offer_restore = true;
-                        format!("later work overlaps {}: nothing changed. R restores the turn's files to before it", files_phrase(&files))
-                    }
-                });
+                let (line, conflicts) = undo_turn(ctx, &t.id, &p, &dir?)?;
+                offer_restore = conflicts;
+                note = Some(line);
             }
             Outcome::Restore => {
                 let dir = dir?;
@@ -284,6 +254,62 @@ fn run_pane(ctx: &Ctx, t: &axel_store::Thread, session: Option<&str>, turn: Opti
             }
         }
     }
+}
+
+/// What the pane shows for the picked turn: its files, their patch with
+/// syntax colours when the checkpoints are here, and whether it can be undone.
+fn diff_data(ctx: &Ctx, t: &axel_store::Thread, p: &Pick, dir: &Result<PathBuf>, note: Option<String>, offer_restore: bool) -> Result<DiffData> {
+    let mut data = DiffData {
+        agent: p.agent.clone(),
+        turn: p.turn.summary.ordinal,
+        title: t.title.clone(),
+        headline: headline(&p.changes),
+        files: p.changes.files.iter().map(entry).collect(),
+        patches: Vec::new(),
+        syntax: Default::default(),
+        between_turns: p.changes.between_turns,
+        truncated: p.changes.truncated,
+        note,
+        offer_restore,
+        can_undo: false,
+    };
+    let dir = match dir {
+        Ok(dir) => dir,
+        Err(e) => {
+            data.note = Some(format!("{e:#}"));
+            return Ok(data);
+        }
+    };
+    if p.changes.files.is_empty() {
+        return Ok(data);
+    }
+    data.patches = parse_patch(&patch(dir, &p.changes, false)?);
+    data.syntax = checkpoint_syntax(dir, &p.changes, &data.patches);
+    let blocked = undo::blocked_reason(ctx, &p.turn.session_id)?;
+    data.can_undo = blocked.is_none();
+    if let Some(why) = blocked
+        && data.note.is_none()
+    {
+        data.note = Some(format!("no undo: {why}"));
+    }
+    Ok(data)
+}
+
+/// Undo the picked turn; the footer line, and whether later work overlaps
+/// it (so the pane offers to restore instead).
+fn undo_turn(ctx: &Ctx, thread_id: &str, p: &Pick, dir: &Path) -> Result<(String, bool)> {
+    let ordinal = p.turn.summary.ordinal;
+    Ok(match undo::undo(dir, thread_id, &p.changes)? {
+        undo::UndoResult::Done(done) => {
+            if let Err(e) = undo::notify(ctx, thread_id, &p.turn.session_id, ordinal, &done.files, false) {
+                eprintln!("axel: telling the agent: {e:#}");
+            }
+            (format!("undone: {} back to before turn {ordinal} (snapshot {})", files_phrase(&done.files), short_ref(&done.snapshot_ref)), false)
+        }
+        undo::UndoResult::Conflicts(files) => {
+            (format!("later work overlaps {}: nothing changed. R restores the turn's files to before it", files_phrase(&files)), true)
+        }
+    })
 }
 
 fn entry(f: &FileChange) -> FileEntry {
