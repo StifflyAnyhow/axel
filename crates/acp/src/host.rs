@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1 as acp;
-use agent_client_protocol::{Agent, Client, ConnectionTo, Responder};
+use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Responder};
 use anyhow::{Context, Result};
 use axel_identity::Keypair;
 use axel_store::{
@@ -265,53 +265,44 @@ pub async fn run_host(
 
     // Adapter.
     let cmd = adapter_command(&cfg.harness);
-    let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel::<String>();
+    let (stderr_tx, stderr_rx) = mpsc::unbounded_channel::<String>();
     let (child, transport_) = transport::spawn(&cmd, &cfg.cwd, &cfg.env, log.clone(), stderr_tx)?;
-    {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            while let Some(line) = stderr_rx.recv().await {
-                if tx.send(Event::Stderr(line)).is_err() {
-                    break;
-                }
-            }
-        });
-    }
+    forward_stderr(stderr_rx, tx.clone());
 
-    // Command socket.
-    if let Some(parent) = cfg.socket_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    // A socket left by a host that died; none is the usual case, and a real
-    // problem with the path shows in `bind` below.
-    let _ = std::fs::remove_file(&cfg.socket_path);
-    let listener = UnixListener::bind(&cfg.socket_path)
-        .with_context(|| format!("binding {}", cfg.socket_path.display()))?;
+    let listener = bind_socket(&cfg.socket_path)?;
     let socket_task = tokio::spawn(serve_socket(listener, tx.clone()));
-
     // The pane closing shows up as EOF on our stdin — only meaningful when stdin is a terminal.
     if std::io::stdin().is_terminal() {
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            // Nothing is typed into the host's pane: whatever is, is thrown
-            // away, so this holds no memory, and EOF and a read error both
-            // mean the pane is gone.
-            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
-            // The loop may have ended already; then there is nobody to stop.
-            let _ = tx.send(Event::StdinClosed);
-        });
+        watch_pane(tx.clone());
     }
 
     let socket_path = cfg.socket_path.clone();
     let mut host = Host::new(cfg, store, signer, out, cmd);
     host.line(CYAN, "●", &format!("adapter: {}", host.adapter.join(" ")));
+    let reason = serve_agent(&mut host, transport_, rx, &tx).await;
 
-    let tx_notif = tx.clone();
-    let tx_ext = tx.clone();
-    let tx_perm = tx.clone();
+    socket_task.abort();
+    host.finish(&reason);
+    if let Err(e) = std::fs::remove_file(&socket_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        host.line(RED, "✖", &format!("removing {}: {e}", socket_path.display()));
+    }
+    end_process_group(&child);
+    drop(child); // kill_on_drop
+    Ok(())
+}
+
+/// Connect to the adapter over `transport` and run the host until it stops;
+/// the reason it stopped.  The agent's notifications and requests become
+/// events on `tx`, but for file reads and writes, answered here.
+async fn serve_agent<W: Write + Send>(
+    host: &mut Host<W>,
+    transport: impl ConnectTo<Client> + 'static,
+    rx: mpsc::UnboundedReceiver<Event>,
+    tx: &mpsc::UnboundedSender<Event>,
+) -> String {
+    let (tx_notif, tx_ext, tx_perm) = (tx.clone(), tx.clone(), tx.clone());
     let cwd = host.cfg.cwd.clone();
     let cwd2 = cwd.clone();
     // Shared with the fs handler so a mid-session mode switch reaches writes.
@@ -341,24 +332,13 @@ pub async fn run_host(
             async move |req: acp::RequestPermissionRequest,
                         responder: Responder<acp::RequestPermissionResponse>,
                         _cx: ConnectionTo<Agent>| {
+                // No loop to ask, or it dropped the question: cancelled.
                 let (reply_tx, reply_rx) = oneshot::channel();
-                if tx_perm
-                    .send(Event::Permission {
-                        req,
-                        reply: reply_tx,
-                    })
-                    .is_err()
-                {
-                    return responder.respond(acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Cancelled,
-                    ));
-                }
-                match reply_rx.await {
-                    Ok(resp) => responder.respond(resp),
-                    Err(_) => responder.respond(acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Cancelled,
-                    )),
-                }
+                let resp = match tx_perm.send(Event::Permission { req, reply: reply_tx }) {
+                    Ok(()) => reply_rx.await.unwrap_or_else(|_| selected_or_cancelled(None)),
+                    Err(_) => selected_or_cancelled(None),
+                };
+                responder.respond(resp)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -379,25 +359,57 @@ pub async fn run_host(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(transport_, async |cx: ConnectionTo<Agent>| {
+        .connect_with(transport, async |cx: ConnectionTo<Agent>| {
             let reason = host.run(&cx, rx).await;
             Ok::<String, acp::Error>(reason)
         })
         .await;
-
-    let reason = match connected {
+    match connected {
         Ok(reason) => reason,
         Err(e) => format!("connection error: {e}"),
-    };
-    socket_task.abort();
-    host.finish(&reason);
-    if let Err(e) = std::fs::remove_file(&socket_path)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        host.line(RED, "✖", &format!("removing {}: {e}", socket_path.display()));
     }
-    // The adapter and everything it started (Claude, `npx` wrappers) share a
-    // process group: end the group, so no harness outlives its session.
+}
+
+/// The adapter's stderr lines, as events for the pane.
+fn forward_stderr(mut stderr_rx: mpsc::UnboundedReceiver<String>, tx: mpsc::UnboundedSender<Event>) {
+    tokio::spawn(async move {
+        while let Some(line) = stderr_rx.recv().await {
+            if tx.send(Event::Stderr(line)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// The command socket at `path`, in place of any left by a host that died.
+fn bind_socket(path: &Path) -> Result<UnixListener> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    // A socket left by a host that died; none is the usual case, and a real
+    // problem with the path shows in `bind` below.
+    let _ = std::fs::remove_file(path);
+    UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))
+}
+
+/// Send `StdinClosed` when the host's pane closes (its stdin ends).
+fn watch_pane(tx: mpsc::UnboundedSender<Event>) {
+    std::thread::spawn(move || {
+        // Nothing is typed into the host's pane: whatever is, is thrown
+        // away, so this holds no memory, and EOF and a read error both
+        // mean the pane is gone.
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        // The loop may have ended already; then there is nobody to stop.
+        let _ = tx.send(Event::StdinClosed);
+    });
+}
+
+/// The adapter and everything it started (Claude, `npx` wrappers) share a
+/// process group: end the group, so no harness outlives its session.
+fn end_process_group(child: &tokio::process::Child) {
     if let Some(pid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
         // SAFETY: signalling a process group we created (`process_group(0)`).
         // It may be gone already (ESRCH): then there is nothing left to end.
@@ -405,8 +417,6 @@ pub async fn run_host(
             libc::killpg(pid, libc::SIGTERM);
         }
     }
-    drop(child); // kill_on_drop
-    Ok(())
 }
 
 // --- events ------------------------------------------------------------------
@@ -473,6 +483,11 @@ impl TurnOutcome {
             TurnOutcome::Failed => ItemStatus::Failed,
         }
     }
+}
+
+/// A reply that refuses a command, saying why.
+fn error_reply(message: impl Into<String>) -> Reply {
+    Reply::Error { message: message.into() }
 }
 
 /// ` · 3 files +10 −2` for a turn's line in the pane, when it changed files.
@@ -897,79 +912,8 @@ impl<W: Write> Host<W> {
 
     /// initialize → session/new (or session/load); returns the initial prompt to send.
     async fn setup(&mut self, cx: &ConnectionTo<Agent>) -> Result<Option<(String, Vec<PathBuf>)>> {
-        let caps = acp::ClientCapabilities::new()
-            .fs(acp::FileSystemCapabilities::new()
-                .read_text_file(true)
-                .write_text_file(true))
-            .terminal(false);
-        let init = cx
-            .send_request(
-                acp::InitializeRequest::new(ProtocolVersion::V1)
-                    .client_capabilities(caps)
-                    .client_info(acp::Implementation::new("axel", env!("CARGO_PKG_VERSION"))),
-            )
-            .block_task()
-            .await
-            .map_err(|e| anyhow::anyhow!("initialize: {e}"))?;
-        self.prompt_caps = PromptCaps::from(&init.agent_capabilities.prompt_capabilities);
-        self.can_steer = init
-            .agent_capabilities
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("axel"))
-            .and_then(|a| a.get("steer"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let agent_name = init
-            .agent_info
-            .as_ref()
-            .map(|i| format!("{} {}", i.name, i.version))
-            .unwrap_or_else(|| self.cfg.harness.to_string());
-        self.line(
-            CYAN,
-            "●",
-            &format!(
-                "initialized: {agent_name} (protocol v{:?})",
-                init.protocol_version
-            ),
-        );
-
-        let session_meta = self.session_meta();
-        let sid = match (
-            &self.cfg.resume_native_id,
-            init.agent_capabilities.load_session,
-        ) {
-            (Some(native), true) => {
-                let raw = self
-                    .raw_request(
-                        cx,
-                        "session/load",
-                        acp::LoadSessionRequest::new(native.clone(), self.cfg.cwd.clone())
-                            .mcp_servers(self.cfg.mcp_servers.iter().map(McpStdio::to_acp).collect())
-                            .meta(session_meta.clone()),
-                    )
-                    .await?;
-                let resp: acp::LoadSessionResponse = serde_json::from_value(raw.clone()).context("session/load reply")?;
-                (acp::SessionId::new(native.clone()), resp.modes, raw)
-            }
-            (resume, _) => {
-                if resume.is_some() {
-                    self.dim("agent cannot load sessions; starting a new one");
-                }
-                let raw = self
-                    .raw_request(
-                        cx,
-                        "session/new",
-                        acp::NewSessionRequest::new(self.cfg.cwd.clone())
-                            .mcp_servers(self.cfg.mcp_servers.iter().map(McpStdio::to_acp).collect())
-                            .meta(session_meta.clone()),
-                    )
-                    .await?;
-                let resp: acp::NewSessionResponse = serde_json::from_value(raw.clone()).context("session/new reply")?;
-                (resp.session_id, resp.modes, raw)
-            }
-        };
-        let (sid, modes, raw) = sid;
+        let can_load = self.initialize(cx).await?;
+        let (sid, modes, raw) = self.open_session(cx, can_load).await?;
         self.apply_native_mode(cx, &sid, modes.as_ref()).await;
         let options = self.apply_model(cx, &sid, &raw).await;
         self.apply_effort(cx, &sid, options.as_ref().or(raw.get("configOptions"))).await;
@@ -998,6 +942,70 @@ impl<W: Write> Host<W> {
             .initial_prompt
             .take()
             .map(|t| (t, std::mem::take(&mut self.cfg.initial_attachments))))
+    }
+
+    /// `initialize`: what the agent takes in prompts, whether it takes
+    /// prompts into a running turn; whether it can load a session.
+    async fn initialize(&mut self, cx: &ConnectionTo<Agent>) -> Result<bool> {
+        let caps = acp::ClientCapabilities::new()
+            .fs(acp::FileSystemCapabilities::new()
+                .read_text_file(true)
+                .write_text_file(true))
+            .terminal(false);
+        let init = cx
+            .send_request(
+                acp::InitializeRequest::new(ProtocolVersion::V1)
+                    .client_capabilities(caps)
+                    .client_info(acp::Implementation::new("axel", env!("CARGO_PKG_VERSION"))),
+            )
+            .block_task()
+            .await
+            .map_err(|e| anyhow::anyhow!("initialize: {e}"))?;
+        self.prompt_caps = PromptCaps::from(&init.agent_capabilities.prompt_capabilities);
+        self.can_steer = init
+            .agent_capabilities
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("axel"))
+            .and_then(|a| a.get("steer"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let agent_name = init
+            .agent_info
+            .as_ref()
+            .map(|i| format!("{} {}", i.name, i.version))
+            .unwrap_or_else(|| self.cfg.harness.to_string());
+        self.line(CYAN, "●", &format!("initialized: {agent_name} (protocol v{:?})", init.protocol_version));
+        Ok(init.agent_capabilities.load_session)
+    }
+
+    /// `session/load` the native session to resume, when there is one and
+    /// the agent can; else `session/new`.  The session id, its modes, and
+    /// the raw reply (the typed one drops fields adapters add).
+    async fn open_session(&mut self, cx: &ConnectionTo<Agent>, can_load: bool) -> Result<(acp::SessionId, Option<acp::SessionModeState>, Value)> {
+        let session_meta = self.session_meta();
+        let mcp_servers: Vec<acp::McpServer> = self.cfg.mcp_servers.iter().map(McpStdio::to_acp).collect();
+        match (self.cfg.resume_native_id.clone(), can_load) {
+            (Some(native), true) => {
+                let params = acp::LoadSessionRequest::new(native.clone(), self.cfg.cwd.clone())
+                    .mcp_servers(mcp_servers)
+                    .meta(session_meta);
+                let raw = self.raw_request(cx, "session/load", params).await?;
+                let resp: acp::LoadSessionResponse = serde_json::from_value(raw.clone()).context("session/load reply")?;
+                Ok((acp::SessionId::new(native), resp.modes, raw))
+            }
+            (resume, _) => {
+                if resume.is_some() {
+                    self.dim("agent cannot load sessions; starting a new one");
+                }
+                let params = acp::NewSessionRequest::new(self.cfg.cwd.clone())
+                    .mcp_servers(mcp_servers)
+                    .meta(session_meta);
+                let raw = self.raw_request(cx, "session/new", params).await?;
+                let resp: acp::NewSessionResponse = serde_json::from_value(raw.clone()).context("session/new reply")?;
+                Ok((resp.session_id, resp.modes, raw))
+            }
+        }
     }
 
     /// A request by method name, returning the raw reply: the typed schema
@@ -1225,131 +1233,22 @@ impl<W: Write> Host<W> {
         in_turn: bool,
     ) -> (Reply, Action) {
         match cmd {
-            Command::Prompt {
-                text,
-                attachments,
-                steer,
-                from,
-            } => {
-                if text.trim().is_empty() && attachments.is_empty() {
-                    return (
-                        Reply::Error {
-                            message: "empty prompt".into(),
-                        },
-                        Action::None,
-                    );
-                }
-                if !in_turn {
-                    return (Reply::Ok, Action::StartPrompt(text, attachments, from));
-                }
-                // The owner's message goes into the running turn. Another
-                // agent's waits for its own turn, so its answer goes back to it.
-                if !steer && self.can_steer && from.is_none() {
-                    return match self.record_steer(text, attachments) {
-                        Ok(item_id) => (Reply::Steering { item_id: item_id.clone() }, Action::Steer(item_id)),
-                        Err(e) => (Reply::Error { message: format!("store: {e}") }, Action::None),
-                    };
-                }
-                match self.enqueue(text, attachments, steer, from) {
-                    Ok(item_id) => {
-                        if steer && let Err(e) = self.cancel_turn(cx) {
-                            return (Reply::Error { message: e }, Action::None);
-                        }
-                        (Reply::Queued { item_id }, Action::None)
-                    }
-                    Err(e) => (
-                        Reply::Error {
-                            message: format!("queue: {e}"),
-                        },
-                        Action::None,
-                    ),
-                }
-            }
-            Command::Note { text, from } => {
-                if text.trim().is_empty() {
-                    return (Reply::Error { message: "empty note".into() }, Action::None);
-                }
-                let content = json!({ "text": text, "from": from.pubkey, "fyi": true });
-                match self.push(ItemKind::UserMessage, Some(ItemStatus::Completed), None, content) {
-                    Ok(_) => {
-                        self.line(DIM, "✎", &format!("note from {}  {}", from.name, head(&text, 100)));
-                        (Reply::Ok, Action::None)
-                    }
-                    Err(e) => (Reply::Error { message: format!("store: {e}") }, Action::None),
-                }
-            }
-            Command::Steer { item_id } => {
-                let Some(pos) = self.queue.iter().position(|q| q.item_id == item_id) else {
-                    return (
-                        Reply::Error {
-                            message: "that message is no longer queued".into(),
-                        },
-                        Action::None,
-                    );
-                };
-                if !in_turn {
-                    let (text, files, from) = self.take_queued(Some(pos)).expect("position checked");
-                    return (Reply::Ok, Action::StartPrompt(text, files, from));
-                }
-                // Into the running turn, rather than cancelling it.
-                if self.can_steer && self.queue[pos].from.is_none() {
-                    let q = self.queue.remove(pos).expect("position checked");
-                    self.patch_item(&q.item_id, json!({ "steering": true }));
-                    let id = q.item_id.clone();
-                    self.steering.push_back(q);
-                    return (Reply::Steering { item_id: id.clone() }, Action::Steer(id));
-                }
-                let q = self.queue.remove(pos).expect("position checked");
-                self.queue.push_front(q);
-                match self.cancel_turn(cx) {
-                    Ok(()) => (Reply::Ok, Action::None),
-                    Err(e) => (Reply::Error { message: e }, Action::None),
-                }
-            }
-            Command::Dequeue { item_id } => {
-                let Some(pos) = self.queue.iter().position(|q| q.item_id == item_id) else {
-                    return (
-                        Reply::Error {
-                            message: "that message is no longer queued".into(),
-                        },
-                        Action::None,
-                    );
-                };
-                self.queue.remove(pos);
-                if let Err(e) = self.store.delete_item(&item_id) {
-                    self.line(RED, "✖", &format!("store: {e}"));
-                }
-                self.dim(&format!("dequeued {item_id}"));
-                (Reply::Ok, Action::None)
-            }
-            Command::Edit { item_id, text } => {
-                if text.trim().is_empty() {
-                    return (Reply::Error { message: "empty message: remove it instead".into() }, Action::None);
-                }
-                let Some(q) = self.queue.iter_mut().find(|q| q.item_id == item_id) else {
-                    return (Reply::Error { message: "the agent has read that message already".into() }, Action::None);
-                };
-                q.text = text.clone();
-                self.patch_item(&item_id, json!({ "text": text }));
-                self.dim(&format!("edited {item_id}"));
-                (Reply::Ok, Action::None)
-            }
+            Command::Prompt { text, attachments, steer, from } => self.on_prompt(cx, text, attachments, steer, from, in_turn),
+            Command::Note { text, from } => (self.on_note(&text, &from), Action::None),
+            Command::Steer { item_id } => self.on_steer(cx, &item_id, in_turn),
+            Command::Dequeue { item_id } => (self.on_dequeue(&item_id), Action::None),
+            Command::Edit { item_id, text } => (self.on_edit(&item_id, text), Action::None),
             Command::SetMode { mode } => (Reply::Ok, Action::SetMode(mode)),
             Command::Cancel => {
                 self.cancel_pending("cancelled");
                 if in_turn && let Err(e) = self.cancel_turn(cx) {
-                    return (Reply::Error { message: e }, Action::None);
+                    return (error_reply(e), Action::None);
                 }
                 (Reply::Ok, Action::None)
             }
             Command::Answer { item_id, option_id } => match self.answer(&item_id, &option_id) {
                 Ok(()) => (Reply::Ok, Action::None),
-                Err(e) => (
-                    Reply::Error {
-                        message: e.to_string(),
-                    },
-                    Action::None,
-                ),
+                Err(e) => (error_reply(e.to_string()), Action::None),
             },
             Command::Status => (
                 Reply::Status {
@@ -1362,6 +1261,109 @@ impl<W: Write> Host<W> {
             ),
             Command::Stop => (Reply::Ok, Action::Stop),
         }
+    }
+
+    /// A prompt: it starts a turn, goes into the running one, or waits.
+    fn on_prompt(
+        &mut self,
+        cx: &ConnectionTo<Agent>,
+        text: String,
+        attachments: Vec<PathBuf>,
+        steer: bool,
+        from: Option<Sender>,
+        in_turn: bool,
+    ) -> (Reply, Action) {
+        if text.trim().is_empty() && attachments.is_empty() {
+            return (error_reply("empty prompt"), Action::None);
+        }
+        if !in_turn {
+            return (Reply::Ok, Action::StartPrompt(text, attachments, from));
+        }
+        // The owner's message goes into the running turn. Another
+        // agent's waits for its own turn, so its answer goes back to it.
+        if !steer && self.can_steer && from.is_none() {
+            return match self.record_steer(text, attachments) {
+                Ok(item_id) => (Reply::Steering { item_id: item_id.clone() }, Action::Steer(item_id)),
+                Err(e) => (error_reply(format!("store: {e}")), Action::None),
+            };
+        }
+        match self.enqueue(text, attachments, steer, from) {
+            Ok(item_id) => {
+                if steer && let Err(e) = self.cancel_turn(cx) {
+                    return (error_reply(e), Action::None);
+                }
+                (Reply::Queued { item_id }, Action::None)
+            }
+            Err(e) => (error_reply(format!("queue: {e}")), Action::None),
+        }
+    }
+
+    /// A note from another agent: on the thread, no turn.
+    fn on_note(&mut self, text: &str, from: &Sender) -> Reply {
+        if text.trim().is_empty() {
+            return error_reply("empty note");
+        }
+        let content = json!({ "text": text, "from": from.pubkey, "fyi": true });
+        match self.push(ItemKind::UserMessage, Some(ItemStatus::Completed), None, content) {
+            Ok(_) => {
+                self.line(DIM, "✎", &format!("note from {}  {}", from.name, head(text, 100)));
+                Reply::Ok
+            }
+            Err(e) => error_reply(format!("store: {e}")),
+        }
+    }
+
+    /// Send a queued prompt now: it starts a turn, goes into the running
+    /// one, or goes first and cancels it.
+    fn on_steer(&mut self, cx: &ConnectionTo<Agent>, item_id: &str, in_turn: bool) -> (Reply, Action) {
+        let Some(pos) = self.queue.iter().position(|q| q.item_id == item_id) else {
+            return (error_reply("that message is no longer queued"), Action::None);
+        };
+        if !in_turn {
+            let (text, files, from) = self.take_queued(Some(pos)).expect("position checked");
+            return (Reply::Ok, Action::StartPrompt(text, files, from));
+        }
+        // Into the running turn, rather than cancelling it.
+        if self.can_steer && self.queue[pos].from.is_none() {
+            let q = self.queue.remove(pos).expect("position checked");
+            self.patch_item(&q.item_id, json!({ "steering": true }));
+            let id = q.item_id.clone();
+            self.steering.push_back(q);
+            return (Reply::Steering { item_id: id.clone() }, Action::Steer(id));
+        }
+        let q = self.queue.remove(pos).expect("position checked");
+        self.queue.push_front(q);
+        match self.cancel_turn(cx) {
+            Ok(()) => (Reply::Ok, Action::None),
+            Err(e) => (error_reply(e), Action::None),
+        }
+    }
+
+    /// Withdraw a queued prompt.
+    fn on_dequeue(&mut self, item_id: &str) -> Reply {
+        let Some(pos) = self.queue.iter().position(|q| q.item_id == item_id) else {
+            return error_reply("that message is no longer queued");
+        };
+        self.queue.remove(pos);
+        if let Err(e) = self.store.delete_item(item_id) {
+            self.line(RED, "✖", &format!("store: {e}"));
+        }
+        self.dim(&format!("dequeued {item_id}"));
+        Reply::Ok
+    }
+
+    /// Change the text of a queued prompt.
+    fn on_edit(&mut self, item_id: &str, text: String) -> Reply {
+        if text.trim().is_empty() {
+            return error_reply("empty message: remove it instead");
+        }
+        let Some(q) = self.queue.iter_mut().find(|q| q.item_id == item_id) else {
+            return error_reply("the agent has read that message already");
+        };
+        q.text = text.clone();
+        self.patch_item(item_id, json!({ "text": text }));
+        self.dim(&format!("edited {item_id}"));
+        Reply::Ok
     }
 
     // --- turns ---
@@ -1427,11 +1429,8 @@ impl<W: Write> Host<W> {
     /// can't take it (the turn just ended), it waits in the queue instead.
     async fn send_steer(&mut self, cx: &ConnectionTo<Agent>, item_id: &str) {
         let Some(q) = self.steering.iter().find(|q| q.item_id == item_id) else { return };
-        let mut warnings = Vec::new();
-        let blocks = attach::build_prompt_blocks(&q.text, &q.files, self.prompt_caps, &mut |w| warnings.push(w));
-        for w in warnings {
-            self.line(YELLOW, "!", &w);
-        }
+        let (text, files) = (q.text.clone(), q.files.clone());
+        let blocks = self.prompt_blocks(&text, &files);
         let Some(sid) = self.native_session_id.clone() else { return };
         let params = json!({ "sessionId": sid.to_string(), "messageId": item_id, "prompt": blocks });
         let accepted = match self.raw_request(cx, "_axel/steer", params).await {
@@ -1686,6 +1685,26 @@ impl<W: Write> Host<W> {
         let catch_up = self.catch_up();
         self.seen_through = Some(chrono::Utc::now().timestamp_millis());
         let wire_text = crate::catchup::prepend(catch_up.as_deref(), &framed);
+        self.reset_turn_tallies();
+        self.announce_turn_start(&text);
+        // Still before session/prompt, so the agent's first edit cannot enter
+        // the before snapshot. Only message visibility moves ahead of this I/O.
+        self.turn_before = self.checkpoint(checkpoint::Which::Before);
+        let files_note = if files.is_empty() { String::new() } else { format!(" {DIM}+{} file(s){RESET}", files.len()) };
+        self.line(BOLD, "▶", &format!("prompt {}  {DIM}{}{RESET}{files_note}", self.turn, head(&text, 100)));
+        let blocks = self.prompt_blocks(&wire_text, &files);
+        let sid = self
+            .native_session_id
+            .clone()
+            .expect("session created before prompting");
+        let fut = cx
+            .send_request(acp::PromptRequest::new(sid, blocks))
+            .block_task();
+        Box::pin(fut)
+    }
+
+    /// What a turn counts starts at zero.
+    fn reset_turn_tallies(&mut self) {
         self.turn_assistant_text.clear();
         self.turn_tool_calls = 0;
         self.turn_files_edited = 0;
@@ -1693,6 +1712,11 @@ impl<W: Write> Host<W> {
         self.turn_progress_cost = 0.0;
         self.turn_progress = false;
         self.cur_text = None;
+    }
+
+    /// The session is working on `text`: its state, its status, and the
+    /// pane's program status.
+    fn announce_turn_start(&mut self, text: &str) {
         if let Err(e) = self.set_state(SessionState::Running) {
             self.line(RED, "✖", &format!("store: {e}"));
         }
@@ -1702,44 +1726,24 @@ impl<W: Write> Host<W> {
             &StatusReport {
                 state: StatusState::Working,
                 title: Some(format!("turn {}", self.turn)),
-                msg: Some(head(&text, 120)),
+                msg: Some(head(text, 120)),
                 ..Default::default()
             },
         ) {
             self.line(RED, "✖", &format!("status: {e}"));
         }
-        self.program_status(axel_rex::osc::State::Working, None, &head(&text, 200));
-        // Still before session/prompt, so the agent's first edit cannot enter
-        // the before snapshot. Only message visibility moves ahead of this I/O.
-        self.turn_before = self.checkpoint(checkpoint::Which::Before);
-        let turn = self.turn;
-        let files_note = if files.is_empty() {
-            String::new()
-        } else {
-            format!(" {DIM}+{} file(s){RESET}", files.len())
-        };
-        self.line(
-            BOLD,
-            "▶",
-            &format!(
-                "prompt {turn}  {DIM}{}{RESET}{files_note}",
-                head(&text, 100)
-            ),
-        );
+        self.program_status(axel_rex::osc::State::Working, None, &head(text, 200));
+    }
+
+    /// A prompt's content blocks, with a warning in the pane for each
+    /// attachment that couldn't go in as it is.
+    fn prompt_blocks(&mut self, text: &str, files: &[PathBuf]) -> Vec<acp::ContentBlock> {
         let mut warnings = Vec::new();
-        let blocks =
-            attach::build_prompt_blocks(&wire_text, &files, self.prompt_caps, &mut |w| warnings.push(w));
+        let blocks = attach::build_prompt_blocks(text, files, self.prompt_caps, &mut |w| warnings.push(w));
         for w in warnings {
             self.line(YELLOW, "!", &w);
         }
-        let sid = self
-            .native_session_id
-            .clone()
-            .expect("session created before prompting");
-        let fut = cx
-            .send_request(acp::PromptRequest::new(sid, blocks))
-            .block_task();
-        Box::pin(fut)
+        blocks
     }
 
     /// What the turn spent, when the reply says it in Axel's terms (our own
