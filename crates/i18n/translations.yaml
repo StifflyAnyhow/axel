@@ -786,8 +786,6 @@
   zh-Hans: "名为 {name} 的智能体已存在"
 "{old} is now {new}; sessions already running keep calling it {old} until they restart":
   zh-Hans: "{old} 已改名为 {new}；正在运行的会话在重启前仍称它为 {old}"
-"{n} unread":
-  zh-Hans: "{n} 条未读"
 "reach {who}":
   zh-Hans: "可联系范围 {who}"
 "Claude config directory: {dir}":
@@ -861,8 +859,6 @@
   zh-Hans: "不是 git 仓库"
 "attached {path} to {title}":
   zh-Hans: "已将 {path} 关联到「{title}」"
-"scratch":
-  zh-Hans: "临时"
 "the thread vanished":
   zh-Hans: "话题已不存在"
 "sessions:":
@@ -894,8 +890,6 @@
 "thread {thread}\nsession {session}\nrex window {window}":
   zh-Hans: "话题 {thread}\n会话 {session}\nRex 窗口 {window}"
 # cmd/session.rs, cmd/inbox.rs
-"you":
-  zh-Hans: "你"
 "no session {id}":
   zh-Hans: "没有会话 {id}"
 "ended {session}":
@@ -1016,8 +1010,6 @@
   zh-Hans: "此话题上没有第 {n} 轮"
 "no turn on this thread changed a file (or none left checkpoints)":
   zh-Hans: "此话题上没有任何一轮修改过文件（或都没有留下检查点）"
-"agent":
-  zh-Hans: "智能体"
 "turn {n} of {agent} left no checkpoints (not a git workspace, or an older build)":
   zh-Hans: "{agent} 的第 {n} 轮没有留下检查点（不是 git 工作区，或是旧版本）"
 "1 file +{added} −{removed}":
@@ -1133,16 +1125,10 @@
   zh-Hans: "pbcopy 失败"
 "copied {n} bytes from {item}":
   zh-Hans: "已从 {item} 复制 {n} 字节"
-"1 tool call":
-  zh-Hans: "1 次工具调用"
-"{n} tool calls":
-  zh-Hans: "{n} 次工具调用"
 "no thread {id}":
   zh-Hans: "没有话题 {id}"
 "Esc or q closes · scroll as usual":
   zh-Hans: "按 Esc 或 q 关闭 · 照常滚动"
-"failed":
-  zh-Hans: "失败"
 "{n} lines":
   zh-Hans: "{n} 行"
 "lines {from}–{to}":
@@ -1176,8 +1162,6 @@
   zh-Hans: "托管（{program}）"
 "pane ({program} not found on PATH)":
   zh-Hans: "窗格（PATH 中找不到 {program}）"
-"pane":
-  zh-Hans: "窗格"
 "starting the session host":
   zh-Hans: "启动会话宿主"
 "workspace directory does not exist: {path}":
@@ -1310,14 +1294,10 @@
   zh-Hans: "创建智能体"
 "key {key}… · attested by you":
   zh-Hans: "密钥 {key}… · 由你签发证明"
-"Name":
-  zh-Hans: "名称"
 "letters, digits, - and _ only, so it works as @name":
   zh-Hans: "只能使用字母、数字、- 和 _，以便用作 @名称"
 "there's already an agent named {name}":
   zh-Hans: "已经有一个名为 {name} 的智能体"
-"Harness":
-  zh-Hans: "Harness"
 "Colour":
   zh-Hans: "颜色"
 "never asks; the guard still refuses irreversible commands":
@@ -1328,8 +1308,6 @@
   zh-Hans: "每个操作前都询问"
 "read-only: looks and proposes":
   zh-Hans: "只读：只查看并提出方案"
-"Mode":
-  zh-Hans: "模式"
 "Skip Claude Code's one-time autopilot prompt?":
   zh-Hans: "跳过 Claude Code 一次性的自动模式确认？"
 "autopilot accepted in {path}":
@@ -1342,8 +1320,6 @@
   zh-Hans: "@{name} 添加一个健康检查接口"
 "Inside Rex, `axel` floats over your window; here it runs inline.":
   zh-Hans: "在 Rex 中，`axel` 会浮在你的窗口上方；在这里它内联运行。"
-"Skills":
-  zh-Hans: "技能"
 "none yet: all of them, once you add some":
   zh-Hans: "暂无：添加后将全部可用"
 "skills live in {path}":
@@ -1500,8 +1476,6 @@
   zh-Hans: "提示词 {turn}  {text} {files}"
 "+{count} file(s)":
   zh-Hans: "+{count} 个文件"
-"1 file +{added} −{removed}":
-  zh-Hans: "1 个文件 +{added} −{removed}"
 "{count} files +{added} −{removed}":
   zh-Hans: "{count} 个文件 +{added} −{removed}"
 "turn {turn} failed: {error}":
