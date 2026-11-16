@@ -315,7 +315,8 @@ usage extension or the prompt reply. Other currencies are not treated as USD.
 // Adapter resolution (overridable by env AXEL_ACP_<HARNESS>=<command line>)
 pub fn adapter_command(harness: &axel_store::Harness) -> Vec<String>;  // claude → [axel, "claude-acp"], codex → [axel, "codex-acp"], custom "goose" → ["goose","acp"], Custom(cmd) → split(cmd)
 
-pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String>, pub effort: Option<axel_store::Effort> }
+pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String>, pub effort: Option<axel_store::Effort>, pub on_turn: Option<TurnHook> /* told each turn number as it starts */, pub notices: Vec<String> /* Error items pushed on the thread once the host is up */ }
+pub struct TurnHook(pub std::sync::Arc<dyn Fn(u32) + Send + Sync>);
 pub async fn run_host(cfg: HostConfig, store: axel_store::Store, signer: axel_identity::Keypair, out: impl std::io::Write + Send) -> anyhow::Result<()>;
 //   - spawns adapter, initialize (clientCapabilities fs read/write = true, terminal = false), session/new {cwd, mcpServers: []} (or session/load when resume_native_id and agent supports loadSession)
 //   - stores native session id via store.update_session(harness_session_id)
@@ -567,6 +568,7 @@ impl Proxy {
 }
 ```
 Session host: proxy on unless `AXEL_INSPECT=0`; Claude gets `ANTHROPIC_BASE_URL`; the Codex adapter gets `AXEL_CODEX_BASE_URL` and adds `-c model_provider=axel -c model_providers.axel.{name,base_url,wire_api="responses",requires_openai_auth=true}` to `codex app-server`. A proxy that can't start leaves the session direct, with a notice on the thread.
+The host runs the proxy on its own two-thread runtime and feeds `set_turn` through `HostConfig::on_turn`; rows go to the store through a dedicated writer thread (its own connection) behind a bounded channel that drops rows when full. A user's own `ANTHROPIC_BASE_URL` becomes the Anthropic upstream (https only); an inherited proxy URL from a parent session is dropped. Allowlist: `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` (Anthropic), `/responses`, `/responses/compact`, `/models` (OpenAI). `axel gc` prunes rows older than 30 days.
 
 ### axel (bin) and axel-tui additions
 

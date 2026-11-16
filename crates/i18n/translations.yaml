@@ -1620,3 +1620,15 @@
   zh-Hans: "是，在本会话中"
 "Permissions: {permissions}":
   zh-Hans: "权限：{permissions}"
+
+# The token inspector's proxy, started by the session host (ADR 0011).
+"the token inspector could not start, so this session talks to its provider directly: {error}":
+  zh-Hans: "token 检查器无法启动，因此本会话直接连接其提供方：{error}"
+"the token inspector is behind; some requests go unrecorded":
+  zh-Hans: "token 检查器跟不上，部分请求未被记录"
+"the token inspector could not record a request: {error}":
+  zh-Hans: "token 检查器无法记录一个请求：{error}"
+"the inspector's writer stopped with an error":
+  zh-Hans: "检查器的写入线程因错误而停止"
+"{n} inspector request record(s) pruned":
+  zh-Hans: "已清理 {n} 条检查器请求记录"

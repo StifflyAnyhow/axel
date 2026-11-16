@@ -170,6 +170,7 @@ dependencies = [
  "axel-identity",
  "axel-inbox",
  "axel-mcp",
+ "axel-proxy",
  "axel-rex",
  "axel-store",
  "axel-tui",

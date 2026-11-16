@@ -8,6 +8,7 @@ mod effort;
 mod gc;
 mod doctor;
 mod hook;
+mod inspector;
 mod host;
 mod inbox;
 mod launch;
