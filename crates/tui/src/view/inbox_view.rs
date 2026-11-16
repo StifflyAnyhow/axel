@@ -10,7 +10,7 @@ use super::help_line;
 use crate::inbox::{Focus, Inbox};
 use crate::model::RequestKind;
 use crate::theme;
-use crate::util::{cells, ellipsize, relative_time};
+use crate::util::{cells, ellipsize, pad_end, relative_time, text_width};
 
 pub fn render(frame: &mut Frame, ib: &Inbox, now: i64) {
     let area = frame.area();
@@ -67,7 +67,7 @@ fn render_requests(frame: &mut Frame, ib: &Inbox, area: Rect, now: i64) {
             let age = relative_time(r.created_at, now);
             let thread = r.thread_title.clone().unwrap_or_default();
             let head = format!("{} {} · {}", r.agent_name, r.kind.label(), thread);
-            let head_len = head.chars().count() + 2 + age.chars().count() + 2;
+            let head_len = text_width(&head) + 2 + text_width(&age) + 2;
             let mut spans = vec![
                 Span::styled(format!("{glyph} "), style),
                 Span::styled(r.agent_name.clone(), theme::bold()),
@@ -80,8 +80,8 @@ fn render_requests(frame: &mut Frame, ib: &Inbox, area: Rect, now: i64) {
             let content = ellipsize(&r.content.replace('\n', " "), pad.saturating_sub(3));
             spans.push(Span::raw("  "));
             spans.push(Span::raw(content));
-            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let fill = width.saturating_sub(used + age.chars().count());
+            let used: usize = spans.iter().map(s_len).sum();
+            let fill = width.saturating_sub(used + text_width(&age));
             spans.push(Span::raw(" ".repeat(fill)));
             spans.push(Span::styled(age, theme::dim()));
             ListItem::new(Line::from(spans))
@@ -110,16 +110,16 @@ fn render_statuses(frame: &mut Frame, ib: &Inbox, area: Rect, now: i64) {
             let age = relative_time(s.updated_at, now);
             let mut spans = vec![
                 Span::styled(format!("{} ", s.glyph()), Style::default().fg(theme::state_color(s.state))),
-                Span::styled(format!("{:<10}", ellipsize(&s.agent_name, 10)), theme::bold()),
+                Span::styled(pad_end(&ellipsize(&s.agent_name, 10), 10), theme::bold()),
                 Span::raw(" "),
                 Span::raw(ellipsize(&s.thread_title, 28)),
             ];
             if let Some(m) = &s.msg {
                 let used: usize = spans.iter().map(|x| s_len(x)).sum();
-                spans.push(Span::styled(format!("  {}", ellipsize(m, width.saturating_sub(used + age.len() + 4))), theme::dim()));
+                spans.push(Span::styled(format!("  {}", ellipsize(m, width.saturating_sub(used + text_width(&age) + 4))), theme::dim()));
             }
             let used: usize = spans.iter().map(s_len).sum();
-            spans.push(Span::raw(" ".repeat(width.saturating_sub(used + age.chars().count()))));
+            spans.push(Span::raw(" ".repeat(width.saturating_sub(used + text_width(&age)))));
             spans.push(Span::styled(age, theme::dim()));
             Line::from(spans)
         })
@@ -128,7 +128,7 @@ fn render_statuses(frame: &mut Frame, ib: &Inbox, area: Rect, now: i64) {
 }
 
 fn s_len(s: &Span) -> usize {
-    s.content.chars().count()
+    s.width()
 }
 
 fn render_messages(frame: &mut Frame, ib: &Inbox, area: Rect, now: i64) {
@@ -152,15 +152,15 @@ fn render_messages(frame: &mut Frame, ib: &Inbox, area: Rect, now: i64) {
         .map(|m| {
             let age = relative_time(m.created_at as i64, now);
             let mut spans = vec![
-                Span::styled(format!("{:<10}", ellipsize(&m.from_name, 10)), theme::bold()),
-                Span::styled(format!(" {:<10}", ellipsize(&m.kind_label, 10)), theme::dim()),
+                Span::styled(pad_end(&ellipsize(&m.from_name, 10), 10), theme::bold()),
+                Span::styled(format!(" {}", pad_end(&ellipsize(&m.kind_label, 10), 10)), theme::dim()),
                 Span::raw(" "),
             ];
             let used: usize = spans.iter().map(s_len).sum();
-            let room = width.saturating_sub(used + age.chars().count() + 2);
+            let room = width.saturating_sub(used + text_width(&age) + 2);
             spans.push(Span::raw(ellipsize(&m.content.replace('\n', " "), room)));
             let used: usize = spans.iter().map(s_len).sum();
-            spans.push(Span::raw(" ".repeat(width.saturating_sub(used + age.chars().count()))));
+            spans.push(Span::raw(" ".repeat(width.saturating_sub(used + text_width(&age)))));
             spans.push(Span::styled(age, theme::dim()));
             ListItem::new(Line::from(spans))
         })

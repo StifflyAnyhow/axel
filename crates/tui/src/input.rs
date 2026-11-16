@@ -7,7 +7,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::util::cells;
+use crate::util::{cells, char_width};
 
 /// How an edit groups for undo: consecutive typing is one step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,8 +329,9 @@ impl TextInput {
         true
     }
 
-    /// Walk the same wrapped rows the composer draws. Only the outermost
-    /// rows return false, allowing the caller to browse prompt history.
+    /// Walk the same wrapped rows the composer draws, keeping the column in
+    /// terminal cells (a CJK character takes two). Only the outermost rows
+    /// return false, allowing the caller to browse prompt history.
     pub(crate) fn screen_line(&mut self, width: usize, up: bool) -> bool {
         let width = width.max(1);
         let (rows, (row, col)) = input_rows(&self.chars, width, self.cursor);
@@ -342,7 +343,8 @@ impl TextInput {
         // newlines and the end of the text can hold a cursor of their own.
         let end = if rows.get(next + 1).is_some_and(|&(s, _)| s == end) && end > start { end - 1 } else { end };
         self.moved();
-        self.cursor = start + goal.min(end - start);
+        self.cursor = index_at_column(&self.chars[start..end], goal) + start;
+        debug_assert!(self.cursor <= end, "the cursor stays on the row it moved to");
         self.vertical_goal = Some((width, goal));
         true
     }
@@ -496,22 +498,54 @@ impl TextInput {
         true
     }
 
-    /// Visible window of the text for a field `width` columns wide, and the
-    /// cursor column relative to that window. Keeps the cursor in view.
+    /// Visible window of the text for a field `width` cells wide, and the
+    /// cursor column (in cells) relative to that window. Keeps the cursor in
+    /// view, with a cell after it; never shows half a wide character.
     pub fn view(&self, width: usize) -> (String, u16) {
         if width == 0 {
             return (String::new(), 0);
         }
         let inner = width.saturating_sub(1).max(1); // leave one cell for the cursor at the end
-        let start = self.cursor.saturating_sub(inner);
+        // Back from the cursor while what is left of it fits in `inner`.
+        let mut start = self.cursor;
+        let mut before = 0usize;
+        while start > 0 && before + char_width(self.chars[start - 1]) <= inner {
+            start -= 1;
+            before += char_width(self.chars[start]);
+        }
         debug_assert!(start <= self.cursor && self.cursor <= self.chars.len());
-        let shown: String = self.chars.iter().skip(start).take(width).collect();
-        let col = cells((self.cursor - start).min(width.saturating_sub(1)));
+        let mut shown = String::new();
+        let mut used = 0usize;
+        for &c in &self.chars[start..] {
+            let w = char_width(c);
+            if used + w > width {
+                break;
+            }
+            shown.push(c);
+            used += w;
+        }
+        let col = cells(before.min(width.saturating_sub(1)));
         (shown, col)
     }
 }
 
-/// Shared screen rows for composer rendering and vertical navigation.
+/// The index in `chars` at which a cursor sits `col` cells in: the last one
+/// whose characters before it fit in `col`.
+fn index_at_column(chars: &[char], col: usize) -> usize {
+    let mut used = 0usize;
+    for (i, &c) in chars.iter().enumerate() {
+        used += char_width(c);
+        if used > col {
+            return i;
+        }
+    }
+    chars.len()
+}
+
+/// Shared screen rows for composer rendering and vertical navigation: each
+/// row a `(start, end)` range of `chars` at most `width` cells wide (a wide
+/// character that doesn't fit starts the next row), and the cursor's (row,
+/// column in cells). A cursor right after a full row gets a row of its own.
 pub(crate) fn input_rows(chars: &[char], width: usize, cursor: usize) -> (Vec<(usize, usize)>, (usize, usize)) {
     let width = width.max(1);
     let mut rows = Vec::new();
@@ -520,14 +554,15 @@ pub(crate) fn input_rows(chars: &[char], width: usize, cursor: usize) -> (Vec<(u
         let line_end = chars[start..].iter().position(|c| *c == '\n').map_or(chars.len(), |i| start + i);
         let mut s = start;
         loop {
-            let e = s.saturating_add(width).min(line_end);
+            let (e, used) = row_end(chars, s, line_end, width);
             rows.push((s, e));
-            if e == line_end && e - s == width {
+            if e == line_end && used >= width {
                 rows.push((e, e));
             }
             if e >= line_end {
                 break;
             }
+            assert!(e > s, "every row takes at least one character");
             s = e;
         }
         if line_end >= chars.len() {
@@ -539,12 +574,29 @@ pub(crate) fn input_rows(chars: &[char], width: usize, cursor: usize) -> (Vec<(u
     for (r, &(s, e)) in rows.iter().enumerate() {
         let last_of_line = rows.get(r + 1).is_none_or(|&(ns, _)| ns != e);
         if cursor >= s && (cursor < e || (cursor == e && (last_of_line || e == s))) {
-            at = Some((r, cursor - s));
+            at = Some((r, chars[s..cursor].iter().map(|&c| char_width(c)).sum()));
             break;
         }
     }
     let at = at.unwrap_or((rows.len().saturating_sub(1), 0));
     (rows, at)
+}
+
+/// Where a row starting at `start` ends, before `line_end`, to fit in
+/// `width` cells, and the cells it takes. A character wider than the whole
+/// row still takes one, so every row moves on.
+fn row_end(chars: &[char], start: usize, line_end: usize, width: usize) -> (usize, usize) {
+    let mut used = 0usize;
+    let mut e = start;
+    while e < line_end {
+        let w = char_width(chars[e]);
+        if used + w > width && e > start {
+            break;
+        }
+        used += w;
+        e += 1;
+    }
+    (e, used)
 }
 
 #[cfg(test)]
@@ -757,6 +809,43 @@ mod tests {
         t.left();
         assert!(t.screen_line(80, false));
         assert_eq!(t.cursor(), 11, "left resets the desired column to 1");
+    }
+
+    #[test]
+    fn chinese_rows_and_the_cursor_are_measured_in_cells() {
+        let chars: Vec<char> = "修复登录错误".chars().collect();
+        // Two characters (four cells) a row of five: the third would straddle the edge.
+        assert_eq!(input_rows(&chars, 5, 6), (vec![(0, 2), (2, 4), (4, 6)], (2, 4)));
+        assert_eq!(input_rows(&chars, 5, 3), (vec![(0, 2), (2, 4), (4, 6)], (1, 2)), "one character in: two cells");
+        // A full row of four cells: the cursor after it gets its own row.
+        assert_eq!(input_rows(&chars[..2], 4, 2), (vec![(0, 2), (2, 2)], (1, 0)));
+        let mixed: Vec<char> = "ab修复".chars().collect();
+        assert_eq!(input_rows(&mixed, 80, 4).1, (0, 6));
+        // A row narrower than one wide character still moves on.
+        assert_eq!(input_rows(&chars[..2], 1, 0).0, vec![(0, 1), (1, 2), (2, 2)]);
+
+        // ↑ keeps the column in cells: from after `错` (8 cells) up to after `登录`.
+        let mut t = TextInput::with_text("ab登录\n修复登录错误");
+        t.left();
+        assert!(t.screen_line(80, true));
+        assert_eq!(t.cursor(), 4, "8 cells in on `ab登录` is its end");
+        let mut t = TextInput::with_text("abcd\n修复登录");
+        t.home();
+        t.right();
+        t.right();
+        t.right();
+        assert!(t.screen_line(80, true));
+        assert_eq!(t.cursor(), 4, "the column is past the line's last character");
+        let mut t = TextInput::with_text("abcdef\n修复登录");
+        t.home();
+        t.right();
+        assert!(t.screen_line(80, true));
+        assert_eq!(t.cursor(), 2, "after `修`, two cells in: after `ab`");
+
+        // A one-line field: the window and the cursor column are in cells.
+        let t = TextInput::with_text("修复登录错误");
+        assert_eq!(t.view(5), ("错误".to_string(), 4));
+        assert_eq!(t.view(20), ("修复登录错误".to_string(), 12));
     }
 
     #[test]

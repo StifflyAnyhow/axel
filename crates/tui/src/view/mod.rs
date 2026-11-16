@@ -806,6 +806,16 @@ mod tests {
         assert_eq!(wrap("x\ny", 10), vec!["x", "y"]);
         assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
         assert_eq!(wrap("", 4), vec![""]);
+        // Chinese: two cells a character, broken anywhere, never split.
+        assert_eq!(wrap("修复登录错误", 6), vec!["修复登", "录错误"]);
+        assert_eq!(wrap("修复登录错误", 5), vec!["修复", "登录", "错误"]);
+        assert_eq!(wrap("atlas 提问：要用哪个", 12), vec!["atlas 提问：", "要用哪个"]);
+        assert_eq!(wrap("ok 修复登录", 7), vec!["ok 修复", "登录"], "CJK runs on from the row it starts on");
+        for w in 1..20 {
+            for l in wrap("请帮我修复 login 页面的错误，并且 add tests", w) {
+                assert!(crate::util::text_width(&l) <= w.max(2), "{w}: {l:?}");
+            }
+        }
         let items = crate::thread::fixtures::items();
         let tools: Vec<&crate::model::ThreadItem> = items[2..7].iter().collect();
         assert_eq!(fold_summary(&tools, 200), "Read auth.rs, login.rs, search for “session_token”, edit login.rs, run tests");

@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::theme;
-use crate::util::{ellipsize, format_tokens};
+use crate::util::{ellipsize, format_tokens, pad_end, pad_start, text_width};
 
 const POLL: Duration = Duration::from_millis(60);
 
@@ -425,9 +425,9 @@ impl Rows<'_, '_> {
 /// The title left, state · age · sessions right; the projects under it.
 fn render_title(rows: &mut Rows, d: &ManageData, width: usize) {
     let right = format!("{} · {} · {} session{}", d.state, d.age, d.sessions.len(), if d.sessions.len() == 1 { "" } else { "s" });
-    let title_width = width.saturating_sub(right.chars().count() + 2);
+    let title_width = width.saturating_sub(text_width(&right) + 2);
     rows.push(Line::from(vec![
-        Span::styled(format!("{:<title_width$}", ellipsize(&d.title, title_width)), theme::accent_bold()),
+        Span::styled(pad_end(&ellipsize(&d.title, title_width), title_width), theme::accent_bold()),
         Span::styled(format!("  {right}"), theme::dim()),
     ]));
     if !d.projects.is_empty() {
@@ -500,8 +500,8 @@ impl SessionColumn {
 
 /// Sessions: columns drop from the right as the width shrinks.
 fn render_sessions(rows: &mut Rows, d: &ManageData, width: usize) {
-    let name_width = d.sessions.iter().map(|s| s.agent.chars().count()).max().unwrap_or(5).clamp(5, 12);
-    let runs_width = d.sessions.iter().map(|s| s.runs.chars().count()).max().unwrap_or(0).min(18);
+    let name_width = d.sessions.iter().map(|s| text_width(&s.agent)).max().unwrap_or(5).clamp(5, 12);
+    let runs_width = d.sessions.iter().map(|s| text_width(&s.runs)).max().unwrap_or(0).min(18);
     let mut used = name_width + 1 + runs_width;
     let mut shown: Vec<SessionColumn> = Vec::new();
     for column in SessionColumn::ALL {
@@ -513,18 +513,18 @@ fn render_sessions(rows: &mut Rows, d: &ManageData, width: usize) {
     let mut header = vec![Span::raw(" ".repeat(name_width + 1 + runs_width))];
     for column in &shown {
         let (label, w) = (column.label(), column.width_cols());
-        header.push(Span::styled(format!(" {label:>w$}"), theme::dim()));
+        header.push(Span::styled(format!(" {}", pad_start(label, w)), theme::dim()));
     }
     rows.push(Line::from(header));
     for s in &d.sessions {
         let mut spans = vec![
-            Span::styled(format!("{:<name_width$}", ellipsize(&s.agent, name_width)), Style::default().fg(theme::agent_color(s.color))),
-            Span::styled(format!(" {:<runs_width$}", ellipsize(&s.runs, runs_width)), theme::dim()),
+            Span::styled(pad_end(&ellipsize(&s.agent, name_width), name_width), Style::default().fg(theme::agent_color(s.color))),
+            Span::styled(format!(" {}", pad_end(&ellipsize(&s.runs, runs_width), runs_width)), theme::dim()),
         ];
         for column in &shown {
             let (text, style) = column.cell(s);
             let w = column.width_cols();
-            spans.push(Span::styled(format!(" {:>w$}", ellipsize(&text, w)), style));
+            spans.push(Span::styled(format!(" {}", pad_start(&ellipsize(&text, w), w)), style));
         }
         rows.push(Line::from(spans));
     }
@@ -586,7 +586,7 @@ fn render_menu(rows: &mut Rows, v: &ManageView, width: usize) {
         rows.push(Line::from(vec![
             Span::styled(marker, if a.is_destructive() { theme::danger() } else { theme::accent() }),
             Span::styled(format!("{} ", a.key()), theme::dim()),
-            Span::styled(format!("{:<LABEL_WIDTH$}", a.label()), label_style),
+            Span::styled(pad_end(a.label(), LABEL_WIDTH), label_style),
             Span::styled(desc, desc_style),
         ]));
     }

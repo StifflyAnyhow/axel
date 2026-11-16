@@ -1097,7 +1097,7 @@ fn script(p: &str, args: &[String], c: &Cmd) -> Action {
 
 // ------------------------------------------------------------ a run
 
-/// A run of calls as one line, at most `room` characters: actions merged by
+/// A run of calls as one line, at most `room` terminal cells: actions merged by
 /// verb in the order they first came ("Read a.rs, b.rs +2, search for “x”,
 /// build"), the last ones dropped for "+N more" when it doesn't fit.
 pub fn summarize(actions: &[Action], room: usize) -> String {
@@ -1130,7 +1130,7 @@ pub fn summarize(actions: &[Action], room: usize) -> String {
     // As many objects per verb as fit, fewer until it does, then fewer parts.
     for objects in [3, 2, 1] {
         let line = parts.iter().map(|p| render(p, objects)).collect::<Vec<_>>().join(", ");
-        if line.chars().count() <= room {
+        if crate::util::text_width(&line) <= room {
             return capitalize(&line);
         }
     }
@@ -1155,7 +1155,7 @@ pub fn summarize(actions: &[Action], room: usize) -> String {
         let left = parts.len() - i - 1;
         let tail = if left > 0 { format!(" and {left} more") } else { String::new() };
         let next = if out.is_empty() { piece.clone() } else { format!("{out}, {piece}") };
-        if next.chars().count() + tail.chars().count() > room && !out.is_empty() {
+        if crate::util::text_width(&next) + crate::util::text_width(&tail) > room && !out.is_empty() {
             return capitalize(&format!("{out} and {} more", parts.len() - i));
         }
         out = next;

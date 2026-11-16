@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::util::expand_tilde;
+use crate::util::{char_width, expand_tilde, fit_width, text_width};
 
 /// Split a paste into tokens on newlines and unquoted, unescaped whitespace.
 /// Supports `'single'` / `"double"` quotes and backslash escapes.
@@ -106,11 +106,10 @@ pub fn chip_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-/// Shorten `name` to `max` chars with a middle ellipsis, keeping the extension
-/// (`2D1AF3B4-91C7-4C4A…EF.png`).
+/// Shorten `name` to `max` terminal cells with a middle ellipsis, keeping the
+/// extension (`2D1AF3B4-91C7-4C4A…EF.png`); never half a wide character.
 pub fn middle_ellipsize(name: &str, max: usize) -> String {
-    let chars: Vec<char> = name.chars().collect();
-    if chars.len() <= max {
+    if text_width(name) <= max {
         return name.to_string();
     }
     if max == 0 {
@@ -120,26 +119,37 @@ pub fn middle_ellipsize(name: &str, max: usize) -> String {
         return "…".to_string();
     }
     // Extension = from the last '.' (not leading), at most 8 chars incl. the dot.
-    let ext_start = name.rfind('.').filter(|&i| i > 0 && chars.len() - name[..i].chars().count() <= 8);
-    let tail: Vec<char> = match ext_start {
-        Some(i) => name[i..].chars().collect(),
-        None => Vec::new(),
-    };
+    let ext_start = name.rfind('.').filter(|&i| i > 0 && name[i..].chars().count() <= 8);
+    let tail = ext_start.map_or("", |i| &name[i..]);
     let room = max - 1; // for the ellipsis
-    if !tail.is_empty() && tail.len() < room {
-        let head_len = room - tail.len();
-        let head: String = chars[..head_len].iter().collect();
-        return format!("{head}…{}", tail.iter().collect::<String>());
+    let tail_width = text_width(tail);
+    if !tail.is_empty() && tail_width < room {
+        let head = fit_width(name, room - tail_width);
+        return format!("{head}…{tail}");
     }
     // Extension alone does not leave room for a head: plain middle cut.
-    let front = room.div_ceil(2);
-    let back = room - front;
-    format!("{}…{}", chars[..front].iter().collect::<String>(), chars[chars.len() - back..].iter().collect::<String>())
+    let front = fit_width(name, room.div_ceil(2));
+    let back = fit_width_from_end(name, room - text_width(front));
+    let out = format!("{front}…{back}");
+    debug_assert!(text_width(&out) <= max, "a shortened name fits its room");
+    out
+}
+
+/// The longest end of `s` that fits in `max` cells.
+fn fit_width_from_end(s: &str, max: usize) -> &str {
+    let mut used = 0usize;
+    for (i, c) in s.char_indices().rev() {
+        used += char_width(c);
+        if used > max {
+            return &s[i + c.len_utf8()..];
+        }
+    }
+    s
 }
 
 /// Display columns of a chip line (📎 is double width).
 fn chip_cols(s: &str) -> usize {
-    s.chars().count() + s.matches('📎').count()
+    text_width(s)
 }
 
 /// One rendered chip.
@@ -177,7 +187,7 @@ pub fn chip_parts(attachments: &[PathBuf], width: usize, selected: Option<usize>
         let sel_cols = if selected.is_some_and(|s| idxs.contains(&s)) { 2 } else { 0 };
         // Fixed cost: "📎 " (3 cols) per chip, "  " between chips, " ✕" on the selected, "  +N" when hidden.
         let fixed = shown * 3 + (shown - 1) * 2 + sel_cols + suffix_cols;
-        let natural: usize = idxs.iter().map(|&i| names[i].chars().count()).sum();
+        let natural: usize = idxs.iter().map(|&i| text_width(&names[i])).sum();
         let budget = width.saturating_sub(fixed);
         let labels: Vec<String> = if natural <= budget {
             idxs.iter().map(|&i| names[i].clone()).collect()
@@ -187,10 +197,10 @@ pub fn chip_parts(attachments: &[PathBuf], width: usize, selected: Option<usize>
                 shown -= 1;
                 continue;
             }
-            let mut spare: usize = idxs.iter().map(|&i| per.saturating_sub(names[i].chars().count())).sum();
+            let mut spare: usize = idxs.iter().map(|&i| per.saturating_sub(text_width(&names[i]))).sum();
             idxs.iter()
                 .map(|&i| {
-                    let len = names[i].chars().count();
+                    let len = text_width(&names[i]);
                     let mut max = per;
                     if len > per {
                         let extra = spare.min(len - per);
@@ -371,5 +381,11 @@ mod tests {
         assert_eq!(middle_ellipsize("abcdefghijkl", 7), "abc…jkl");
         assert_eq!(middle_ellipsize("x", 0), "");
         assert_eq!(middle_ellipsize("xyz", 1), "…");
+        // Chinese names: cut by cells, never through a character.
+        assert_eq!(middle_ellipsize("截图修复登录页面.png", 12), "截图修….png");
+        assert_eq!(middle_ellipsize("修复登录错误", 7), "修…错误");
+        for max in 0..20 {
+            assert!(text_width(&middle_ellipsize("截图修复登录页面.png", max)) <= max, "{max}");
+        }
     }
 }

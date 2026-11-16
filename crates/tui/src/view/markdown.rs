@@ -6,6 +6,8 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::util::char_width;
+
 /// Inline code and fenced blocks.
 pub const CODE: Color = Color::Blue;
 
@@ -41,7 +43,7 @@ pub fn md_lines(text: &str, width: usize, base: Style) -> Vec<Line<'static>> {
         if fenced {
             // Kept as written, spaces and all, broken only at the width.
             let cells: Vec<Cell> = raw.chars().map(|c| (c, code)).collect();
-            for chunk in cells.chunks(width.saturating_sub(2).max(1)) {
+            for chunk in break_cells(&cells, width.saturating_sub(2).max(1)) {
                 let mut line = vec![(' ', base), (' ', base)];
                 line.extend_from_slice(chunk);
                 out.push(to_line(&line));
@@ -239,7 +241,7 @@ fn table(header: &str, rule: &str, body: &[&str], width: usize, base: Style, cod
     }
     // Widths: each column's longest cell, then the widest ones shrunk until
     // the row fits (down to a few columns each).
-    let mut widths: Vec<usize> = (0..n).map(|c| rows.iter().map(|r| r[c].len()).max().unwrap_or(0).max(1)).collect();
+    let mut widths: Vec<usize> = (0..n).map(|c| rows.iter().map(|r| cells_width(&r[c])).max().unwrap_or(0).max(1)).collect();
     let room = width.saturating_sub(3 * (n - 1));
     const MIN: usize = 6;
     while widths.iter().sum::<usize>() > room {
@@ -261,7 +263,7 @@ fn table(header: &str, rule: &str, body: &[&str], width: usize, base: Style, cod
                     line.extend([(' ', base), ('│', dim), (' ', base)]);
                 }
                 let text = wrapped[c].get(li).map(Vec::as_slice).unwrap_or(&[]);
-                let gap = w.saturating_sub(text.len());
+                let gap = w.saturating_sub(cells_width(text));
                 let (before, after) = match aligns.get(c).copied().unwrap_or(Align::Left) {
                     Align::Left => (0, gap),
                     Align::Right => (gap, 0),
@@ -294,7 +296,7 @@ fn table(header: &str, rule: &str, body: &[&str], width: usize, base: Style, cod
 /// much space before the rest (so a list item's lines line up under its text).
 fn wrap_cells(prefix: &[Cell], cells: &[Cell], width: usize) -> Vec<Line<'static>> {
     let hang: Vec<Cell> = prefix.iter().map(|(_, s)| (' ', *s)).collect();
-    let room = width.saturating_sub(prefix.len()).max(4);
+    let room = width.saturating_sub(cells_width(prefix)).max(4);
     wrap_words(cells, room)
         .into_iter()
         .enumerate()
@@ -306,11 +308,15 @@ fn wrap_cells(prefix: &[Cell], cells: &[Cell], width: usize) -> Vec<Line<'static
         .collect()
 }
 
-/// Styled text word-wrapped to lines of at most `room` cells.
+/// Styled text word-wrapped to lines of at most `room` terminal cells. A
+/// word longer than the line breaks where it must, never inside a wide
+/// character; a word with CJK in it, which needs no space to break, runs on
+/// from where the line stands.
 fn wrap_words(cells: &[Cell], room: usize) -> Vec<Vec<Cell>> {
     let room = room.max(1);
     let mut lines: Vec<Vec<Cell>> = Vec::new();
     let mut cur: Vec<Cell> = Vec::new();
+    let mut used = 0usize;
     // Words, each with the space cell that came before it (its own style).
     let mut words: Vec<(Option<Cell>, Vec<Cell>)> = vec![(None, Vec::new())];
     for &cell in cells {
@@ -321,29 +327,56 @@ fn wrap_words(cells: &[Cell], room: usize) -> Vec<Vec<Cell>> {
         }
     }
     for (space, word) in words {
-        let need = if cur.is_empty() { word.len() } else { cur.len() + 1 + word.len() };
-        if need > room && !cur.is_empty() {
+        let word_width = cells_width(&word);
+        let is_cjk = word.iter().any(|(c, _)| char_width(*c) > 1);
+        let first = word.first().map_or(0, |(c, _)| char_width(*c));
+        let runs_on = is_cjk && used + 1 + first <= room;
+        if !cur.is_empty() && used + 1 + word_width > room && !runs_on {
             lines.push(std::mem::take(&mut cur));
+            used = 0;
         }
         if !cur.is_empty() {
             cur.push(space.unwrap_or((' ', Style::default())));
+            used += 1;
         }
-        // A word longer than the line breaks where it must.
-        let mut w = &word[..];
-        while cur.len() + w.len() > room && !w.is_empty() {
-            let take = room - cur.len();
-            if take == 0 {
+        for cell in word {
+            let w = char_width(cell.0);
+            if used + w > room && !cur.is_empty() {
                 lines.push(std::mem::take(&mut cur));
-                continue;
+                used = 0;
             }
-            cur.extend_from_slice(&w[..take]);
-            lines.push(std::mem::take(&mut cur));
-            w = &w[take..];
+            cur.push(cell);
+            used += w;
         }
-        cur.extend_from_slice(w);
     }
     lines.push(cur);
     lines
+}
+
+/// `cells` cut into runs of at most `room` terminal cells, never inside a
+/// wide character (one wider than `room` still takes a run of its own).
+fn break_cells(cells: &[Cell], room: usize) -> Vec<&[Cell]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut used = 0usize;
+    for (i, (c, _)) in cells.iter().enumerate() {
+        let w = char_width(*c);
+        if used + w > room && i > start {
+            out.push(&cells[start..i]);
+            start = i;
+            used = 0;
+        }
+        used += w;
+    }
+    if start < cells.len() {
+        out.push(&cells[start..]);
+    }
+    out
+}
+
+/// The terminal cells `cells` take.
+fn cells_width(cells: &[Cell]) -> usize {
+    cells.iter().map(|(c, _)| char_width(*c)).sum()
 }
 
 /// Cells as a line, runs of one style as one span.
@@ -443,6 +476,21 @@ mod tests {
         assert!(text(&l).iter().all(|r| r.chars().count() <= 20), "{:?}", text(&l));
         assert_eq!(text(&l)[2], "one │ the quick");
         assert_eq!(text(&l)[3], "    │ brown fox");
+    }
+
+    #[test]
+    fn chinese_prose_tables_and_code_fit_the_width_in_cells() {
+        let width = crate::util::text_width;
+        let l = md_lines("- 修复**登录**页面的错误，然后运行 `cargo test` 检查结果", 20, Style::default());
+        assert!(text(&l).iter().all(|r| width(r) <= 20), "{:?}", text(&l));
+        assert_eq!(text(&l)[0], "• 修复登录页面的错误");
+        assert!(text(&l)[1].starts_with("  "), "the item's lines hang under its text: {:?}", text(&l));
+        let md = "| 文件 | 说明 |\n| - | - |\n| a.rs | 修复登录页面的错误并添加测试 |";
+        let l = md_lines(md, 20, Style::default());
+        assert!(text(&l).iter().all(|r| width(r) <= 20), "{:?}", text(&l));
+        assert_eq!(text(&l)[0], "文件 │ 说明");
+        let l = md_lines("```\n修复登录页面的错误并添加测试\n```", 11, Style::default());
+        assert_eq!(text(&l), vec!["  修复登录", "  页面的错", "  误并添加", "  测试"]);
     }
 
     #[test]

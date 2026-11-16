@@ -116,18 +116,65 @@ pub(crate) fn cells(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
 }
 
-/// Truncate `s` to at most `max` characters, appending `…` when cut.
+/// The cells `c` takes in a terminal: 2 for CJK, 0 for a combining mark or
+/// a control character.
+pub fn char_width(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// The cells `s` takes in a terminal.
+pub fn text_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// Truncate `s` to at most `max` terminal cells, ending in `…` when cut. A
+/// wide character is never split: when it would straddle the edge it goes,
+/// and the ellipsis keeps a cell of its own.
 pub fn ellipsize(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
+    if text_width(s) <= max {
         return s.to_string();
     }
     if max == 0 {
         return String::new();
     }
-    let mut out: String = s.chars().take(max - 1).collect();
+    let room = max - 1;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let w = char_width(c);
+        if used + w > room {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
     out.push('…');
+    debug_assert!(text_width(&out) <= max, "an ellipsized text fits its room");
     out
+}
+
+/// The longest start of `s` that fits in `max` cells, never half a wide character.
+pub fn fit_width(s: &str, max: usize) -> &str {
+    let mut used = 0usize;
+    for (i, c) in s.char_indices() {
+        let w = char_width(c);
+        if used + w > max {
+            return &s[..i];
+        }
+        used += w;
+    }
+    s
+}
+
+/// `s` and spaces after it to fill `width` cells (`{:<width$}` counts
+/// characters, which leaves a CJK column short).
+pub fn pad_end(s: &str, width: usize) -> String {
+    format!("{s}{}", " ".repeat(width.saturating_sub(text_width(s))))
+}
+
+/// Spaces, then `s`, to fill `width` cells: a right-aligned column.
+pub fn pad_start(s: &str, width: usize) -> String {
+    format!("{}{s}", " ".repeat(width.saturating_sub(text_width(s))))
 }
 
 /// Compact token count: `950`, `12.4k`, `1.2M`.
@@ -487,6 +534,27 @@ mod tests {
         assert_eq!(ellipsize("hello", 10), "hello");
         assert_eq!(ellipsize("hello world", 5), "hell…");
         assert_eq!(ellipsize("hello", 0), "");
+    }
+
+    #[test]
+    fn ellipsize_counts_cells_and_never_splits_a_wide_character() {
+        // Six characters, twelve cells.
+        assert_eq!(ellipsize("修复登录错误", 12), "修复登录错误");
+        assert_eq!(ellipsize("修复登录错误", 11), "修复登录错…");
+        // Five cells: two characters (4) and the ellipsis, not half a third.
+        assert_eq!(ellipsize("修复登录错误", 5), "修复…");
+        assert_eq!(ellipsize("修复登录错误", 4), "修…");
+        assert_eq!(ellipsize("修复登录错误", 2), "…");
+        assert_eq!(ellipsize("修复登录错误", 1), "…");
+        assert_eq!(ellipsize("ab修复", 4), "ab…");
+        for max in 0..14 {
+            assert!(text_width(&ellipsize("修复 the 登录 bug", max)) <= max, "{max}");
+        }
+        assert_eq!(fit_width("ab修复", 3), "ab");
+        assert_eq!(fit_width("ab修复", 4), "ab修");
+        assert_eq!(pad_end("修复", 6), "修复  ");
+        assert_eq!(pad_start("修复", 5), " 修复");
+        assert_eq!(pad_end("修复登录", 2), "修复登录", "too wide: left as it is");
     }
 
     #[test]

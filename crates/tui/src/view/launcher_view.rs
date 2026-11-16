@@ -10,7 +10,7 @@ use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
 use super::{chips_spans, field_line, help_line};
 use crate::launcher::{Field, Launcher, Step, TitleFocus, WhereMode, WhereRow, WhoMode, Workspace};
 use crate::theme;
-use crate::util::{cells, display_path, ellipsize, relative_time};
+use crate::util::{cells, display_path, ellipsize, pad_end, relative_time, text_width};
 
 /// Horizontal padding inside the pane.
 const PAD: u16 = 2;
@@ -73,7 +73,7 @@ pub fn render(frame: &mut Frame, l: &Launcher, now: i64) {
             .iter()
             .map(|(k, v)| {
                 Line::from(vec![
-                    Span::styled(format!("{k:<10}"), theme::dim()),
+                    Span::styled(pad_end(k, 10), theme::dim()),
                     Span::styled(ellipsize(v, inner.width.saturating_sub(10) as usize), Style::default()),
                 ])
             })
@@ -212,7 +212,7 @@ fn render_prompt(frame: &mut Frame, l: &Launcher, full: Rect) {
     };
     // Who/where takes the right of the row while the input leaves it room.
     let right_w = cells(right.width());
-    let typed = cells(l.title.text().chars().count());
+    let typed = cells(text_width(&l.title.text()));
     let room = input.width.saturating_sub(right_w + 2);
     let show_right = l.error.is_some() || (rows == 1 && !l.title.text().contains('\n') && room >= 24 && typed + 3 < room);
     let field = if show_right { Rect { width: room, ..input } } else { input };
@@ -263,7 +263,7 @@ fn render_where(frame: &mut Frame, l: &Launcher, area: Rect) {
                         let mut spans = vec![
                             Span::styled(if on { "◼ " } else { "◻ " }, if on { theme::accent() } else { theme::dim() }),
                             Span::styled(
-                                format!("{name:<name_w$}"),
+                                pad_end(&name, name_w),
                                 if row == l.where_sel { Style::default() } else { theme::bold() },
                             ),
                             Span::raw("  "),
@@ -300,7 +300,7 @@ fn render_who(frame: &mut Frame, l: &Launcher, area: Rect, now: i64) {
     items.push(ListItem::new(Line::from(Span::styled("+ New agent", theme::accent()))));
     for a in &l.agents {
         let dot = Span::styled("● ", Style::default().fg(theme::agent_color(a.color)));
-        let name = Span::styled(format!("{:<name_w$}", ellipsize(&a.name, name_w)), theme::bold());
+        let name = Span::styled(pad_end(&ellipsize(&a.name, name_w), name_w), theme::bold());
         let mut meta = a.harness.to_string();
         if let Some(m) = &a.model {
             meta.push_str(" · ");
@@ -316,8 +316,8 @@ fn render_who(frame: &mut Frame, l: &Launcher, area: Rect, now: i64) {
             right = format!("{right}  ✉ {}", a.unread);
         }
         // Right-align the trailing info by padding.
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum::<usize>() + 2;
-        let pad = width.saturating_sub(used + right.chars().count());
+        let used: usize = spans.iter().map(|s| s.width()).sum::<usize>() + 2;
+        let pad = width.saturating_sub(used + text_width(&right));
         spans.push(Span::raw(" ".repeat(pad)));
         if a.unread > 0 {
             let seen_only = right.split("  ✉").next().unwrap_or("").to_string();
@@ -345,7 +345,7 @@ fn render_new_agent(frame: &mut Frame, l: &Launcher, area: Rect) {
         }
         let focused = l.form.field == *field;
         let marker = Span::styled(if focused { "› " } else { "  " }, theme::accent());
-        let label = Span::styled(format!("{:<label_w$}", field.label()), if focused { theme::accent() } else { theme::dim() });
+        let label = Span::styled(pad_end(field.label(), label_w), if focused { theme::accent() } else { theme::dim() });
         let value_x = row.x + 2 + cells(label_w);
         let value_w = row.width.saturating_sub(2 + cells(label_w)) as usize;
         let value_line: Line = match field {

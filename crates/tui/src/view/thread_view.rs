@@ -10,7 +10,7 @@ use super::{chips_spans, help_line};
 use crate::model::{ItemBody, ItemKind, ItemStatus, ThreadItem, state_glyph};
 use crate::theme;
 use crate::thread::{Focus, Row, ThreadView};
-use crate::util::{cells, ellipsize, format_tokens};
+use crate::util::{cells, char_width, ellipsize, format_tokens, text_width};
 
 const OUTPUT_HEAD: usize = 12;
 /// Queued prompts shown above the composer before collapsing into "+N more".
@@ -71,7 +71,10 @@ fn render_header(frame: &mut Frame, v: &ThreadView, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Word-wrap `text` to `width` columns (by chars), preserving explicit newlines.
+/// Word-wrap `text` to `width` terminal cells, preserving explicit newlines.
+/// A word too long for a row starts a row and is broken between characters,
+/// never inside a wide one. A word with CJK in it needs no space to break,
+/// so it runs on from where the row stands instead of starting a new one.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
@@ -79,26 +82,28 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
         let mut line = String::new();
         let mut len = 0usize;
         for word in para.split(' ') {
-            let wl = word.chars().count();
-            if len > 0 && len + 1 + wl > width {
+            let wl = text_width(word);
+            let is_cjk = word.chars().any(|c| char_width(c) > 1);
+            let first = word.chars().next().map_or(0, char_width);
+            if len > 0 && len + 1 + wl > width && !(is_cjk && len + 1 + first <= width) {
                 out.push(std::mem::take(&mut line));
                 len = 0;
-            }
-            if wl > width {
-                // Hard-break very long words.
-                for ch in word.chars() {
-                    if len >= width {
-                        out.push(std::mem::take(&mut line));
-                        len = 0;
-                    }
-                    line.push(ch);
-                    len += 1;
-                }
-                continue;
             }
             if len > 0 {
                 line.push(' ');
                 len += 1;
+            }
+            if len + wl > width {
+                for ch in word.chars() {
+                    let cw = char_width(ch);
+                    if len > 0 && len + cw > width {
+                        out.push(std::mem::take(&mut line));
+                        len = 0;
+                    }
+                    line.push(ch);
+                    len += cw;
+                }
+                continue;
             }
             line.push_str(word);
             len += wl;
@@ -117,7 +122,7 @@ pub const YOU_MARK: &str = "> ";
 
 /// How far a message's attachment chips sit in: under your text, past the mark.
 pub fn chips_indent(it: &ThreadItem) -> usize {
-    if it.agent.is_none() && it.author.is_none() { YOU_MARK.len() } else { 0 }
+    if it.agent.is_none() && it.author.is_none() { text_width(YOU_MARK) } else { 0 }
 }
 /// The same accent used by the composer and selections.
 pub const YOU_COLOR: Color = theme::ACCENT;
@@ -138,7 +143,7 @@ pub fn clock(at_ms: i64) -> String {
 /// Pad `line` to put `right` (dim) against the right edge, when it fits.
 fn with_right(mut line: Line<'static>, right: &str, width: usize, base: Style) -> Line<'static> {
     let used = line.width();
-    let w = right.chars().count();
+    let w = text_width(right);
     if !right.is_empty() && used + 1 + w <= width {
         line.spans.push(Span::styled(" ".repeat(width - used - w), base));
         line.spans.push(Span::styled(right.to_string(), base.fg(theme::DIM)));
@@ -252,7 +257,7 @@ fn mention_spans(line: &str, agents: &[(String, Option<axel_store::AgentColor>)]
 
 /// Like [`prose_lines`] but highlights `@name` mentions of known agents.
 fn user_lines(prefix: Vec<Span<'static>>, text: &str, width: usize, style: Style, agents: &[(String, Option<axel_store::AgentColor>)]) -> Vec<Line<'static>> {
-    let indent: usize = prefix.iter().map(|s| s.content.chars().count()).sum();
+    let indent: usize = prefix.iter().map(|s| s.width()).sum();
     let body_w = width.saturating_sub(indent).max(8);
     let mut lines = Vec::new();
     for (i, l) in wrap(text, body_w).into_iter().enumerate() {
@@ -265,7 +270,7 @@ fn user_lines(prefix: Vec<Span<'static>>, text: &str, width: usize, style: Style
 
 /// Lines for `text` with a styled `prefix` on the first line and continuation indent.
 fn prose_lines(prefix: Vec<Span<'static>>, text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
-    let indent: usize = prefix.iter().map(|s| s.content.chars().count()).sum();
+    let indent: usize = prefix.iter().map(|s| s.width()).sum();
     let body_w = width.saturating_sub(indent).max(8);
     let wrapped = wrap(text, body_w);
     let mut lines = Vec::with_capacity(wrapped.len());
@@ -390,7 +395,7 @@ fn relay_lines(v: &ThreadView, i: usize, text: &str, width: usize, paint: RowPai
     let to = it.relay_to.clone().unwrap_or_default();
     lines.push(Line::from(vec![Span::styled("→ ", dim), Span::styled(to.to_lowercase(), dim.bold())]));
     let gutter = Span::styled(RELAY_GUTTER, dim);
-    for l in user_lines(Vec::new(), text.trim(), width.saturating_sub(RELAY_GUTTER.len()), dim, &v.mention_names()) {
+    for l in user_lines(Vec::new(), text.trim(), width.saturating_sub(text_width(RELAY_GUTTER)), dim, &v.mention_names()) {
         let mut spans = vec![gutter.clone()];
         spans.extend(l.spans);
         lines.push(Line::from(spans));
@@ -489,12 +494,12 @@ fn fold_row(v: &ThreadView, idxs: &[usize], width: usize, paint: RowPaint) -> Ve
     if failed {
         tail.push_str(" · failed");
     }
-    let room = width.saturating_sub(2 + tail.chars().count()).max(12);
+    let room = width.saturating_sub(2 + text_width(&tail)).max(12);
     let what = fold_summary(&tools, room);
     vec![Line::from(vec![
         Span::styled("↗ ", paint.marker()),
         Span::styled(ellipsize(&what, room), base),
-        Span::styled(ellipsize(&tail, width.saturating_sub(2 + what.chars().count().min(room))), dim),
+        Span::styled(ellipsize(&tail, width.saturating_sub(2 + text_width(&what).min(room))), dim),
     ])]
 }
 
@@ -518,7 +523,7 @@ fn tool_row(v: &ThreadView, it: &ThreadItem, width: usize, paint: RowPaint) -> V
         _ => ("tool".into(), String::new(), Vec::new()),
     };
     let head = format!("  {} ", status.glyph());
-    let room = width.saturating_sub(head.chars().count() + title.chars().count() + 2);
+    let room = width.saturating_sub(text_width(&head) + text_width(&title) + 2);
     let mut lines = vec![Line::from(vec![
         Span::styled(head, glyph_style),
         Span::styled(title, base),
@@ -735,7 +740,7 @@ pub(crate) fn render_queue(frame: &mut Frame, v: &ThreadView, area: Rect) {
             "⧗ queued "
         };
         let files = if it.attachments.is_empty() { String::new() } else { format!("  +{} file(s)", it.attachments.len()) };
-        let room = width.saturating_sub(label.chars().count() + 2 + files.chars().count());
+        let room = width.saturating_sub(text_width(label) + 2 + text_width(&files));
         let line = Line::from(vec![
             Span::styled(if selected { "▸ " } else { "  " }, style.fg(theme::ACCENT)),
             Span::styled(label, style.fg(theme::ACCENT)),
@@ -759,7 +764,7 @@ pub const MAX_INPUT_ROWS: usize = 8;
 /// Rows the composer text takes: the input laid out beside the prompt glyph
 /// (see [`input_rows`]), with room for the cursor after the last character.
 pub fn composer_text_rows(v: &ThreadView, width: u16, max: usize) -> usize {
-    let w = (width as usize).saturating_sub(PROMPT.chars().count()).max(1);
+    let w = (width as usize).saturating_sub(text_width(PROMPT)).max(1);
     let chars: Vec<char> = v.composer.text().chars().collect();
     input_rows(&chars, w, v.composer.cursor()).0.len().clamp(1, max.max(1))
 }
@@ -884,7 +889,7 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
         frame.render_widget(Paragraph::new(Line::from(Span::styled("─".repeat(width), theme::dim()))), bottom);
     }
 
-    let indent = PROMPT.chars().count();
+    let indent = text_width(PROMPT);
     let glyph = Span::styled(PROMPT, if focused || chips_focused { theme::accent() } else { theme::dim() });
     let body_width = width.saturating_sub(indent).max(1);
     if v.composer.is_empty() {
@@ -960,7 +965,7 @@ fn composer_hint(v: &ThreadView) -> &'static str {
 /// The composer's text in `area`, rows broken at line breaks and the width,
 /// keeping the cursor row visible.
 fn render_composer_text(frame: &mut Frame, v: &ThreadView, area: Rect, glyph: Span<'static>, focused: bool) {
-    let indent = PROMPT.chars().count();
+    let indent = text_width(PROMPT);
     let body_width = (area.width as usize).saturating_sub(indent).max(1);
     let text_rows = area.height as usize;
     let chars: Vec<char> = v.composer.text().chars().collect();
@@ -990,7 +995,7 @@ fn render_composer_text(frame: &mut Frame, v: &ThreadView, area: Rect, glyph: Sp
 fn render_composer_footer(frame: &mut Frame, v: &ThreadView, footer: Rect) {
     let width = footer.width as usize;
     let fit = |left: &[Span<'static>]| -> Line<'static> {
-        let left_width: usize = left.iter().map(|s| s.content.chars().count()).sum();
+        let left_width: usize = left.iter().map(|s| s.width()).sum();
         let room = width.saturating_sub(left_width + 2);
         match &v.status {
             Some(st) => {
@@ -1014,7 +1019,7 @@ fn render_composer_footer(frame: &mut Frame, v: &ThreadView, footer: Rect) {
     left.extend(mode_spans(v));
     let mut right = fit(&left);
     let full = match (&v.status, &v.update_hint) {
-        (Some(st), _) => st.chars().count(),
+        (Some(st), _) => text_width(st),
         (None, Some(version)) => update_line(version, usize::MAX).width(),
         (None, None) => help_line(&v.help()).width(),
     };

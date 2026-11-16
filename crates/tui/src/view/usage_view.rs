@@ -21,7 +21,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::model::{AgentSpend, LimitRow, PlanRow, UsageData};
 use crate::theme;
-use crate::util::{ellipsize, format_tokens};
+use crate::util::{ellipsize, format_tokens, pad_end, pad_start, text_width};
 
 /// Below this many rows there's no box: a summary line, then a row per
 /// agent (one row is the summary alone).
@@ -107,8 +107,8 @@ pub fn render(frame: &mut Frame, data: &UsageData, area: Rect) {
     let today = format!("{} 24h", cost(data.last_day.cost_usd));
     let mut header = vec![Span::styled("Axel", theme::accent_bold())];
     let room = usize::from(inner.width);
-    if room >= "Axel".len() + today.len() + 2 {
-        header.push(Span::raw(" ".repeat(room - "Axel".len() - today.len())));
+    if room >= "Axel".len() + text_width(&today) + 2 {
+        header.push(Span::raw(" ".repeat(room - "Axel".len() - text_width(&today))));
         header.push(Span::styled(today, theme::dim()));
     }
     frame.render_widget(Paragraph::new(Line::from(header)), Rect { height: 1, ..inner });
@@ -130,7 +130,7 @@ fn summary(data: &UsageData, width: u16) -> Line<'static> {
         let fullest = data.limits.iter().flat_map(|p| p.windows.iter().filter_map(|w| Some((w.window, w.used_pct?)))).max_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((window, pct)) = fullest {
             let more = format!(" · {} {:.0}%", window.short(), pct);
-            if Line::from(spans.clone()).width() + more.chars().count() <= usize::from(width) {
+            if Line::from(spans.clone()).width() + text_width(&more) <= usize::from(width) {
                 spans.push(Span::styled(more, pct_style(pct)));
             }
         }
@@ -146,8 +146,8 @@ fn lines(data: &UsageData, width: usize, rows: usize, tight: bool) -> Vec<Line<'
         return no_agents_lines(data, width, rows, tight);
     }
     // Harnesses name rows only when the plan limits get rows of their own.
-    let harnesses = data.limits.iter().filter(|_| !tight).map(|p| p.harness.chars().count());
-    let longest = data.agents.iter().map(|a| a.name.chars().count()).chain(harnesses).max().unwrap_or(0);
+    let harnesses = data.limits.iter().filter(|_| !tight).map(|p| text_width(&p.harness));
+    let longest = data.agents.iter().map(|a| text_width(&a.name)).chain(harnesses).max().unwrap_or(0);
     let name_w = longest.clamp(3, NAME_MAX).min(width.saturating_sub(7).max(3));
     let (cols, spark_w) = columns(width, name_w);
     let n = data.agents.len();
@@ -205,7 +205,7 @@ fn no_agents_lines(data: &UsageData, width: usize, rows: usize, tight: bool) -> 
             out.push(Line::from(limits));
         }
     } else {
-        let name_w = data.limits.iter().map(|p| p.harness.chars().count()).max().unwrap_or(0).min(NAME_MAX);
+        let name_w = data.limits.iter().map(|p| text_width(&p.harness)).max().unwrap_or(0).min(NAME_MAX);
         plans(&mut out, &data.limits, width, rows.saturating_sub(1), name_w);
     }
     out
@@ -218,9 +218,9 @@ fn label_line(data: &UsageData, cols: &[Col], name_w: usize, spark_w: usize, wid
     for &c in cols {
         let w = if c == Col::Spark { spark_w } else { c.width() };
         let text = match c {
-            Col::Spark if w < c.label().len() => format!(" {:<w$}", "1h"),
-            Col::Spark => format!(" {:<w$}", c.label()),
-            _ => format!(" {:>w$}", c.label()),
+            Col::Spark if w < text_width(c.label()) => format!(" {}", pad_end("1h", w)),
+            Col::Spark => format!(" {}", pad_end(c.label(), w)),
+            _ => format!(" {}", pad_start(c.label(), w)),
         };
         spans.push(Span::styled(text, theme::dim()));
     }
@@ -289,7 +289,7 @@ fn thread_lines(out: &mut Vec<Line<'static>>, data: &UsageData, width: usize, le
     let fits = data.threads.len().min(left);
     for t in &data.threads[..fits] {
         let mut spans = vec![
-            Span::raw(format!("{:<title_w$}", ellipsize(&t.title, title_w))),
+            Span::raw(pad_end(&ellipsize(&t.title, title_w), title_w)),
             Span::styled(format!(" {:>6}", format_tokens(t.last_day.tokens())), theme::bold()),
         ];
         if money {
@@ -397,7 +397,7 @@ fn folded_limits(plans: &[PlanRow], width: usize) -> Option<Vec<Span<'static>>> 
 /// One harness's windows, as much of each as fits: a bar, the share used
 /// and the time to the reset, then without the bar, then the share alone.
 fn plan_line(p: &PlanRow, width: usize, name_w: usize) -> Line<'static> {
-    let name = Span::styled(format!("{:<name_w$}", ellipsize(&p.harness, name_w)), theme::dim());
+    let name = Span::styled(pad_end(&ellipsize(&p.harness, name_w), name_w), theme::dim());
     for detail in [Detail::Bar, Detail::Reset, Detail::Share] {
         let mut spans = vec![name.clone()];
         for w in &p.windows {
@@ -464,7 +464,7 @@ fn until(secs: i64) -> String {
 }
 
 fn agent_line(a: &AgentSpend, cols: &[Col], name_w: usize, spark_w: usize, spark_max: i64) -> Line<'static> {
-    let mut spans = vec![Span::styled(format!("{:<name_w$}", ellipsize(&a.name, name_w)), Style::default().fg(theme::agent_color(a.color)))];
+    let mut spans = vec![Span::styled(pad_end(&ellipsize(&a.name, name_w), name_w), Style::default().fg(theme::agent_color(a.color)))];
     for &c in cols {
         if c == Col::Spark {
             spans.push(Span::raw(" "));

@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Sparkline};
 use crate::dashboard::{Dashboard, Widget};
 use crate::model::{DashAgentRow, RequestKind, ThreadRow, state_glyph};
 use crate::theme;
-use crate::util::{cells, ellipsize, format_tokens, relative_time};
+use crate::util::{cells, ellipsize, format_tokens, pad_end, pad_start, relative_time, text_width};
 
 const SPARK_W: u16 = 10;
 
@@ -170,7 +170,7 @@ fn render_compact_row(frame: &mut Frame, a: &DashAgentRow, row: Rect, cols: &Com
     let (base, _dim) = row_styles(selected);
     let mut spans: Vec<Span<'static>> = vec![
         Span::styled(format!("{} ", state_glyph(a.state)), base.fg(theme::state_color(a.state))),
-        Span::styled(format!("{:<w$}", ellipsize(&a.name, cols.name), w = cols.name), base.fg(theme::agent_color(a.color)).bold()),
+        Span::styled(pad_end(&ellipsize(&a.name, cols.name), cols.name), base.fg(theme::agent_color(a.color)).bold()),
     ];
     let spark_x = if cols.spark > 0 {
         let x = row.x + cells(span_len(&spans)) + 1;
@@ -224,7 +224,7 @@ fn row_styles(selected: bool) -> (Style, Style) {
 
 
 fn span_len(spans: &[Span]) -> usize {
-    spans.iter().map(|s| s.content.chars().count()).sum()
+    spans.iter().map(|s| s.width()).sum()
 }
 
 /// Render a row's spans, padded to the row width, and an optional sparkline
@@ -332,25 +332,25 @@ pub(crate) fn render_thread_row(frame: &mut Frame, t: &ThreadRow, row: Rect, col
     let (base, dim) = row_styles(selected);
     let mut spans: Vec<Span<'static>> = Vec::new();
     spans.push(Span::styled(format!("{} ", state_glyph(t.state)), base.fg(theme::state_color(t.state))));
-    spans.push(Span::styled(format!("{:<w$}", ellipsize(&t.title, cols.title), w = cols.title), base.bold()));
+    spans.push(Span::styled(pad_end(&ellipsize(&t.title, cols.title), cols.title), base.bold()));
     if let Some(w) = cols.agents {
         // Agents in their own colours, truncated as a whole.
         let mut used = 1usize;
         spans.push(Span::styled(" ", base));
         if t.agents.is_empty() {
-            spans.push(Span::styled(format!("{:<w$}", "—", w = w), dim));
+            spans.push(Span::styled(pad_end("—", w), dim));
         } else {
             for (i, (name, color)) in t.agents.iter().enumerate() {
                 let sep = if i > 0 { " " } else { "" };
                 let piece = format!("{sep}{name}");
-                if used + piece.chars().count() > w + 1 {
+                if used + text_width(&piece) > w + 1 {
                     if used < w + 1 {
                         spans.push(Span::styled("…".to_string(), dim));
                         used += 1;
                     }
                     break;
                 }
-                used += piece.chars().count();
+                used += text_width(&piece);
                 spans.push(Span::styled(piece, base.fg(theme::agent_color(*color))));
             }
             if used < w + 1 {
@@ -368,17 +368,17 @@ pub(crate) fn render_thread_row(frame: &mut Frame, t: &ThreadRow, row: Rect, col
     if let Some(w) = cols.projects {
         let p = if t.projects.is_empty() { "scratch".to_string() } else { t.projects.join(", ") };
         let style = if t.projects.is_empty() { dim } else { base };
-        spans.push(Span::styled(format!(" {:<w$}", ellipsize(&p, w), w = w), style));
+        spans.push(Span::styled(format!(" {}", pad_end(&ellipsize(&p, w), w)), style));
     }
     if cols.sessions {
         spans.push(Span::styled(format!(" {:>3}", t.sessions_total), dim));
     }
     if let Some(w) = cols.env {
         let e = if t.environments.is_empty() { "—".to_string() } else { t.environments.join(",") };
-        spans.push(Span::styled(format!(" {:<w$}", ellipsize(&e, w), w = w), dim));
+        spans.push(Span::styled(format!(" {}", pad_end(&ellipsize(&e, w), w)), dim));
     }
     spans.push(Span::styled(format!(" {:>w$}", format_tokens(t.tokens), w = cols.tokens), base));
-    spans.push(Span::styled(format!(" {:>w$}", ellipsize(&relative_time(t.updated_at, now), cols.age), w = cols.age), dim));
+    spans.push(Span::styled(format!(" {}", pad_start(&ellipsize(&relative_time(t.updated_at, now), cols.age), cols.age)), dim));
     finish_row(frame, row, spans, base, spark_x.map(|x| (x, t.spark.as_slice())));
 }
 
@@ -451,16 +451,16 @@ fn render_agent_row(frame: &mut Frame, a: &DashAgentRow, row: Rect, cols: &Agent
     let mut spans: Vec<Span<'static>> = Vec::new();
     spans.push(Span::styled(format!("{} ", state_glyph(a.state)), base.fg(theme::state_color(a.state))));
     spans.push(Span::styled(
-        format!("{:<w$}", ellipsize(&a.name, cols.name), w = cols.name),
+        pad_end(&ellipsize(&a.name, cols.name), cols.name),
         base.fg(theme::agent_color(a.color)).bold(),
     ));
     if let Some(w) = cols.harness {
-        spans.push(Span::styled(format!(" {:<w$}", ellipsize(a.harness.as_str(), w), w = w), dim));
+        spans.push(Span::styled(format!(" {}", pad_end(&ellipsize(a.harness.as_str(), w), w)), dim));
     }
     if let Some(w) = cols.thread {
         let t = a.thread_title.clone().unwrap_or_else(|| "—".into());
         let style = if a.thread_title.is_some() { base } else { dim };
-        spans.push(Span::styled(format!(" {:<w$}", ellipsize(&t, w), w = w), style));
+        spans.push(Span::styled(format!(" {}", pad_end(&ellipsize(&t, w), w)), style));
     }
     let spark_x = if cols.spark {
         let x = row.x + cells(span_len(&spans)) + 1;
@@ -470,7 +470,7 @@ fn render_agent_row(frame: &mut Frame, a: &DashAgentRow, row: Rect, cols: &Agent
         None
     };
     if let Some(w) = cols.env {
-        spans.push(Span::styled(format!(" {:<w$}", ellipsize(&a.environment, w), w = w), dim));
+        spans.push(Span::styled(format!(" {}", pad_end(&ellipsize(&a.environment, w), w)), dim));
     }
     spans.push(Span::styled(format!(" {:>w$}", format_tokens(a.tokens), w = cols.tokens), base));
     finish_row(frame, row, spans, base, spark_x.map(|x| (x, a.spark.as_slice())));
@@ -524,11 +524,11 @@ fn render_inbox(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
         };
         let age = relative_time(r.created_at, now);
         let head = format!("{}: ", r.agent_name);
-        let room = width.saturating_sub(2 + head.chars().count() + age.len() + 1);
+        let room = width.saturating_sub(2 + text_width(&head) + text_width(&age) + 1);
         lines.push(Line::from(vec![
             Span::styled(format!("{glyph} "), style),
             Span::styled(head, theme::bold()),
-            Span::raw(format!("{:<room$}", ellipsize(&r.content.replace('\n', " "), room))),
+            Span::raw(pad_end(&ellipsize(&r.content.replace('\n', " "), room), room)),
             Span::styled(format!(" {age}"), theme::dim()),
         ]));
     }
@@ -543,11 +543,11 @@ fn render_inbox(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
         };
         let age = relative_time(m.created_at as i64, now);
         let head = format!("{}: ", m.from_name);
-        let room = width.saturating_sub(2 + head.chars().count() + age.len() + 1);
+        let room = width.saturating_sub(2 + text_width(&head) + text_width(&age) + 1);
         lines.push(Line::from(vec![
             Span::styled(format!("{glyph} "), theme::dim()),
             Span::styled(head, theme::bold()),
-            Span::raw(format!("{:<room$}", ellipsize(&m.content.replace('\n', " "), room))),
+            Span::raw(pad_end(&ellipsize(&m.content.replace('\n', " "), room), room)),
             Span::styled(format!(" {age}"), theme::dim()),
         ]));
     }
