@@ -113,7 +113,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             inbox::send(&text.join(" "), &to, kind)
         }
         Some(Command::Inbox { agent, json }) => inbox::show(agent.as_deref(), json),
-        Some(Command::Inspect { switch: Some(switch), .. }) => inspector::switch(&Ctx::open()?, switch),
+        Some(Command::Inspect { switch: Some(switch), thread }) => inspector::switch(&Ctx::open()?, switch, thread.as_deref()),
         Some(Command::Inspect { switch: None, thread }) => ui::toggle_inspect(thread),
         Some(Command::Usage { refresh: true }) => usage::refresh(),
         Some(Command::Usage { refresh: false }) => ui::toggle_usage(),

@@ -363,6 +363,13 @@ impl<'a> App<'a> {
                         self.refresh(true);
                         None
                     }
+                    InspectAction::SetInspected(thread, on) => {
+                        if let Err(e) = self.deps.store.set_thread_inspected(&thread, on) {
+                            eprintln!("axel: inspect: {e}");
+                        }
+                        self.refresh(true);
+                        None
+                    }
                 }
             }
         }

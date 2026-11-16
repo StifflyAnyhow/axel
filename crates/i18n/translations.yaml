@@ -846,12 +846,6 @@
   zh-Hans: "智能体发给模型的每个请求：花了多少，上下文里装了什么。"
 "Nothing was recorded here in the last 24 hours.":
   zh-Hans: "最近 24 小时内这里没有记录。"
-"New managed sessions are recorded as they work.":
-  zh-Hans: "新的托管会话在工作时会被记录。"
-"Recording is off: nothing goes through the inspector until you ask.":
-  zh-Hans: "记录已关闭：在你开启之前，不会有任何请求经过检查器。"
-"Turn it on with":
-  zh-Hans: "开启方式："
 "then start a managed session.":
   zh-Hans: "然后启动一个托管会话。"
 "recording off":
@@ -1822,13 +1816,37 @@
   zh-Hans: "检查器的写入线程因错误而停止"
 "{n} inspector request record(s) pruned":
   zh-Hans: "已清理 {n} 条检查器请求记录"
-"The token inspector is on. New managed sessions send their model requests through a local proxy on 127.0.0.1, which records their size, tokens and timing, never their prompts or credentials. Sessions already running are unchanged.":
-  zh-Hans: "Token 检查器已开启。新的托管会话会通过 127.0.0.1 上的本地代理发送模型请求，代理只记录请求的大小、token 和耗时，从不记录提示词或凭据。已在运行的会话不受影响。"
 "Open it with `axel inspect`; turn it off with `axel inspect off`.":
   zh-Hans: "用 `axel inspect` 打开；用 `axel inspect off` 关闭。"
-"The token inspector is off. New managed sessions talk to their provider directly; sessions already running keep their proxy until they end.":
-  zh-Hans: "Token 检查器已关闭。新的托管会话会直接连接其服务商；已在运行的会话会保留代理，直到结束。"
-"The token inspector is on: new managed sessions are recorded.":
-  zh-Hans: "Token 检查器已开启：新的托管会话会被记录。"
-"The token inspector is off. Turn it on with `axel inspect on`.":
-  zh-Hans: "Token 检查器已关闭。用 `axel inspect on` 开启。"
+"This thread's new managed sessions are recorded as they work.":
+  zh-Hans: "这个话题的新托管会话在工作时会被记录。"
+"Inspected threads' new managed sessions are recorded as they work.":
+  zh-Hans: "已开启检查的话题，其新托管会话在工作时会被记录。"
+"Recording is off for this thread: nothing goes through the inspector until you ask.":
+  zh-Hans: "这个话题的记录已关闭：在你开启之前，不会有任何请求经过检查器。"
+"Recording is off for every thread: nothing goes through the inspector until you ask.":
+  zh-Hans: "所有话题的记录均已关闭：在你开启之前，不会有任何请求经过检查器。"
+"Press":
+  zh-Hans: "按"
+"or run":
+  zh-Hans: "或运行"
+"Inside a thread, run":
+  zh-Hans: "在话题中运行"
+"record this thread, or stop":
+  zh-Hans: "记录这个话题，或停止记录"
+"which thread? Pass --thread <id>; inside a thread, its own is used.":
+  zh-Hans: "哪个话题？请传入 --thread <id>；在话题中运行时会使用当前话题。"
+"The token inspector is on for {thread}. Its new managed sessions send their model requests through a local proxy on 127.0.0.1, which records their size, tokens and timing, never their prompts or credentials. Sessions already running are unchanged.":
+  zh-Hans: "Token 检查器已为 {thread} 开启。它的新托管会话会通过 127.0.0.1 上的本地代理发送模型请求，代理只记录请求的大小、token 和耗时，从不记录提示词或凭据。已在运行的会话不受影响。"
+"The token inspector is off for {thread}. Its new managed sessions talk to their provider directly; sessions already running keep their proxy until they end.":
+  zh-Hans: "Token 检查器已为 {thread} 关闭。它的新托管会话会直接连接服务商；已在运行的会话会保留代理，直到结束。"
+"The token inspector is on for {thread}: its new managed sessions are recorded.":
+  zh-Hans: "Token 检查器已为 {thread} 开启：它的新托管会话会被记录。"
+"The token inspector is off for {thread}. Turn it on with `axel inspect on`.":
+  zh-Hans: "Token 检查器已为 {thread} 关闭。用 `axel inspect on` 开启。"
+"The token inspector is off for every thread. Turn it on for one with `axel inspect on --thread <id>`.":
+  zh-Hans: "所有话题的 Token 检查器均已关闭。用 `axel inspect on --thread <id>` 为某个话题开启。"
+"The token inspector is on for {n} threads:":
+  zh-Hans: "Token 检查器已为 {n} 个话题开启："
+"The token inspector is on for 1 thread:":
+  zh-Hans: "Token 检查器已为 1 个话题开启："

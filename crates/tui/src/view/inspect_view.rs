@@ -276,7 +276,7 @@ fn toolbar(ins: &Inspector, view: &ListView, width: usize, sidebar_shown: bool) 
     let live = if ins.is_live() {
         Some(Span::styled(format!("● {}", t!("live")), theme::accent()))
     } else {
-        (!ins.data.recording).then(|| Span::styled(format!("○ {}", t!("recording off")), theme::dim()))
+        (!ins.is_recording()).then(|| Span::styled(format!("○ {}", t!("recording off")), theme::dim()))
     };
     let room = width.saturating_sub(live.as_ref().map_or(0, |l| l.width() + 1));
     // Drop the least needed until the rest fits; bounded by the parts.
@@ -865,15 +865,28 @@ fn empty_state(frame: &mut Frame, ins: &Inspector, area: Rect) {
         Line::from(""),
         Line::styled(t!("Nothing was recorded here in the last 24 hours."), theme::dim()),
     ];
-    if ins.data.recording {
-        lines.push(Line::styled(t!("New managed sessions are recorded as they work."), theme::dim()));
-    } else {
-        lines.push(Line::styled(t!("Recording is off: nothing goes through the inspector until you ask."), theme::dim()));
-        lines.push(Line::from(vec![
-            Span::styled(t!("Turn it on with"), theme::dim()),
-            Span::styled(" axel inspect on ", theme::pill()),
-            Span::styled(t!("then start a managed session."), theme::dim()),
-        ]));
+    let on_thread = matches!(ins.scope, Scope::Thread(_));
+    match (ins.is_recording(), on_thread) {
+        (true, true) => lines.push(Line::styled(t!("This thread's new managed sessions are recorded as they work."), theme::dim())),
+        (true, false) => lines.push(Line::styled(t!("Inspected threads' new managed sessions are recorded as they work."), theme::dim())),
+        (false, true) => {
+            lines.push(Line::styled(t!("Recording is off for this thread: nothing goes through the inspector until you ask."), theme::dim()));
+            lines.push(Line::from(vec![
+                Span::styled(t!("Press"), theme::dim()),
+                Span::styled(" r ", theme::pill()),
+                Span::styled(t!("or run"), theme::dim()),
+                Span::styled(" axel inspect on ", theme::pill()),
+                Span::styled(t!("then start a managed session."), theme::dim()),
+            ]));
+        }
+        (false, false) => {
+            lines.push(Line::styled(t!("Recording is off for every thread: nothing goes through the inspector until you ask."), theme::dim()));
+            lines.push(Line::from(vec![
+                Span::styled(t!("Inside a thread, run"), theme::dim()),
+                Span::styled(" axel inspect on ", theme::pill()),
+                Span::styled(t!("then start a managed session."), theme::dim()),
+            ]));
+        }
     }
     if ins.scope != Scope::All {
         lines.push(Line::from(""));
@@ -885,7 +898,7 @@ fn empty_state(frame: &mut Frame, ins: &Inspector, area: Rect) {
 
 /// The keys, in a box over the middle.
 fn help_overlay(frame: &mut Frame, area: Rect) {
-    let keys: [(&str, &str); 10] = [
+    let keys: [(&str, &str); 11] = [
         ("↑↓ j k", t!("move")),
         ("Enter Tab", t!("inspect the request")),
         ("Esc q", t!("back to the list, then quit")),
@@ -894,6 +907,7 @@ fn help_overlay(frame: &mut Frame, area: Rect) {
         ("g", t!("group by turn")),
         ("space ← →", t!("fold or unfold a turn")),
         ("t", t!("each tool's definition")),
+        ("r", t!("record this thread, or stop")),
         ("PgUp PgDn", t!("page")),
         ("?", t!("close this help")),
     ];

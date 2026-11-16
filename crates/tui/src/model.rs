@@ -398,6 +398,6 @@ pub struct InspectData {
     pub threads: std::collections::HashMap<String, String>,
     /// When it was read, Unix milliseconds: how long in-flight requests have run.
     pub now_ms: i64,
-    /// Whether new managed sessions are recorded (`axel inspect on`).
-    pub recording: bool,
+    /// Threads whose new managed sessions are recorded (`axel inspect on`).
+    pub inspected: std::collections::HashSet<String>,
 }

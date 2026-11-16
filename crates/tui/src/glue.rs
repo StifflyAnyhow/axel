@@ -911,9 +911,8 @@ pub fn load_inspect(store: &Store, filter: &axel_store::ModelRequestFilter, scop
         let named = store.agent_by_pubkey(&r.agent_pubkey).map_err(se)?.map_or_else(|| (r.agent_pubkey.chars().take(8).collect(), None), |a| (a.name, a.color));
         agents.insert(r.agent_pubkey.clone(), named);
     }
-    // An unreadable switch reads as off, as the session host reads it.
-    let recording = store.setting_on(axel_store::Setting::Inspector).unwrap_or(false);
-    Ok(crate::model::InspectData { requests, agents, threads, now_ms, recording })
+    let inspected = store.inspected_threads().map_err(se)?.into_iter().collect();
+    Ok(crate::model::InspectData { requests, agents, threads, now_ms, inspected })
 }
 
 fn add(to: &mut axel_store::UsageTotals, u: &axel_store::UsageTotals) {

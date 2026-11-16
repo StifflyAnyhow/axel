@@ -567,8 +567,8 @@ impl Proxy {
     pub async fn shutdown(self);
 }
 ```
-`pub enum Setting { Inspector }` with `Store::setting_on(Setting) -> Result<bool>` and `Store::set_setting(Setting, bool)` (local-only table `local_settings`; unset or unknown reads as off). `axel inspect on|off|status` sets and reads it.
-Session host: proxy only when `Setting::Inspector` is on (or `AXEL_INSPECT=1`; `AXEL_INSPECT=0` forces it off); Claude gets `ANTHROPIC_BASE_URL`; the Codex adapter gets `AXEL_CODEX_BASE_URL` and adds `-c model_provider=axel -c model_providers.axel.{name,base_url,wire_api="responses",requires_openai_auth=true}` to `codex app-server`. A proxy that can't start leaves the session direct, with a notice on the thread.
+`Store::thread_inspected(thread_id) -> Result<bool>`, `Store::set_thread_inspected(thread_id, on: bool)`, `Store::inspected_threads() -> Result<Vec<String>>` (≤ `INSPECTED_THREADS_MAX` = 1000; local-only table `inspected_threads`; a thread never turned on is off). `axel inspect on|off|status [--thread]` sets and reads it; `r` in the pane toggles the scoped thread.
+Session host: proxy only when the session's thread is inspected (or `AXEL_INSPECT=1`; `AXEL_INSPECT=0` forces it off); Claude gets `ANTHROPIC_BASE_URL`; the Codex adapter gets `AXEL_CODEX_BASE_URL` and adds `-c model_provider=axel -c model_providers.axel.{name,base_url,wire_api="responses",requires_openai_auth=true}` to `codex app-server`. A proxy that can't start leaves the session direct, with a notice on the thread.
 The host runs the proxy on its own two-thread runtime and feeds `set_turn` through `HostConfig::on_turn`; rows go to the store through a dedicated writer thread (its own connection) behind a bounded channel that drops rows when full. A user's own `ANTHROPIC_BASE_URL` becomes the Anthropic upstream (https only); an inherited proxy URL from a parent session is dropped. Allowlist: `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` (Anthropic), `/responses`, `/responses/compact`, `/models` (OpenAI). `axel gc` prunes rows older than 30 days.
 
 ### axel (bin) and axel-tui additions

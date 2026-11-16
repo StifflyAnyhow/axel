@@ -57,12 +57,14 @@ pub enum Focus {
     Inspector,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectAction {
     None,
     Quit,
     /// The scope changed: read the store again.
     Reload,
+    /// Turn recording of this thread on (`true`) or off, then read again.
+    SetInspected(String, bool),
 }
 
 /// A turn of one session: what the list groups requests by.
@@ -426,6 +428,15 @@ impl Inspector {
         self.data.agents.get(pubkey).cloned().unwrap_or_else(|| (pubkey.chars().take(8).collect(), None))
     }
 
+    /// Whether what the pane shows is being recorded: the scoped thread's
+    /// switch, or, scoped wider, whether any thread's is on.
+    pub fn is_recording(&self) -> bool {
+        match &self.scope {
+            Scope::Thread(thread) => self.data.inspected.contains(thread),
+            Scope::Agent(_) | Scope::All => !self.data.inspected.is_empty(),
+        }
+    }
+
     pub fn is_live(&self) -> bool {
         self.data.requests.iter().any(|r| r.outcome == RequestOutcome::InFlight)
     }
@@ -615,6 +626,11 @@ impl Inspector {
                 }
                 Some(InspectAction::None)
             }
+            // Recording is a thread's switch: it needs a thread in scope.
+            KeyCode::Char('r') => match &self.scope {
+                Scope::Thread(thread) => Some(InspectAction::SetInspected(thread.clone(), !self.data.inspected.contains(thread))),
+                Scope::Agent(_) | Scope::All => Some(InspectAction::None),
+            },
             KeyCode::Char('t') => {
                 self.tools_open = !self.tools_open;
                 Some(InspectAction::None)
@@ -850,7 +866,7 @@ pub mod fixtures {
                 (THREAD_REVIEW.to_string(), "review the pay-kit PR".to_string()),
             ]),
             now_ms,
-            recording: true,
+            inspected: [THREAD_WEBHOOKS.to_string(), THREAD_REVIEW.to_string()].into_iter().collect(),
         }
     }
 }
@@ -936,6 +952,22 @@ mod tests {
         assert!(found.iter().any(|a| matches!(a, Anomaly::CacheRebuilt { request, .. } if rs[*request].id == "R7_0")), "{found:?}");
         assert!(found.iter().any(|a| matches!(a, Anomaly::ContextClimb { group: 2, from: 52_000, to: 141_000, requests: 5 })), "{found:?}");
         assert!(!found.iter().any(|a| matches!(a, Anomaly::ContextClimb { group: 0, .. })), "turn 7 started big after a rebuild, then held: {found:?}");
+    }
+
+    #[test]
+    fn r_turns_the_scoped_threads_recording_on_or_off() {
+        let mut data = fixtures::data(NOW);
+        data.inspected.clear();
+        let mut i = Inspector::new(Some(fixtures::THREAD_WEBHOOKS.into()), data);
+        assert!(!i.is_recording(), "a thread never turned on isn't recorded");
+        assert_eq!(i.handle_key(key(KeyCode::Char('r'))), InspectAction::SetInspected(fixtures::THREAD_WEBHOOKS.into(), true));
+        i.data.inspected.insert(fixtures::THREAD_WEBHOOKS.into());
+        assert!(i.is_recording());
+        assert_eq!(i.handle_key(key(KeyCode::Char('r'))), InspectAction::SetInspected(fixtures::THREAD_WEBHOOKS.into(), false));
+        // Scoped wider, there's no one thread to switch.
+        let mut all = Inspector::new(None, fixtures::data(NOW));
+        assert_eq!(all.handle_key(key(KeyCode::Char('r'))), InspectAction::None);
+        assert!(all.is_recording(), "some thread is recorded");
     }
 
     #[test]

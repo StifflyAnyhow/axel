@@ -57,7 +57,7 @@ pub struct Session<'a> {
 }
 
 /// Whether this session should run through the inspector: only when the
-/// owner asked.  `switched_on` is the machine's switch (`axel inspect on`);
+/// owner asked.  `switched_on` is its thread's switch (`axel inspect on`);
 /// `AXEL_INSPECT=1` turns it on for one session and `AXEL_INSPECT=0` off.
 pub fn wanted(switched_on: bool) -> bool {
     wanted_with(switched_on, std::env::var("AXEL_INSPECT").ok().as_deref())
@@ -258,27 +258,58 @@ fn write_rows(store: &Store, rows: Receiver<ModelRequest>) {
     }
 }
 
-/// `axel inspect on|off|status`: the machine's switch.  New managed sessions
-/// read it when they start; running ones keep what they started with.
-pub fn switch(ctx: &super::Ctx, switch: crate::cli::InspectSwitch) -> Result<()> {
+/// `axel inspect on|off|status`: a thread's switch.  The thread is
+/// `--thread`, else the one this runs in; `status` with neither lists the
+/// inspected threads.  New managed sessions read the switch when they start;
+/// running ones keep what they started with.
+pub fn switch(ctx: &super::Ctx, switch: crate::cli::InspectSwitch, thread: Option<&str>) -> Result<()> {
     use crate::cli::InspectSwitch;
+    let here = std::env::var("AXEL_THREAD").ok().filter(|t| !t.trim().is_empty());
+    let asked = thread.map(str::to_string).or(here);
+    let Some(asked) = asked else {
+        if switch == InspectSwitch::Status {
+            return list_inspected(ctx);
+        }
+        anyhow::bail!("{}", t!("which thread? Pass --thread <id>; inside a thread, its own is used."));
+    };
+    let id = super::ui::resolve_thread_id(ctx, &asked)?;
+    let title = ctx.store.get_thread(&id)?.map(|t| t.title).unwrap_or_else(|| id.clone());
     match switch {
         InspectSwitch::On => {
-            ctx.store.set_setting(axel_store::Setting::Inspector, true)?;
-            println!("{}", t!("The token inspector is on. New managed sessions send their model requests through a local proxy on 127.0.0.1, which records their size, tokens and timing, never their prompts or credentials. Sessions already running are unchanged."));
+            ctx.store.set_thread_inspected(&id, true)?;
+            println!("{}", t!("The token inspector is on for {thread}. Its new managed sessions send their model requests through a local proxy on 127.0.0.1, which records their size, tokens and timing, never their prompts or credentials. Sessions already running are unchanged.", thread = title));
             println!("{}", t!("Open it with `axel inspect`; turn it off with `axel inspect off`."));
         }
         InspectSwitch::Off => {
-            ctx.store.set_setting(axel_store::Setting::Inspector, false)?;
-            println!("{}", t!("The token inspector is off. New managed sessions talk to their provider directly; sessions already running keep their proxy until they end."));
+            ctx.store.set_thread_inspected(&id, false)?;
+            println!("{}", t!("The token inspector is off for {thread}. Its new managed sessions talk to their provider directly; sessions already running keep their proxy until they end.", thread = title));
         }
         InspectSwitch::Status => {
-            if ctx.store.setting_on(axel_store::Setting::Inspector)? {
-                println!("{}", t!("The token inspector is on: new managed sessions are recorded."));
+            if ctx.store.thread_inspected(&id)? {
+                println!("{}", t!("The token inspector is on for {thread}: its new managed sessions are recorded.", thread = title));
             } else {
-                println!("{}", t!("The token inspector is off. Turn it on with `axel inspect on`."));
+                println!("{}", t!("The token inspector is off for {thread}. Turn it on with `axel inspect on`.", thread = title));
             }
         }
+    }
+    Ok(())
+}
+
+/// Every inspected thread, one a line.
+fn list_inspected(ctx: &super::Ctx) -> Result<()> {
+    let ids = ctx.store.inspected_threads()?;
+    if ids.is_empty() {
+        println!("{}", t!("The token inspector is off for every thread. Turn it on for one with `axel inspect on --thread <id>`."));
+        return Ok(());
+    }
+    if ids.len() == 1 {
+        println!("{}", t!("The token inspector is on for 1 thread:"));
+    } else {
+        println!("{}", t!("The token inspector is on for {n} threads:", n = ids.len()));
+    }
+    for id in ids {
+        let title = ctx.store.get_thread(&id)?.map(|t| t.title).unwrap_or_default();
+        println!("  {}  {title}", id.chars().take(8).collect::<String>());
     }
     Ok(())
 }
