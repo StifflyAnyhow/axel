@@ -158,7 +158,7 @@ pub fn run(ctx: &Ctx, quiet: bool) -> Result<usize> {
             .turns(thread)
             .unwrap_or_default()
             .into_iter()
-            .map(|t| ((t.session_id, t.summary.ordinal), t.created_at as i64))
+            .map(|t| ((t.session_id, t.summary.ordinal), i64::try_from(t.created_at).unwrap_or(i64::MAX)))
             .collect();
         let i = ThreadInfo { state, turn_at };
         cache.borrow_mut().insert(thread.to_string(), i.clone());
