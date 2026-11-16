@@ -38,6 +38,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axel_i18n::t;
 use serde_json::{Value, json};
 
 use crate::agent_rpc::{Client, Lines, RpcError, RpcResult, bounded_lines};
@@ -679,8 +680,8 @@ impl Agent {
                     s,
                     &tool_call,
                     vec![
-                        json!({ "optionId": "approved", "name": "Yes", "kind": "allow_once" }),
-                        json!({ "optionId": "abort", "name": "No, provide feedback", "kind": "reject_once" }),
+                        json!({ "optionId": "approved", "name": t!("Yes"), "kind": "allow_once" }),
+                        json!({ "optionId": "abort", "name": t!("No, provide feedback"), "kind": "reject_once" }),
                     ],
                 );
                 let decision = if picked.as_deref() == Some("approved") { "accept" } else { "cancel" };
@@ -691,16 +692,16 @@ impl Agent {
                 if let Some(r) = p.get("reason").and_then(Value::as_str) {
                     text.push(r.to_string());
                 }
-                text.push(format!("Permissions: {}", p.get("permissions").map(|v| v.to_string()).unwrap_or_default()));
+                text.push(t!("Permissions: {permissions}", permissions = p.get("permissions").map(|v| v.to_string()).unwrap_or_default()));
                 let tool_call = json!({ "toolCallId": item_id, "title": "Request permissions", "status": "pending", "rawInput": p,
                     "content": [{ "type": "content", "content": { "type": "text", "text": text.join("\n") } }] });
                 let picked = self.ask(
                     s,
                     &tool_call,
                     vec![
-                        json!({ "optionId": "approved", "name": "Yes, for this turn", "kind": "allow_once" }),
-                        json!({ "optionId": "approved-for-session", "name": "Yes, for this session", "kind": "allow_always" }),
-                        json!({ "optionId": "denied", "name": "No", "kind": "reject_once" }),
+                        json!({ "optionId": "approved", "name": t!("Yes, for this turn"), "kind": "allow_once" }),
+                        json!({ "optionId": "approved-for-session", "name": t!("Yes, for this session"), "kind": "allow_always" }),
+                        json!({ "optionId": "denied", "name": t!("No"), "kind": "reject_once" }),
                     ],
                 );
                 let grant = match picked.as_deref() {

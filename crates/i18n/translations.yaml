@@ -1592,3 +1592,57 @@
   zh-Hans: "{who} 请求权限：{title}"
 "the turn failed":
   zh-Hans: "本轮次失败"
+
+# Permission and question cards built by Axel's Claude Code adapter.
+"Always Allow":
+  zh-Hans: "始终允许"
+"Allow":
+  zh-Hans: "允许"
+"Reject":
+  zh-Hans: "拒绝"
+"Yes, and auto-accept edits":
+  zh-Hans: "是，并自动接受编辑"
+"Yes, and manually approve edits":
+  zh-Hans: "是，并手动批准编辑"
+"No, keep planning":
+  zh-Hans: "否，继续规划"
+"Decline":
+  zh-Hans: "拒绝回答"
+"{server} asks":
+  zh-Hans: "{server} 提问"
+"Yes":
+  zh-Hans: "是"
+"No":
+  zh-Hans: "否"
+"{question} (select all that apply)":
+  zh-Hans: "{question}（可多选）"
+"None of these (I'll answer in the chat)":
+  zh-Hans: "都不是（我会在聊天中回答）"
+
+# Approval cards built by Axel's Codex adapter.
+"Yes, proceed":
+  zh-Hans: "是，继续"
+"Yes, just this once":
+  zh-Hans: "是，仅此一次"
+"Yes, and remember this command pattern":
+  zh-Hans: "是，并记住此命令模式"
+"Yes, and don't ask again for commands that start with `{prefix}`":
+  zh-Hans: "是，以 `{prefix}` 开头的命令不再询问"
+"Yes, and allow this host for this session":
+  zh-Hans: "是，并在本会话中允许此主机"
+"Yes, and don't ask again for this command in this session":
+  zh-Hans: "是，本会话中不再询问此命令"
+"No, and tell Codex what to do differently":
+  zh-Hans: "否，并告诉 Codex 换种做法"
+"Proposed Amendment: {command}":
+  zh-Hans: "建议的规则修订：{command}"
+"Network Approval Context: {protocol} {host}":
+  zh-Hans: "网络访问请求：{protocol} {host}"
+"No, provide feedback":
+  zh-Hans: "否，并提供反馈"
+"Yes, for this turn":
+  zh-Hans: "是，仅限本轮次"
+"Yes, for this session":
+  zh-Hans: "是，在本会话中"
+"Permissions: {permissions}":
+  zh-Hans: "权限：{permissions}"

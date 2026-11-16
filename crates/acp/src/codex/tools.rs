@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use axel_i18n::t;
 use serde_json::{Value, json};
 
 fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
@@ -184,16 +185,16 @@ pub fn exec_options(params: &Value) -> Vec<ExecOption> {
     let network = params.get("networkApprovalContext").is_some_and(|v| !v.is_null());
     let mut options = vec![ExecOption {
         id: "approved",
-        name: if network { "Yes, just this once" } else { "Yes, proceed" }.into(),
+        name: if network { t!("Yes, just this once") } else { t!("Yes, proceed") }.into(),
         kind: "allow_once",
         decision: json!("accept"),
     }];
     if let Some(amendment) = params.get("proposedExecpolicyAmendment").and_then(Value::as_array).filter(|a| !a.is_empty()) {
         let prefix = amendment.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
         let name = if prefix.is_empty() || prefix.contains('\n') || prefix.contains('\r') {
-            "Yes, and remember this command pattern".to_string()
+            t!("Yes, and remember this command pattern").to_string()
         } else {
-            format!("Yes, and don't ask again for commands that start with `{prefix}`")
+            t!("Yes, and don't ask again for commands that start with `{prefix}`", prefix = prefix)
         };
         options.push(ExecOption {
             id: "approved-execpolicy-amendment",
@@ -204,11 +205,11 @@ pub fn exec_options(params: &Value) -> Vec<ExecOption> {
     }
     options.push(ExecOption {
         id: "approved-for-session",
-        name: if network { "Yes, and allow this host for this session" } else { "Yes, and don't ask again for this command in this session" }.into(),
+        name: if network { t!("Yes, and allow this host for this session") } else { t!("Yes, and don't ask again for this command in this session") }.into(),
         kind: "allow_always",
         decision: json!("acceptForSession"),
     });
-    options.push(ExecOption { id: "abort", name: "No, and tell Codex what to do differently".into(), kind: "reject_once", decision: json!("cancel") });
+    options.push(ExecOption { id: "abort", name: t!("No, and tell Codex what to do differently").into(), kind: "reject_once", decision: json!("cancel") });
     options
 }
 
@@ -219,10 +220,10 @@ pub fn exec_approval_text(params: &Value) -> Option<String> {
         lines.push(r.to_string());
     }
     if let Some(a) = params.get("proposedExecpolicyAmendment").and_then(Value::as_array).filter(|a| !a.is_empty()) {
-        lines.push(format!("Proposed Amendment: {}", a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")));
+        lines.push(t!("Proposed Amendment: {command}", command = a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")));
     }
     if let Some(n) = params.get("networkApprovalContext").filter(|v| !v.is_null()) {
-        lines.push(format!("Network Approval Context: {} {}", s(n, "protocol").unwrap_or(""), s(n, "host").unwrap_or("")));
+        lines.push(t!("Network Approval Context: {protocol} {host}", protocol = s(n, "protocol").unwrap_or(""), host = s(n, "host").unwrap_or("")));
     }
     (!lines.is_empty()).then(|| lines.join("\n"))
 }

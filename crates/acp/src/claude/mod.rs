@@ -44,6 +44,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axel_i18n::t;
 use serde_json::{Map, Value, json};
 
 use crate::agent_rpc::{Client, Lines, RpcError, RpcResult, bounded_lines};
@@ -480,9 +481,9 @@ impl Agent {
             session,
             &tool_call,
             json!([
-                { "kind": "allow_always", "name": "Always Allow", "optionId": "allow_always" },
-                { "kind": "allow_once", "name": "Allow", "optionId": "allow" },
-                { "kind": "reject_once", "name": "Reject", "optionId": "reject" }
+                { "kind": "allow_always", "name": t!("Always Allow"), "optionId": "allow_always" },
+                { "kind": "allow_once", "name": t!("Allow"), "optionId": "allow" },
+                { "kind": "reject_once", "name": t!("Reject"), "optionId": "reject" }
             ]),
         )?;
         if outcome.is_none() {
@@ -502,9 +503,9 @@ impl Agent {
             session,
             tool_call,
             json!([
-                { "kind": "allow_always", "name": "Yes, and auto-accept edits", "optionId": PermissionMode::AcceptEdits.as_str() },
-                { "kind": "allow_once", "name": "Yes, and manually approve edits", "optionId": PermissionMode::Default.as_str() },
-                { "kind": "reject_once", "name": "No, keep planning", "optionId": PermissionMode::Plan.as_str() }
+                { "kind": "allow_always", "name": t!("Yes, and auto-accept edits"), "optionId": PermissionMode::AcceptEdits.as_str() },
+                { "kind": "allow_once", "name": t!("Yes, and manually approve edits"), "optionId": PermissionMode::Default.as_str() },
+                { "kind": "reject_once", "name": t!("No, keep planning"), "optionId": PermissionMode::Plan.as_str() }
             ]),
         )?;
         let Some(picked) = outcome else { return Err("Tool use aborted".into()) };
@@ -572,10 +573,10 @@ impl Agent {
             .enumerate()
             .map(|(i, (_, label))| json!({ "kind": "allow_once", "name": label, "optionId": format!("{ANSWER_PREFIX}{i}") }))
             .collect();
-        options.push(json!({ "kind": "reject_once", "name": "Decline", "optionId": format!("{ANSWER_PREFIX}none") }));
+        options.push(json!({ "kind": "reject_once", "name": t!("Decline"), "optionId": format!("{ANSWER_PREFIX}none") }));
         let id = request.get("elicitation_id").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("elicitation-{}", chrono::Utc::now().timestamp_millis()));
         let server = request.get("mcp_server_name").and_then(Value::as_str).unwrap_or("");
-        let title = if message.is_empty() { format!("{server} asks") } else { message };
+        let title = if message.is_empty() { t!("{server} asks", server = server) } else { message };
         let tool_call = json!({ "toolCallId": id, "title": title, "kind": "think", "rawInput":{"multiSelect":multiple.is_some(),"minSelections":multiple.map(|b|b.0),"maxSelections":multiple.map(|b|b.1)} });
         match self.ask(session, &tool_call, Value::Array(options)) {
             Ok(Some(picked)) => match answer_indices(&picked,choices.len(),multiple.is_some()) {
@@ -1110,7 +1111,7 @@ fn elicitation_choice(schema: &Value) -> Option<ElicitationChoice> {
             })
             .collect()
     } else if p.get("type").and_then(Value::as_str) == Some("boolean") {
-        vec![(Value::Bool(true), "Yes".into()), (Value::Bool(false), "No".into())]
+        vec![(Value::Bool(true), t!("Yes").into()), (Value::Bool(false), t!("No").into())]
     } else {
         return None;
     };
@@ -1157,7 +1158,7 @@ fn question_request(tool_use_id: &Value, qi: usize, q: &Value) -> (Value, Value,
         Some(h) => format!("{h}: {text}"),
         None => text.to_string(),
     };
-    if multi { title.push_str(" (select all that apply)"); }
+    if multi { title = t!("{question} (select all that apply)", question = title); }
     let mut labels = Vec::new();
     let mut options: Vec<Value> = Vec::new();
     for (i, o) in q.get("options").and_then(Value::as_array).into_iter().flatten().enumerate() {
@@ -1169,7 +1170,7 @@ fn question_request(tool_use_id: &Value, qi: usize, q: &Value) -> (Value, Value,
         options.push(json!({ "kind": "allow_once", "name": name, "optionId": format!("{ANSWER_PREFIX}{i}") }));
         labels.push(label);
     }
-    options.push(json!({ "kind": "reject_once", "name": "None of these (I'll answer in the chat)", "optionId": format!("{ANSWER_PREFIX}none") }));
+    options.push(json!({ "kind": "reject_once", "name": t!("None of these (I'll answer in the chat)"), "optionId": format!("{ANSWER_PREFIX}none") }));
     let id = format!("{}#{qi}", tool_use_id.as_str().unwrap_or("question"));
     let tool_call = json!({ "toolCallId": id, "title": title, "kind": "think", "rawInput": q });
     (tool_call, Value::Array(options), labels)
