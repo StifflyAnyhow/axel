@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use axel_i18n::t;
 use crate::attach::parse_dropped_paths;
 use crate::input::TextInput;
 use crate::mention::MentionMenu;
@@ -36,11 +37,11 @@ impl Step {
 
     pub fn question(self) -> &'static str {
         match self {
-            Step::Title => "What are we building?",
-            Step::Where => "Where?",
-            Step::Who => "Who?",
-            Step::Workspace => "Workspace",
-            Step::Summary => "Ready",
+            Step::Title => t!("What are we building?"),
+            Step::Where => t!("Where?"),
+            Step::Who => t!("Who?"),
+            Step::Workspace => t!("Workspace"),
+            Step::Summary => t!("Ready"),
         }
     }
 }
@@ -108,12 +109,12 @@ impl Field {
 
     pub fn label(self) -> &'static str {
         match self {
-            Field::Name => "Name",
-            Field::Harness => "Harness",
-            Field::Mode => "Mode",
-            Field::Model => "Model",
-            Field::Skills => "Skills",
-            Field::Color => "Color",
+            Field::Name => t!("Name"),
+            Field::Harness => t!("Harness"),
+            Field::Mode => t!("Mode"),
+            Field::Model => t!("Model"),
+            Field::Skills => t!("Skills"),
+            Field::Color => t!("Color"),
         }
     }
 
@@ -396,7 +397,7 @@ impl Launcher {
 
     /// "a, b" or "scratch (no project)".
     pub fn where_summary(&self) -> String {
-        if self.selected_paths.is_empty() { "scratch (no project)".to_string() } else { self.project_names().join(", ") }
+        if self.selected_paths.is_empty() { t!("scratch (no project)").to_string() } else { self.project_names().join(", ") }
     }
 
     pub fn selected_agent(&self) -> Option<&AgentRow> {
@@ -497,7 +498,7 @@ impl Launcher {
     /// with the defaults.
     fn title_next(&mut self) {
         if self.title.text().trim().is_empty() {
-            self.error = Some("Give it a one-line title first.".into());
+            self.error = Some(t!("Give it a one-line title first.").into());
             self.title_focus = TitleFocus::Text;
         } else {
             self.sync_branch();
@@ -590,7 +591,7 @@ impl Launcher {
     fn quick_launch(&mut self) -> Action {
         self.title_focus = TitleFocus::Text;
         if self.title.text().trim().is_empty() {
-            self.error = Some("Type what you want done first.".into());
+            self.error = Some(t!("Type what you want done first.").into());
             return Action::None;
         }
         self.sync_branch();
@@ -757,7 +758,7 @@ impl Launcher {
                 let text = self.path_input.text();
                 let text = text.trim();
                 if text.is_empty() {
-                    self.error = Some("Type a directory path.".into());
+                    self.error = Some(t!("Type a directory path.").into());
                 } else {
                     let path = expand_tilde(text);
                     let path = if path.is_absolute() { path } else { self.cwd.join(path) };
@@ -885,17 +886,17 @@ impl Launcher {
     fn confirm_new_agent(&mut self) -> Action {
         let name = self.form.name.text().trim().to_string();
         if name.is_empty() {
-            self.form.error = Some("Name is required.".into());
+            self.form.error = Some(t!("Name is required.").into());
             self.form.field = Field::Name;
             return Action::None;
         }
         if name.contains(char::is_whitespace) {
-            self.form.error = Some("Name cannot contain spaces (it is used as @name).".into());
+            self.form.error = Some(t!("Name cannot contain spaces (it is used as @name).").into());
             self.form.field = Field::Name;
             return Action::None;
         }
         if self.agents.iter().any(|a| a.name.eq_ignore_ascii_case(&name)) {
-            self.form.error = Some(format!("An agent named \"{name}\" already exists."));
+            self.form.error = Some(t!("An agent named “{name}” already exists.", name = name));
             self.form.field = Field::Name;
             return Action::None;
         }
@@ -928,7 +929,7 @@ impl Launcher {
             }
             KeyCode::Enter | KeyCode::Tab => {
                 if self.workspace == Workspace::Worktree && self.branch.text().trim().is_empty() {
-                    self.error = Some("Branch name is required for a worktree.".into());
+                    self.error = Some(t!("Branch name is required for a worktree.").into());
                 } else {
                     self.go(Step::Summary);
                 }
@@ -1003,9 +1004,9 @@ impl Launcher {
     /// Human description of the workspace for breadcrumbs and the summary.
     pub fn workspace_summary(&self) -> String {
         match self.effective_workspace() {
-            Workspace::InPlace => "in place".to_string(),
-            Workspace::Worktree => format!("worktree on {}", self.branch.text().trim()),
-            Workspace::Scratch => "scratch".to_string(),
+            Workspace::InPlace => t!("in place").to_string(),
+            Workspace::Worktree => t!("worktree on {branch}", branch = self.branch.text().trim()),
+            Workspace::Scratch => t!("scratch").to_string(),
         }
     }
 
@@ -1013,21 +1014,21 @@ impl Launcher {
     pub fn breadcrumbs(&self) -> Vec<(&'static str, String)> {
         let mut out = Vec::new();
         if let Some(sp) = &self.spawn {
-            out.push(("Thread", sp.title.clone()));
+            out.push((t!("Thread"), sp.title.clone()));
         } else {
             if self.step > Step::Title {
-                out.push(("Building", self.title.text().trim().to_string()));
+                out.push((t!("Building"), self.title.text().trim().to_string()));
             }
             if self.step > Step::Where {
-                out.push(("Where", self.where_summary()));
+                out.push((t!("Where"), self.where_summary()));
             }
         }
         if self.step > Step::Who {
             let who = self.chosen_agent_row().map(|a| format!("{} · {}", a.name, a.harness)).unwrap_or_default();
-            out.push(("Who", who));
+            out.push((t!("Who"), who));
         }
         if self.step > Step::Workspace && self.asks_workspace() {
-            out.push(("Workspace", self.workspace_summary()));
+            out.push((t!("Workspace"), self.workspace_summary()));
         }
         out
     }
@@ -1036,11 +1037,11 @@ impl Launcher {
     /// One word for the top line: which step we're on.
     pub fn step_title(&self) -> &'static str {
         match self.step {
-            Step::Title => "new thread",
-            Step::Where => "where",
-            Step::Who => "who",
-            Step::Workspace => "workspace",
-            Step::Summary => "launch",
+            Step::Title => t!("new thread"),
+            Step::Where => t!("where"),
+            Step::Who => t!("who"),
+            Step::Workspace => t!("workspace"),
+            Step::Summary => t!("launch"),
         }
     }
 
@@ -1048,42 +1049,42 @@ impl Launcher {
         match self.step {
             Step::Title => match self.title_focus {
                 TitleFocus::Text if !self.mention_options().is_empty() => {
-                    vec![("↑↓", "pick"), ("Tab", "mention"), ("Esc", "dismiss")]
+                    vec![("↑↓", t!("pick")), ("Tab", t!("mention")), ("Esc", t!("dismiss"))]
                 }
-                TitleFocus::Attachments => vec![("←→", "select"), ("⌫", "remove"), ("Esc", "back")],
+                TitleFocus::Attachments => vec![("←→", t!("select")), ("⌫", t!("remove")), ("Esc", t!("back"))],
                 TitleFocus::Text if !self.attachments.is_empty() => {
-                    vec![("Enter", "launch"), ("Tab", "attachments"), ("↓", "threads"), ("Esc", "close")]
+                    vec![("Enter", t!("launch")), ("Tab", t!("attachments")), ("↓", t!("threads")), ("Esc", t!("close"))]
                 }
-                TitleFocus::Text => vec![("Enter", "launch"), ("Tab", "options"), ("↓", "threads"), ("Esc", "close")],
+                TitleFocus::Text => vec![("Enter", t!("launch")), ("Tab", t!("options")), ("↓", t!("threads")), ("Esc", t!("close"))],
             },
             Step::Where => match self.where_mode {
-                WhereMode::List => vec![("↑↓", "move"), ("Space", "toggle"), ("Enter", "confirm"), ("type", "filter"), ("Esc", "back")],
-                WhereMode::Path => vec![("Enter", "add path"), ("Esc", "back")],
+                WhereMode::List => vec![("↑↓", t!("move")), ("Space", t!("toggle")), ("Enter", t!("confirm")), (t!("type"), t!("filter")), ("Esc", t!("back"))],
+                WhereMode::Path => vec![("Enter", t!("add path")), ("Esc", t!("back"))],
             },
             Step::Who => match self.who_mode {
                 WhoMode::List => {
-                    let back = if self.spawn.is_some() { "dashboard" } else { "back" };
-                    vec![("↑↓", "pick"), ("n", "new agent"), ("Enter", "next"), ("i", "inbox"), ("Esc", back)]
+                    let back = if self.spawn.is_some() { t!("dashboard") } else { t!("back") };
+                    vec![("↑↓", t!("pick")), ("n", t!("new agent")), ("Enter", t!("next")), ("i", t!("inbox")), ("Esc", back)]
                 }
                 WhoMode::NewAgent => {
                     if self.form.field.is_text() {
-                        vec![("Tab", "next field"), ("Enter", "next"), ("Esc", "cancel")]
+                        vec![("Tab", t!("next field")), ("Enter", t!("next")), ("Esc", t!("cancel"))]
                     } else if self.form.field == Field::Color {
-                        vec![("←→", "cycle"), ("Enter", "create"), ("Esc", "cancel")]
+                        vec![("←→", t!("cycle")), ("Enter", t!("create")), ("Esc", t!("cancel"))]
                     } else {
-                        vec![("←→", "cycle"), ("Tab", "next field"), ("Esc", "cancel")]
+                        vec![("←→", t!("cycle")), ("Tab", t!("next field")), ("Esc", t!("cancel"))]
                     }
                 }
             },
             Step::Workspace => {
-                let mut v = vec![("↑↓", "toggle"), ("Enter", "next")];
+                let mut v = vec![("↑↓", t!("toggle")), ("Enter", t!("next"))];
                 if self.workspace != Workspace::Worktree {
-                    v.push(("i", "inbox"));
+                    v.push(("i", t!("inbox")));
                 }
-                v.push(("Esc", "back"));
+                v.push(("Esc", t!("back")));
                 v
             }
-            Step::Summary => vec![("Enter", "launch"), ("i", "inbox"), ("Esc", "back"), ("q", "quit")],
+            Step::Summary => vec![("Enter", t!("launch")), ("i", t!("inbox")), ("Esc", t!("back")), ("q", t!("quit"))],
         }
     }
 }

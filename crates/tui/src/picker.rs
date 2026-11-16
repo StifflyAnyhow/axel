@@ -5,6 +5,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use axel_i18n::t;
 use crate::input::TextInput;
 use crate::ThreadOp;
 use crate::model::ThreadRow;
@@ -133,13 +134,13 @@ impl ThreadPicker {
     }
 
     pub fn help(&self) -> Vec<(&'static str, &'static str)> {
-        let esc = if self.filter.is_empty() { "close" } else { "clear" };
-        let mut v = vec![("Enter", "open")];
+        let esc = if self.filter.is_empty() { t!("close") } else { t!("clear") };
+        let mut v = vec![("Enter", t!("open"))];
         if self.can_manage {
-            let settle = if self.selected().is_some_and(|t| t.settled) { "reopen" } else { "settle" };
-            v.extend([("^S", settle), ("^X", "archive"), ("^D", "delete")]);
+            let settle = if self.selected().is_some_and(|t| t.settled) { t!("reopen") } else { t!("settle") };
+            v.extend([("^S", settle), ("^X", t!("archive")), ("^D", t!("delete"))]);
         }
-        v.extend([("type", "filter"), ("Esc", esc)]);
+        v.extend([(t!("type"), t!("filter")), ("Esc", esc)]);
         v
     }
 

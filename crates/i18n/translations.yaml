@@ -28,6 +28,668 @@
   zh-Hans: "{who} 提问：{title}"
 
 # --- tui ---
+"error: refresh failed: {error}":
+  zh-Hans: "错误：刷新失败：{error}"
+"Settled “{title}”":
+  zh-Hans: "已完成“{title}”"
+"Reopened “{title}”":
+  zh-Hans: "已重新打开“{title}”"
+"Archived “{title}”":
+  zh-Hans: "已归档“{title}”"
+"Deleted “{title}”":
+  zh-Hans: "已删除“{title}”"
+"Allowed {agent}'s request":
+  zh-Hans: "已批准 {agent} 的请求"
+"Denied {agent}'s request":
+  zh-Hans: "已拒绝 {agent} 的请求"
+"reply failed: {error}":
+  zh-Hans: "回复失败：{error}"
+"Marked all read":
+  zh-Hans: "已全部标为已读"
+"Nothing to mark":
+  zh-Hans: "没有可标记的内容"
+"mark read failed: {error}":
+  zh-Hans: "标为已读失败：{error}"
+"↑↓ move · Space toggle · Enter confirm · {min}–{max} picks · Esc later":
+  zh-Hans: "↑↓ 移动 · Space 勾选 · Enter 确认 · 选 {min}–{max} 项 · Esc 稍后"
+"↑↓ pick · Enter or 1–9 answer · Esc answer later in the composer":
+  zh-Hans: "↑↓ 选择 · Enter 或 1–9 回答 · Esc 稍后在输入框中回答"
+"No thread selected. Press n to start one.":
+  zh-Hans: "未选择话题。按 n 新建一个。"
+"No open threads. Press n to start one.":
+  zh-Hans: "没有进行中的话题。按 n 新建一个。"
+"No agents yet. Press n to create one.":
+  zh-Hans: "还没有智能体。按 n 创建一个。"
+"new thread":
+  zh-Hans: "新话题"
+"open thread":
+  zh-Hans: "打开话题"
+"pane":
+  zh-Hans: "窗格"
+"spawn agent":
+  zh-Hans: "加入智能体"
+"widget":
+  zh-Hans: "切换面板"
+"inbox":
+  zh-Hans: "收件箱"
+"quit":
+  zh-Hans: "退出"
+"An agent named “{name}” already exists.":
+  zh-Hans: "名为“{name}”的智能体已存在。"
+"you":
+  zh-Hans: "你"
+"permission":
+  zh-Hans: "权限"
+"No selections":
+  zh-Hans: "未选择"
+"1 tool call":
+  zh-Hans: "1 次工具调用"
+"{n} tool calls":
+  zh-Hans: "{n} 次工具调用"
+"1 file edited":
+  zh-Hans: "编辑了 1 个文件"
+"{n} files edited":
+  zh-Hans: "编辑了 {n} 个文件"
+"Questions need a typed answer; reply from the agent's pane.":
+  zh-Hans: "问题需要输入回答，请在智能体的窗格中回复。"
+"pick":
+  zh-Hans: "选择"
+"section":
+  zh-Hans: "切换分区"
+"allow":
+  zh-Hans: "批准"
+"deny":
+  zh-Hans: "拒绝"
+"mark read":
+  zh-Hans: "标为已读"
+"What are we building?":
+  zh-Hans: "要做什么？"
+"Where?":
+  zh-Hans: "在哪里？"
+"Who?":
+  zh-Hans: "由谁来做？"
+"Workspace":
+  zh-Hans: "工作区"
+"Ready":
+  zh-Hans: "准备就绪"
+"Name":
+  zh-Hans: "名称"
+"Harness":
+  zh-Hans: "Harness"
+"Mode":
+  zh-Hans: "模式"
+"Model":
+  zh-Hans: "模型"
+"Skills":
+  zh-Hans: "技能"
+"Color":
+  zh-Hans: "颜色"
+"scratch (no project)":
+  zh-Hans: "草稿（无项目）"
+"Give it a one-line title first.":
+  zh-Hans: "请先写一行标题。"
+"Type what you want done first.":
+  zh-Hans: "请先输入要做的事。"
+"Type a directory path.":
+  zh-Hans: "请输入目录路径。"
+"Name is required.":
+  zh-Hans: "名称为必填项。"
+"Name cannot contain spaces (it is used as @name).":
+  zh-Hans: "名称不能包含空格（它会用作 @name）。"
+"Branch name is required for a worktree.":
+  zh-Hans: "worktree 需要分支名称。"
+"in place":
+  zh-Hans: "原地"
+"worktree on {branch}":
+  zh-Hans: "分支 {branch} 上的 worktree"
+"scratch":
+  zh-Hans: "草稿"
+"Thread":
+  zh-Hans: "话题"
+"Building":
+  zh-Hans: "要做的事"
+"Where":
+  zh-Hans: "位置"
+"Who":
+  zh-Hans: "智能体"
+"where":
+  zh-Hans: "位置"
+"who":
+  zh-Hans: "智能体"
+"workspace":
+  zh-Hans: "工作区"
+"launch":
+  zh-Hans: "启动"
+"mention":
+  zh-Hans: "提及"
+"dismiss":
+  zh-Hans: "关闭"
+"select":
+  zh-Hans: "选择"
+"remove":
+  zh-Hans: "移除"
+"back":
+  zh-Hans: "返回"
+"attachments":
+  zh-Hans: "附件"
+"threads":
+  zh-Hans: "话题"
+"close":
+  zh-Hans: "关闭"
+"options":
+  zh-Hans: "选项"
+"move":
+  zh-Hans: "移动"
+"toggle":
+  zh-Hans: "切换"
+"confirm":
+  zh-Hans: "确认"
+"type":
+  zh-Hans: "输入"
+"filter":
+  zh-Hans: "筛选"
+"add path":
+  zh-Hans: "添加路径"
+"dashboard":
+  zh-Hans: "仪表盘"
+"new agent":
+  zh-Hans: "新建智能体"
+"next":
+  zh-Hans: "下一步"
+"next field":
+  zh-Hans: "下一个字段"
+"cancel":
+  zh-Hans: "取消"
+"cycle":
+  zh-Hans: "切换"
+"create":
+  zh-Hans: "创建"
+"Reset":
+  zh-Hans: "重置"
+"Move":
+  zh-Hans: "迁移"
+"Settle":
+  zh-Hans: "完成"
+"Reopen":
+  zh-Hans: "重新打开"
+"Archive":
+  zh-Hans: "归档"
+"Stop all":
+  zh-Hans: "全部停止"
+"Agents":
+  zh-Hans: "智能体"
+"Rename":
+  zh-Hans: "重命名"
+"Hard reset":
+  zh-Hans: "硬重置"
+"the agent":
+  zh-Hans: "智能体"
+"a fresh context for {agent}: a new session with a recap of the thread, nothing else carried over":
+  zh-Hans: "为 {agent} 换上全新的上下文：开一个新会话，只带上话题的回顾，其余都不保留"
+"run {agent} on another machine: {hosts}":
+  zh-Hans: "在另一台机器上运行 {agent}：{hosts}"
+"mark it done; it stays listed, dimmed":
+  zh-Hans: "标记为已完成；它仍留在列表中，显示为灰色"
+"back to open":
+  zh-Hans: "恢复为进行中"
+"stop its sessions and hide it (axel thread reopen brings it back)":
+  zh-Hans: "停止它的会话并隐藏（`axel thread reopen` 可恢复）"
+"pause, resume, kill, or remove an agent from this thread":
+  zh-Hans: "暂停、恢复、终止智能体，或将其移出此话题"
+"end 1 live session":
+  zh-Hans: "结束 1 个活动会话"
+"end {n} live sessions":
+  zh-Hans: "结束 {n} 个活动会话"
+"change the title (the window follows)":
+  zh-Hans: "修改标题（窗口标题随之更新）"
+"end every session and relaunch the panes; no agent, no recap: the next message starts from scratch":
+  zh-Hans: "结束所有会话并重新打开窗格；不启动智能体，也没有回顾：下一条消息从头开始"
+"Pause":
+  zh-Hans: "暂停"
+"Resume":
+  zh-Hans: "恢复"
+"Kill":
+  zh-Hans: "终止"
+"Remove from thread":
+  zh-Hans: "移出话题"
+"1 session":
+  zh-Hans: "1 个会话"
+"{n} sessions":
+  zh-Hans: "{n} 个会话"
+"state":
+  zh-Hans: "状态"
+"turns":
+  zh-Hans: "轮次"
+"tools":
+  zh-Hans: "工具"
+"tokens":
+  zh-Hans: "token"
+"cost":
+  zh-Hans: "费用"
+"ctx":
+  zh-Hans: "上下文"
+"for":
+  zh-Hans: "时长"
+"{n} files changed":
+  zh-Hans: "{n} 个文件有改动"
+"{turns} turns · {calls} tool calls":
+  zh-Hans: "{turns} 轮 · {calls} 次工具调用"
+"{n} tokens":
+  zh-Hans: "{n} token"
+"{action} which agent?":
+  zh-Hans: "{action}哪个智能体？"
+"{agent} · agent controls":
+  zh-Hans: "{agent} · 智能体控制"
+"move {agent} where?":
+  zh-Hans: "把 {agent} 迁移到哪里？"
+"title:":
+  zh-Hans: "标题："
+"↑↓ choose  ⏎ pick  Esc back":
+  zh-Hans: "↑↓ 选择  ⏎ 确定  Esc 返回"
+"↑↓ choose  ⏎ go  Esc close":
+  zh-Hans: "↑↓ 选择  ⏎ 执行  Esc 关闭"
+"reset: end the thread's sessions and start {agent} fresh with a recap?":
+  zh-Hans: "重置：结束此话题的会话，并带上回顾重新启动 {agent}？"
+"move {agent} to {host}?":
+  zh-Hans: "把 {agent} 迁移到 {host}？"
+"settle this thread?":
+  zh-Hans: "将此话题标记为已完成？"
+"reopen this thread?":
+  zh-Hans: "重新打开此话题？"
+"archive this thread: stop its sessions and hide it?":
+  zh-Hans: "归档此话题：停止它的会话并隐藏？"
+"stop every live session?":
+  zh-Hans: "停止所有活动会话？"
+"kill {agent}'s live sessions on this thread?":
+  zh-Hans: "终止 {agent} 在此话题上的活动会话？"
+"pause {agent} in place, including its running tools?":
+  zh-Hans: "原地暂停 {agent}，包括正在运行的工具？"
+"resume {agent}'s paused work?":
+  zh-Hans: "恢复 {agent} 已暂停的工作？"
+"stop {agent} and remove it from this thread? Its history is kept.":
+  zh-Hans: "停止 {agent} 并将其移出此话题？其历史记录会保留。"
+"rename to {title}?":
+  zh-Hans: "重命名为 {title}？"
+"hard reset: end every session, relaunch the panes, start nobody; the conversation is not carried over?":
+  zh-Hans: "硬重置：结束所有会话，重新打开窗格，不启动任何智能体；对话不会保留？"
+"question":
+  zh-Hans: "问题"
+"clear":
+  zh-Hans: "清除"
+"open":
+  zh-Hans: "打开"
+"reopen":
+  zh-Hans: "重新打开"
+"settle":
+  zh-Hans: "完成"
+"archive":
+  zh-Hans: "归档"
+"delete":
+  zh-Hans: "删除"
+"agent":
+  zh-Hans: "智能体"
+"{who} is working…":
+  zh-Hans: "{who} 正在工作…"
+"{options} · answer below":
+  zh-Hans: "{options} · 请在下方回答"
+"the agent read it before you saved · your text stays: Enter sends it as a new message":
+  zh-Hans: "智能体在你保存前已读取 · 你的文本仍保留：按 Enter 作为新消息发送"
+"no agent session to show":
+  zh-Hans: "没有可显示的智能体会话"
+"edited":
+  zh-Hans: "已编辑"
+"queued ({n})":
+  zh-Hans: "已排队（{n}）"
+"queued · runs when the turn ends · ^S interrupts for it":
+  zh-Hans: "已排队 · 本轮结束后运行 · ^S 打断并立即发送"
+"sent into the turn · read at its next step · ⌥↑ edits it until then":
+  zh-Hans: "已发送到当前轮次 · 将在下一步读取 · 在此之前可用 ⌥↑ 编辑"
+"{state} · turn {turn} · {pending} pending":
+  zh-Hans: "{state} · 第 {turn} 轮 · {pending} 条待处理"
+"error: {message} · text kept in the composer":
+  zh-Hans: "错误：{message} · 文本已保留在输入框中"
+"{message} · your text stays: Enter sends it as a new message":
+  zh-Hans: "{message} · 你的文本仍保留：按 Enter 作为新消息发送"
+"error: {message}":
+  zh-Hans: "错误：{message}"
+"nothing to browse · scroll the message pane or click a tool-call link":
+  zh-Hans: "没有可浏览的内容 · 滚动消息窗格或点击工具调用链接"
+"no managed session to switch modes on":
+  zh-Hans: "没有可切换模式的托管会话"
+"sending it now…":
+  zh-Hans: "正在立即发送…"
+"editing queued message…":
+  zh-Hans: "正在编辑排队的消息…"
+"removing…":
+  zh-Hans: "正在移除…"
+"composer not empty · send or clear it first":
+  zh-Hans: "输入框不为空 · 请先发送或清空"
+"editing a message not read yet · Enter saves · Esc cancels":
+  zh-Hans: "正在编辑尚未读取的消息 · Enter 保存 · Esc 取消"
+"empty · Esc cancels, or remove the message from the queue (Tab, x)":
+  zh-Hans: "内容为空 · Esc 取消，或将消息移出队列（Tab，x）"
+"saving…":
+  zh-Hans: "正在保存…"
+"edit cancelled · the message is as it was":
+  zh-Hans: "已取消编辑 · 消息保持原样"
+"no session to show a log for":
+  zh-Hans: "没有可显示日志的会话"
+"declining · redirecting…":
+  zh-Hans: "正在拒绝 · 正在重定向…"
+"interrupting…":
+  zh-Hans: "正在打断…"
+"sending…":
+  zh-Hans: "正在发送…"
+"summoning @{agent}…":
+  zh-Hans: "正在召唤 @{agent}…"
+"no agent on this thread yet · start with @name":
+  zh-Hans: "此话题还没有智能体 · 用 @name 开始"
+"save edit":
+  zh-Hans: "保存编辑"
+"cancel edit":
+  zh-Hans: "取消编辑"
+"new line":
+  zh-Hans: "换行"
+"decline & redirect":
+  zh-Hans: "拒绝并重定向"
+"send into turn":
+  zh-Hans: "发送到当前轮次"
+"send":
+  zh-Hans: "发送"
+"interrupt & send":
+  zh-Hans: "打断并发送"
+"send queued":
+  zh-Hans: "发送排队消息"
+"edit":
+  zh-Hans: "编辑"
+"answer":
+  zh-Hans: "回答"
+"choose":
+  zh-Hans: "选择"
+"history":
+  zh-Hans: "历史"
+"log":
+  zh-Hans: "日志"
+"scroll":
+  zh-Hans: "滚动"
+"queue":
+  zh-Hans: "队列"
+"timeline keys":
+  zh-Hans: "时间线按键"
+"send now":
+  zh-Hans: "立即发送"
+"expand":
+  zh-Hans: "展开"
+"fold all":
+  zh-Hans: "全部折叠"
+"top/bottom":
+  zh-Hans: "顶部/底部"
+"just now":
+  zh-Hans: "刚刚"
+"{n}m ago":
+  zh-Hans: "{n} 分钟前"
+"{n}h ago":
+  zh-Hans: "{n} 小时前"
+"{n}d ago":
+  zh-Hans: "{n} 天前"
+"{n}w ago":
+  zh-Hans: "{n} 周前"
+"{n}mo ago":
+  zh-Hans: "{n} 个月前"
+"{n}y ago":
+  zh-Hans: "{n} 年前"
+"split":
+  zh-Hans: "并排"
+"unified":
+  zh-Hans: "合并"
+"Enter sends {n} note(s)":
+  zh-Hans: "Enter 发送 {n} 条批注"
+"undo":
+  zh-Hans: "撤销"
+"restore":
+  zh-Hans: "恢复"
+"Scroll and select as usual · r review lines · {layout} · [ ] turn{notes}{undo}{restore} · q close":
+  zh-Hans: "照常滚动和选择 · r 审阅代码行 · {layout} · [ ] 切换轮次{notes}{undo}{restore} · q 关闭"
+"{agent} · turn {turn} · {headline}":
+  zh-Hans: "{agent} · 第 {turn} 轮 · {headline}"
+"No changes in this turn":
+  zh-Hans: "本轮没有改动"
+"Undo cancelled":
+  zh-Hans: "已取消撤销"
+"also changed":
+  zh-Hans: "其他改动"
+"old":
+  zh-Hans: "旧"
+"new":
+  zh-Hans: "新"
+"╭ ✎ note · {side} L{range}":
+  zh-Hans: "╭ ✎ 批注 · {side} L{range}"
+"No text changes":
+  zh-Hans: "没有文本改动"
+"note: {text}▏  Enter saves · Esc cancels":
+  zh-Hans: "批注：{text}▏  Enter 保存 · Esc 取消"
+"undo turn {turn} of {agent}: {headline}? y/n":
+  zh-Hans: "撤销 {agent} 的第 {turn} 轮：{headline}？y/n"
+"side by side":
+  zh-Hans: "并排"
+"⏎ send 1 note":
+  zh-Hans: "⏎ 发送 1 条批注"
+"⏎ send {n} notes":
+  zh-Hans: "⏎ 发送 {n} 条批注"
+"↑↓ file  j/k line  v mark  c note  s split  q back{notes}":
+  zh-Hans: "↑↓ 文件  j/k 行  v 标记  c 批注  s 并排  q 返回{notes}"
+"↑↓ files  j/k lines  ←→ pan  c note{notes}  {layout}  q back":
+  zh-Hans: "↑↓ 文件  j/k 行  ←→ 平移  c 批注{notes}  {layout}  q 返回"
+"↑↓ file  j/k line  ←→ pan  n/p hunk  v mark  c note{notes}{undo}  {layout}  [ ] turn  q back":
+  zh-Hans: "↑↓ 文件  j/k 行  ←→ 平移  n/p 代码块  v 标记  c 批注{notes}{undo}  {layout}  [ ] 轮次  q 返回"
+"agents · {tokens} · ${cost}":
+  zh-Hans: "智能体 · {tokens} · ${cost}"
+"no agents · n to create":
+  zh-Hans: "没有智能体 · 按 n 创建"
+"+{n} more":
+  zh-Hans: "另有 {n} 个"
+"n new · i inbox · q":
+  zh-Hans: "n 新建 · i 收件箱 · q 退出"
+"No open threads — press n to start one.":
+  zh-Hans: "没有进行中的话题 — 按 n 新建一个。"
+"agents":
+  zh-Hans: "智能体"
+"No agents yet — press n to create one.":
+  zh-Hans: "还没有智能体 — 按 n 创建一个。"
+"tokens (1h)":
+  zh-Hans: "token（1 小时）"
+"in {input}  out {output}  cache {cache}":
+  zh-Hans: "输入 {input}  输出 {output}  缓存 {cache}"
+"${cost} est":
+  zh-Hans: "约 ${cost}"
+"{n} unread":
+  zh-Hans: "{n} 条未读"
+"Inbox zero.":
+  zh-Hans: "收件箱已清空。"
+"pending":
+  zh-Hans: "待处理"
+"Nothing is waiting on you.":
+  zh-Hans: "没有等你处理的事项。"
+"No live threads.":
+  zh-Hans: "没有活动的话题。"
+"messages":
+  zh-Hans: "消息"
+"No messages yet.":
+  zh-Hans: "还没有消息。"
+"no agent yet":
+  zh-Hans: "还没有智能体"
+"type a directory path":
+  zh-Hans: "输入目录路径"
+"Space toggles, Enter confirms":
+  zh-Hans: "Space 勾选，Enter 确认"
+"1 project selected":
+  zh-Hans: "已选择 1 个项目"
+"{n} projects selected":
+  zh-Hans: "已选择 {n} 个项目"
+"type to filter":
+  zh-Hans: "输入以筛选"
+"(here)":
+  zh-Hans: "（当前目录）"
+"Other path…":
+  zh-Hans: "其他路径…"
+"No project (scratch thread)":
+  zh-Hans: "无项目（草稿话题）"
+"pick an agent":
+  zh-Hans: "选择一个智能体"
+"+ New agent":
+  zh-Hans: "+ 新建智能体"
+"never":
+  zh-Hans: "从未"
+"New agent":
+  zh-Hans: "新建智能体"
+"Ed25519 key + owner attestation":
+  zh-Hans: "Ed25519 密钥 + 所有者证明"
+"required, used as @name":
+  zh-Hans: "必填，用作 @name"
+"optional, harness default":
+  zh-Hans: "可选，默认使用 harness 的设置"
+"* for all, or comma-separated":
+  zh-Hans: "* 表示全部，或用逗号分隔"
+"creating…":
+  zh-Hans: "正在创建…"
+"↑↓ or Space to toggle":
+  zh-Hans: "↑↓ 或 Space 切换"
+"In place":
+  zh-Hans: "原地"
+"New worktree":
+  zh-Hans: "新建 worktree"
+"branch":
+  zh-Hans: "分支"
+"{who} ({harness}) will join “{title}”":
+  zh-Hans: "{who}（{harness}）将加入“{title}”"
+"{who} ({harness}) will work on “{title}”":
+  zh-Hans: "{who}（{harness}）将处理“{title}”"
+"as another session on the existing thread.":
+  zh-Hans: "作为现有话题上的另一个会话。"
+"in a {scratch} workspace.":
+  zh-Hans: "在{scratch}工作区中。"
+"in {paths}, {workspace}.":
+  zh-Hans: "在 {paths} 中，{workspace}。"
+"runtime: {runtime}":
+  zh-Hans: "运行方式：{runtime}"
+"{key} to launch":
+  zh-Hans: "按 {key} 启动"
+"recent":
+  zh-Hans: "最近"
+"{open} open · {settled} settled":
+  zh-Hans: "{open} 个进行中 · {settled} 个已完成"
+"from the prompt":
+  zh-Hans: "从提示词进入"
+"click":
+  zh-Hans: "点击"
+"to pick":
+  zh-Hans: "选择"
+"No open threads yet.":
+  zh-Hans: "还没有进行中的话题。"
+"No thread matches.":
+  zh-Hans: "没有匹配的话题。"
+"↩ answered: {answer}":
+  zh-Hans: "↩ 已回答：{answer}"
+"× not sent · session ended while queued":
+  zh-Hans: "× 未发送 · 排队期间会话已结束"
+"1 file":
+  zh-Hans: "1 个文件"
+"{n} files":
+  zh-Hans: "{n} 个文件"
+"(+{n} not this agent)":
+  zh-Hans: "（另有 {n} 个不是此智能体改的）"
+"incl. changes between turns":
+  zh-Hans: "含轮次之间的改动"
+"thinking":
+  zh-Hans: "思考中"
+"{n} calls":
+  zh-Hans: "{n} 次调用"
+"running":
+  zh-Hans: "运行中"
+"failed":
+  zh-Hans: "失败"
+"tool":
+  zh-Hans: "工具"
+"(no output)":
+  zh-Hans: "（无输出）"
+"… +{n} lines · l for the full log":
+  zh-Hans: "… 还有 {n} 行 · 按 l 查看完整日志"
+"↑↓ move · Space toggle · Enter confirm":
+  zh-Hans: "↑↓ 移动 · Space 勾选 · Enter 确认"
+"↑↓ pick · Enter answer":
+  zh-Hans: "↑↓ 选择 · Enter 回答"
+"Tab then ↑↓ to this card, Enter answers":
+  zh-Hans: "按 Tab 再用 ↑↓ 移到此卡片，Enter 回答"
+"denied: {choice}":
+  zh-Hans: "已拒绝：{choice}"
+"denied":
+  zh-Hans: "已拒绝"
+"allowed: {choice}":
+  zh-Hans: "已批准：{choice}"
+"allowed":
+  zh-Hans: "已批准"
+"answered: {choice}":
+  zh-Hans: "已回答：{choice}"
+"answered":
+  zh-Hans: "已回答"
+"cancelled":
+  zh-Hans: "已取消"
+"resolved":
+  zh-Hans: "已处理"
+"{who} asks permission: {title}":
+  zh-Hans: "{who} 请求权限：{title}"
+"Waiting for the agent…":
+  zh-Hans: "正在等待智能体…"
+"{name} is running in a pane · nothing is transcribed here · @name to summon a managed agent":
+  zh-Hans: "{name} 正在窗格中运行 · 此处不会记录内容 · 用 @name 召唤托管智能体"
+"no agent running on this thread · type a message to wake {name} · @name to summon someone else":
+  zh-Hans: "此话题上没有运行中的智能体 · 输入消息以唤醒 {name} · 用 @name 召唤其他智能体"
+"no agent running on this thread · @name to summon an agent":
+  zh-Hans: "此话题上没有运行中的智能体 · 用 @name 召唤智能体"
+"✎ editing":
+  zh-Hans: "✎ 编辑中"
+"↳ sent":
+  zh-Hans: "↳ 已发送"
+"⧗ next":
+  zh-Hans: "⧗ 下一条"
+"⧗ queued":
+  zh-Hans: "⧗ 已排队"
+"+{n} file(s)":
+  zh-Hans: "+{n} 个文件"
+"+{n} more · Tab to browse":
+  zh-Hans: "另有 {n} 条 · 按 Tab 浏览"
+"run {command} to get {version}":
+  zh-Hans: "运行 {command} 以获取 {version}"
+"⏵⏵ autopilot on":
+  zh-Hans: "⏵⏵ 自动模式已开启"
+"⏵⏵ accept edits on":
+  zh-Hans: "⏵⏵ 自动接受编辑已开启"
+"⏸ plan mode on":
+  zh-Hans: "⏸ 计划模式已开启"
+"⏵ asks before acting":
+  zh-Hans: "⏵ 操作前先询问"
+"{agent} on {host}":
+  zh-Hans: "{agent} 在 {host} 上"
+"(shift+tab to cycle)":
+  zh-Hans: "（Shift+Tab 切换）"
+"send a message to decline and redirect the agent · Tab to answer":
+  zh-Hans: "发送消息以拒绝并重定向智能体 · 按 Tab 回答"
+"agent is working · Enter sends into its turn · ^S interrupts":
+  zh-Hans: "智能体正在工作 · Enter 发送到当前轮次 · ^S 打断"
+"message the thread · @name for someone else":
+  zh-Hans: "在话题中发消息 · 用 @name 找其他智能体"
+"message the thread · @name for someone else · Esc dashboard":
+  zh-Hans: "在话题中发消息 · 用 @name 找其他智能体 · Esc 仪表盘"
+"last hour":
+  zh-Hans: "最近 1 小时"
+"no tokens spent yet":
+  zh-Hans: "尚未消耗 token"
+"all":
+  zh-Hans: "全部"
+"threads · 24h":
+  zh-Hans: "话题 · 24 小时"
+"plan limits":
+  zh-Hans: "套餐限额"
 
 # --- axel ---
 

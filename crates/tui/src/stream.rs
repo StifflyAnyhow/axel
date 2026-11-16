@@ -11,6 +11,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::Result;
+use axel_i18n::t;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -504,11 +505,11 @@ impl Stream {
         }
         let mut live: Vec<String> = live_rows.iter().flat_map(|r| self.row_ansi(v, r, width)).collect();
         if working {
-            let who = v.data.agents.iter().find(|a| a.2 == crate::model::StatusState::Working).map(|a| a.0.clone()).unwrap_or_else(|| "agent".into());
+            let who = v.data.agents.iter().find(|a| a.2 == crate::model::StatusState::Working).map(|a| a.0.clone()).unwrap_or_else(|| t!("agent").into());
             let frame = SPINNER[self.tick % SPINNER.len()];
             live.push(to_ansi(&Line::from(vec![
                 Span::styled(format!("{frame} "), theme::accent()),
-                Span::styled(format!("{who} is working…"), theme::dim()),
+                Span::styled(t!("{who} is working…", who = who), theme::dim()),
             ])));
         }
         // Never draw a tail taller than the pane: cursor-up can't go past the
@@ -639,14 +640,14 @@ fn render_row(v: &ThreadView, row: &Row, width: usize) -> Vec<Line<'static>> {
         if it.status == Some(ItemStatus::Pending)
             && let ItemBody::Choice { prompt, options, .. } = &it.body
         {
-            let who = it.agent.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| "agent".into());
-            let (glyph, verb, color) = match it.kind {
-                ItemKind::Permission => ("!", "asks permission", theme::DANGER),
-                _ => ("?", "asks", Color::Yellow),
+            let who = it.agent.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| t!("agent").into());
+            let (glyph, color) = match it.kind {
+                ItemKind::Permission => ("!", theme::DANGER),
+                _ => ("?", Color::Yellow),
             };
             let opts: Vec<String> = options.iter().enumerate().map(|(n, o)| format!("{} {}", n + 1, o.label)).collect();
-            let mut lines = crate::view::thread_view::question_header(glyph, color, &who, verb, prompt, width);
-            lines.push(Line::from(Span::styled(format!("    {} · answer below", opts.join("  ")), theme::dim())));
+            let mut lines = crate::view::thread_view::question_header(glyph, color, it.kind, &who, prompt, width);
+            lines.push(Line::from(Span::styled(format!("    {}", t!("{options} · answer below", options = opts.join("  "))), theme::dim())));
             return lines;
         }
     }

@@ -1,12 +1,13 @@
 //! Inbox rendering: pending requests, live statuses, recent messages.
 
+use axel_i18n::t;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph};
 
-use super::help_line;
+use super::help_line_fit;
 use crate::inbox::{Focus, Inbox};
 use crate::model::RequestKind;
 use crate::theme;
@@ -27,7 +28,7 @@ pub fn render(frame: &mut Frame, ib: &Inbox, now: i64) {
     render_statuses(frame, ib, status_area, now);
     render_messages(frame, ib, msg_area, now);
 
-    let mut help = help_line(&ib.help());
+    let mut help = help_line_fit(&ib.help(), usize::from(footer.width));
     if let Some((msg, _)) = &ib.flash {
         help = Line::from(vec![Span::styled(format!(" {msg}"), theme::accent())]);
     }
@@ -47,11 +48,11 @@ fn panel<'a>(title: &'a str, count: Option<String>, focused: bool) -> Block<'a> 
 }
 
 fn render_requests(frame: &mut Frame, ib: &Inbox, area: Rect, now: i64) {
-    let block = panel("pending", Some(ib.data.requests.len().to_string()), ib.focus == Focus::Requests);
+    let block = panel(t!("pending"), Some(ib.data.requests.len().to_string()), ib.focus == Focus::Requests);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if ib.data.requests.is_empty() {
-        frame.render_widget(Paragraph::new(Line::from(Span::styled("Nothing is waiting on you.", theme::dim()))), inner);
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(t!("Nothing is waiting on you."), theme::dim()))), inner);
         return;
     }
     let width = inner.width as usize;
@@ -93,11 +94,11 @@ fn render_requests(frame: &mut Frame, ib: &Inbox, area: Rect, now: i64) {
 }
 
 fn render_statuses(frame: &mut Frame, ib: &Inbox, area: Rect, now: i64) {
-    let block = panel("threads", Some(ib.data.statuses.len().to_string()), false);
+    let block = panel(t!("threads"), Some(ib.data.statuses.len().to_string()), false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if ib.data.statuses.is_empty() {
-        frame.render_widget(Paragraph::new(Line::from(Span::styled("No live threads.", theme::dim()))), inner);
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(t!("No live threads."), theme::dim()))), inner);
         return;
     }
     let width = inner.width as usize;
@@ -133,15 +134,15 @@ fn s_len(s: &Span) -> usize {
 
 fn render_messages(frame: &mut Frame, ib: &Inbox, area: Rect, now: i64) {
     let count = if ib.data.unread > 0 {
-        format!("{} unread", ib.data.unread)
+        t!("{n} unread", n = ib.data.unread)
     } else {
         ib.data.messages.len().to_string()
     };
-    let block = panel("messages", Some(count), ib.focus == Focus::Messages);
+    let block = panel(t!("messages"), Some(count), ib.focus == Focus::Messages);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if ib.data.messages.is_empty() {
-        frame.render_widget(Paragraph::new(Line::from(Span::styled("No messages yet.", theme::dim()))), inner);
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(t!("No messages yet."), theme::dim()))), inner);
         return;
     }
     let width = inner.width as usize;

@@ -1,5 +1,6 @@
 //! Thread view rendering: header · timeline · composer.
 
+use axel_i18n::t;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,7 +11,7 @@ use super::{chips_spans, help_line};
 use crate::model::{ItemBody, ItemKind, ItemStatus, ThreadItem, state_glyph};
 use crate::theme;
 use crate::thread::{Focus, Row, ThreadView};
-use crate::util::{cells, char_width, ellipsize, format_tokens, text_width};
+use crate::util::{cells, char_width, ellipsize, format_tokens, pad_end, text_width};
 
 const OUTPUT_HEAD: usize = 12;
 /// Queued prompts shown above the composer before collapsing into "+N more".
@@ -52,7 +53,7 @@ pub fn render(frame: &mut Frame, v: &ThreadView, now: i64) {
 
 fn render_header(frame: &mut Frame, v: &ThreadView, area: Rect) {
     let d = &v.data;
-    let mut spans = vec![Span::raw(" "), Span::styled(ellipsize(&d.title, (area.width / 2) as usize), theme::accent_bold())];
+    let mut spans = Vec::new();
     if !d.agents.is_empty() {
         spans.push(Span::styled("  ·  ", theme::dim()));
         for (i, (name, color, state)) in d.agents.iter().enumerate() {
@@ -67,7 +68,12 @@ fn render_header(frame: &mut Frame, v: &ThreadView, area: Rect) {
         spans.push(Span::styled(format!("  ·  {}", d.environments.join(", ")), theme::dim()));
     }
     spans.push(Span::styled(format!("  ·  {}", format_tokens(d.tokens)), theme::dim()));
-    spans.push(Span::styled(format!("  ·  ${:.2} est", d.cost_usd), theme::dim()));
+    spans.push(Span::styled(format!("  ·  {}", t!("${cost} est", cost = format!("{:.2}", d.cost_usd))), theme::dim()));
+    // The title takes up to half the row, less when the rest needs it (a
+    // CJK title is twice as wide), so what's on the right isn't cut.
+    let rest: usize = spans.iter().map(Span::width).sum();
+    let room = usize::from(area.width / 2).min(usize::from(area.width).saturating_sub(rest + 1)).max(8);
+    spans.splice(0..0, [Span::raw(" "), Span::styled(ellipsize(&d.title, room), theme::accent_bold())]);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -323,7 +329,8 @@ pub fn fold_summary(items: &[&ThreadItem], room: usize) -> String {
 
 /// Lines for one visible row. `selected` paints the background when the timeline has focus.
 /// Tool runs, thoughts and approvals sit flush left, like prose.
-pub(crate) fn row_lines(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line<'static>> {
+#[doc(hidden)]
+pub fn row_lines(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line<'static>> {
     let paint = RowPaint::new(selected);
     match row {
         Row::Prose(i) => prose_row(v, *i, width, paint),
@@ -362,14 +369,14 @@ fn prose_row(v: &ThreadView, i: usize, width: usize, paint: RowPaint) -> Vec<Lin
     let it = &items[i];
     match (&it.kind, &it.body) {
         (ItemKind::Error, ItemBody::Text(t)) => prose_lines(vec![Span::styled("! ", base.fg(theme::DANGER).bold())], t, width, base.fg(theme::DANGER)),
-        (ItemKind::Answer, ItemBody::Answered(label)) => vec![Line::from(Span::styled(format!("↩ answered: {label}"), dim))],
+        (ItemKind::Answer, ItemBody::Answered(label)) => vec![Line::from(Span::styled(t!("↩ answered: {answer}", answer = label), dim))],
         (ItemKind::UserMessage, ItemBody::Text(t)) if it.status == Some(ItemStatus::Cancelled) => {
             // Queued but never sent (the session ended first).
             let mut lines = prose_lines(you_prefix(dim, false), t.trim(), width, dim);
             if let Some(first) = lines.first_mut() {
                 *first = with_right(std::mem::take(first), &clock(it.at_ms), width, dim);
             }
-            lines.push(Line::from(Span::styled("  × not sent · session ended while queued", dim)));
+            lines.push(Line::from(Span::styled(format!("  {}", t!("× not sent · session ended while queued")), dim)));
             lines
         }
         (ItemKind::UserMessage, ItemBody::Text(t)) if it.relay_to.is_some() => relay_lines(v, i, t, width, paint),
@@ -443,12 +450,14 @@ fn changes_row(it: &ThreadItem, paint: RowPaint) -> Vec<Line<'static>> {
     // "3 files  +42 −7"; with other hands in the tree, the agent's own
     // files first: "2 files (+1 not this agent)  +42 −7".
     let (own, other) = if *authored > 0 && authored < files { (*authored, files - authored) } else { (*files, 0) };
-    let mut what = format!("{own} file{}", if own == 1 { "" } else { "s" });
+    let mut what = if own == 1 { t!("1 file").to_string() } else { t!("{n} files", n = own) };
     if other > 0 {
-        what.push_str(&format!(" (+{other} not this agent)"));
+        what.push(' ');
+        what.push_str(&t!("(+{n} not this agent)", n = other));
     }
     if *between_turns {
-        what.push_str(" incl. changes between turns");
+        what.push(' ');
+        what.push_str(t!("incl. changes between turns"));
     }
     let mut spans = vec![Span::styled("  ↗ ", paint.marker()), Span::styled(what, dim), Span::styled("  ", dim)];
     spans.push(Span::styled(format!("+{added}"), if selected { base.fg(theme::OK) } else { Style::default().fg(theme::OK) }));
@@ -461,7 +470,7 @@ fn thought_row(v: &ThreadView, it: &ThreadItem, width: usize, paint: RowPaint) -
     let dim = paint.dim;
     let mut lines = vec![Line::from(vec![
         Span::styled("· ", dim),
-        Span::styled("thinking", dim),
+        Span::styled(t!("thinking"), dim),
         Span::styled(if v.is_expanded(&it.id) { "" } else { " …" }, dim),
     ])];
     if v.is_expanded(&it.id)
@@ -486,13 +495,13 @@ fn fold_row(v: &ThreadView, idxs: &[usize], width: usize, paint: RowPaint) -> Ve
     let mut tail = String::new();
     // A lone call has no span to time.
     if n > 1 {
-        tail.push_str(&format!(" · {n} calls · {}", duration_label(duration_ms.max(0))));
+        tail.push_str(&format!(" · {} · {}", t!("{n} calls", n = n), duration_label(duration_ms.max(0))));
     }
     if running {
-        tail.push_str(" · running");
+        tail.push_str(&format!(" · {}", t!("running")));
     }
     if failed {
-        tail.push_str(" · failed");
+        tail.push_str(&format!(" · {}", t!("failed")));
     }
     let room = width.saturating_sub(2 + text_width(&tail)).max(12);
     let what = fold_summary(&tools, room);
@@ -520,7 +529,7 @@ fn tool_row(v: &ThreadView, it: &ThreadItem, width: usize, paint: RowPaint) -> V
             let detail = if summary.as_str() != ran && !ran.is_empty() { ran } else { input.clone() };
             (summary.clone(), detail, output.clone())
         }
-        _ => ("tool".into(), String::new(), Vec::new()),
+        _ => (t!("tool").into(), String::new(), Vec::new()),
     };
     let head = format!("  {} ", status.glyph());
     let room = width.saturating_sub(text_width(&head) + text_width(&title) + 2);
@@ -531,13 +540,13 @@ fn tool_row(v: &ThreadView, it: &ThreadItem, width: usize, paint: RowPaint) -> V
     ])];
     if v.is_tool_expanded(&it.id) {
         if output.is_empty() {
-            lines.push(Line::from(Span::styled("      (no output)", dim)));
+            lines.push(Line::from(Span::styled(format!("      {}", t!("(no output)")), dim)));
         }
         for l in output.iter().take(OUTPUT_HEAD) {
             lines.push(Line::from(vec![Span::styled("      ", dim), Span::styled(ellipsize(l, width.saturating_sub(6)), dim)]));
         }
         if output.len() > OUTPUT_HEAD {
-            lines.push(Line::from(Span::styled(format!("      … +{} lines · l for the full log", output.len() - OUTPUT_HEAD), dim)));
+            lines.push(Line::from(Span::styled(format!("      {}", t!("… +{n} lines · l for the full log", n = output.len() - OUTPUT_HEAD)), dim)));
         }
     }
     lines
@@ -550,16 +559,16 @@ fn choice_row(v: &ThreadView, it: &ThreadItem, width: usize, paint: RowPaint) ->
         ItemBody::Choice { prompt, options, chosen, multiple } => (prompt.clone(), options.clone(), chosen.clone(), *multiple),
         _ => (String::new(), Vec::new(), None, None),
     };
-    let who = it.agent.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| "agent".into());
-    let (glyph, color, verb) = match it.kind {
-        ItemKind::Permission => ("!", theme::DANGER, "asks permission"),
-        _ => ("?", Color::Yellow, "asks"),
+    let who = it.agent.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| t!("agent").into());
+    let (glyph, color) = match it.kind {
+        ItemKind::Permission => ("!", theme::DANGER),
+        _ => ("?", Color::Yellow),
     };
     if it.status != Some(ItemStatus::Pending) {
-        return vec![resolved_choice_line(it, chosen, &who, verb, &prompt, width, paint.dim)];
+        return vec![resolved_choice_line(it, chosen, &who, &prompt, width, paint.dim)];
     }
     let card = Style::default();
-    let mut lines = question_header(glyph, color, &who, verb, &prompt, width);
+    let mut lines = question_header(glyph, color, it.kind, &who, &prompt, width);
     let sel = v.choice_index(&it.id);
     for (oi, o) in options.iter().enumerate() {
         let on = oi == sel;
@@ -579,33 +588,52 @@ fn choice_row(v: &ThreadView, it: &ThreadItem, width: usize, paint: RowPaint) ->
             lines.push(Line::from(vec![lead, Span::styled(format!("{pad}{l}"), text)]));
         }
     }
-    let hint = if multiple.is_some() {"↑↓ move · Space toggle · Enter confirm"} else if paint.selected { "↑↓ pick · Enter answer" } else { "Tab then ↑↓ to this card, Enter answers" };
+    let hint = if multiple.is_some() {
+        t!("↑↓ move · Space toggle · Enter confirm")
+    } else if paint.selected {
+        t!("↑↓ pick · Enter answer")
+    } else {
+        t!("Tab then ↑↓ to this card, Enter answers")
+    };
     lines.push(Line::from(Span::styled(format!("     {hint}"), card.fg(theme::DIM))));
     lines
 }
 
-fn resolved_choice_line(it: &ThreadItem, chosen: Option<String>, who: &str, verb: &str, prompt: &str, width: usize, dim: Style) -> Line<'static> {
+fn resolved_choice_line(it: &ThreadItem, chosen: Option<String>, who: &str, prompt: &str, width: usize, dim: Style) -> Line<'static> {
     let outcome = match (it.status, chosen) {
-        (Some(ItemStatus::Denied), c) => format!("denied{}", c.map(|c| format!(": {c}")).unwrap_or_default()),
-        (Some(ItemStatus::Allowed), c) => format!("allowed{}", c.map(|c| format!(": {c}")).unwrap_or_default()),
-        (Some(ItemStatus::Answered), c) => format!("answered{}", c.map(|c| format!(": {c}")).unwrap_or_default()),
-        (Some(ItemStatus::Cancelled), _) => "cancelled".into(),
-        (_, c) => c.unwrap_or_else(|| "resolved".into()),
+        (Some(ItemStatus::Denied), Some(c)) => t!("denied: {choice}", choice = c),
+        (Some(ItemStatus::Denied), None) => t!("denied").into(),
+        (Some(ItemStatus::Allowed), Some(c)) => t!("allowed: {choice}", choice = c),
+        (Some(ItemStatus::Allowed), None) => t!("allowed").into(),
+        (Some(ItemStatus::Answered), Some(c)) => t!("answered: {choice}", choice = c),
+        (Some(ItemStatus::Answered), None) => t!("answered").into(),
+        (Some(ItemStatus::Cancelled), _) => t!("cancelled").into(),
+        (_, c) => c.unwrap_or_else(|| t!("resolved").into()),
     };
     let g = it.status.map(ItemStatus::glyph).unwrap_or("·");
     Line::from(vec![
         Span::styled(format!("{g} "), dim),
-        Span::styled(format!("{who} {verb}: {}", ellipsize(prompt, width / 2)), dim),
+        Span::styled(asks(it.kind, who, &ellipsize(prompt, width / 2)), dim),
         Span::styled(format!(" · {outcome}"), dim),
     ])
 }
 
+/// `atlas asks: <prompt>`, or `atlas asks permission: <prompt>` for a
+/// permission: one sentence, so a language can put the name where it goes.
+pub(crate) fn asks(kind: ItemKind, who: &str, prompt: &str) -> String {
+    match kind {
+        ItemKind::Permission => t!("{who} asks permission: {title}", who = who, title = prompt),
+        _ => t!("{who} asks: {title}", who = who, title = prompt),
+    }
+}
+
 /// `? atlas asks: <prompt>`, the whole prompt wrapped under itself: a question
 /// is read in full before it is answered, so it is never cut short.
-pub(crate) fn question_header(glyph: &str, color: Color, who: &str, verb: &str, prompt: &str, width: usize) -> Vec<Line<'static>> {
-    let lead = format!("{who} {verb}: ");
+pub(crate) fn question_header(glyph: &str, color: Color, kind: ItemKind, who: &str, prompt: &str, width: usize) -> Vec<Line<'static>> {
+    // The sentence without its prompt is the part shown bold.
+    let lead = asks(kind, who, "");
     let mut out = Vec::new();
-    for (i, l) in wrap(&format!("{lead}{}", prompt.trim()), width.saturating_sub(2).max(1)).into_iter().enumerate() {
+    for (i, l) in wrap(&asks(kind, who, prompt.trim()), width.saturating_sub(2).max(1)).into_iter().enumerate() {
         let mut spans = vec![if i == 0 { Span::styled(format!("{glyph} "), Style::default().fg(color).bold()) } else { Span::raw("  ") }];
         match l.strip_prefix(&lead) {
             Some(rest) if i == 0 => {
@@ -622,19 +650,14 @@ pub(crate) fn question_header(glyph: &str, color: Color, who: &str, verb: &str, 
 /// What the timeline says when there is nothing to show yet.
 pub fn empty_hint(d: &crate::model::ThreadData) -> String {
     if d.live_sessions.iter().any(|s| s.managed) {
-        return "Waiting for the agent…".to_string();
+        return t!("Waiting for the agent…").to_string();
     }
     if let Some(pane) = d.live_sessions.first() {
-        return format!(
-            "{} is running in a pane · nothing is transcribed here · @name to summon a managed agent",
-            pane.agent_name
-        );
+        return t!("{name} is running in a pane · nothing is transcribed here · @name to summon a managed agent", name = pane.agent_name);
     }
     match &d.last_agent_name {
-        Some(name) => format!(
-            "no agent running on this thread · type a message to wake {name} · @name to summon someone else"
-        ),
-        None => "no agent running on this thread · @name to summon an agent".to_string(),
+        Some(name) => t!("no agent running on this thread · type a message to wake {name} · @name to summon someone else", name = name),
+        None => t!("no agent running on this thread · @name to summon an agent").to_string(),
     }
 }
 
@@ -731,16 +754,19 @@ pub(crate) fn render_queue(frame: &mut Frame, v: &ThreadView, area: Rect) {
         // Sent into the turn: read at the agent's next step. Queued: after the turn.
         let editing = v.editing.as_deref() == Some(it.id.as_str());
         let label = if editing {
-            "✎ editing"
+            t!("✎ editing")
         } else if it.steering {
-            "↳ sent   "
+            t!("↳ sent")
         } else if idx == 0 {
-            "⧗ next   "
+            t!("⧗ next")
         } else {
-            "⧗ queued "
+            t!("⧗ queued")
         };
-        let files = if it.attachments.is_empty() { String::new() } else { format!("  +{} file(s)", it.attachments.len()) };
-        let room = width.saturating_sub(text_width(label) + 2 + text_width(&files));
+        // The labels line up: each padded to the widest.
+        let label_width = [t!("✎ editing"), t!("↳ sent"), t!("⧗ next"), t!("⧗ queued")].iter().map(|l| text_width(l)).max().unwrap_or(0);
+        let label = pad_end(label, label_width);
+        let files = if it.attachments.is_empty() { String::new() } else { format!("  {}", t!("+{n} file(s)", n = it.attachments.len())) };
+        let room = width.saturating_sub(text_width(&label) + 2 + text_width(&files));
         let line = Line::from(vec![
             Span::styled(if selected { "▸ " } else { "  " }, style.fg(theme::ACCENT)),
             Span::styled(label, style.fg(theme::ACCENT)),
@@ -751,7 +777,7 @@ pub(crate) fn render_queue(frame: &mut Frame, v: &ThreadView, area: Rect) {
         frame.render_widget(Paragraph::new(line), Rect::new(area.x + 1, area.y + cells(r), area.width.saturating_sub(1), 1));
     }
     if n > shown {
-        let more = Line::from(Span::styled(format!("    +{} more · Tab to browse", n - shown), theme::dim()));
+        let more = Line::from(Span::styled(format!("    {}", t!("+{n} more · Tab to browse", n = n - shown)), theme::dim()));
         frame.render_widget(Paragraph::new(more), Rect::new(area.x + 1, area.y + cells(shown), area.width.saturating_sub(1), 1));
     }
 }
@@ -796,7 +822,10 @@ fn menu_rows(v: &ThreadView) -> u16 {
 /// when that's all there's room for.
 fn update_line(version: &str, room: usize) -> Line<'static> {
     let pill = Span::styled(" axel update ", theme::pill());
-    let full = Line::from(vec![Span::styled("run ", theme::dim()), pill.clone(), Span::styled(format!(" to get {version}"), theme::dim())]);
+    // `{command}` isn't filled: the pill goes where it stands.
+    let sentence = t!("run {command} to get {version}", version = version);
+    let (before, after) = sentence.split_once("{command}").unwrap_or(("", ""));
+    let full = Line::from(vec![Span::styled(before.to_string(), theme::dim()), pill.clone(), Span::styled(after.to_string(), theme::dim())]);
     if full.width() <= room { full } else { Line::from(pill) }
 }
 
@@ -814,20 +843,22 @@ fn mode_spans(v: &ThreadView) -> Vec<Span<'static>> {
     });
     let Some(s) = v.mode_session() else { return target.unwrap_or_default() };
     let (label, color) = match s.mode {
-        crate::model::RuntimeMode::Autopilot => ("⏵⏵ autopilot on", theme::ACCENT),
-        crate::model::RuntimeMode::Edits => ("⏵⏵ accept edits on", Color::Indexed(141)),
-        crate::model::RuntimeMode::Plan => ("⏸ plan mode on", Color::Indexed(73)),
-        crate::model::RuntimeMode::Supervised => ("⏵ asks before acting", theme::DIM),
+        crate::model::RuntimeMode::Autopilot => (t!("⏵⏵ autopilot on"), theme::ACCENT),
+        crate::model::RuntimeMode::Edits => (t!("⏵⏵ accept edits on"), Color::Indexed(141)),
+        crate::model::RuntimeMode::Plan => (t!("⏸ plan mode on"), Color::Indexed(73)),
+        crate::model::RuntimeMode::Supervised => (t!("⏵ asks before acting"), theme::DIM),
     };
     let mut spans = target.unwrap_or_default();
-    spans.extend([
-        Span::styled(label.to_string(), Style::default().fg(color)),
-        Span::styled(" (shift+tab to cycle)".to_string(), theme::dim()),
-    ]);
+    spans.extend([Span::styled(label.to_string(), Style::default().fg(color)), Span::styled(cycle_hint(), theme::dim())]);
     if let Some(h) = &s.host {
-        spans.push(Span::styled(format!(" · {} on {h}", s.agent_name), theme::accent()));
+        spans.push(Span::styled(format!(" · {}", t!("{agent} on {host}", agent = s.agent_name, host = h)), theme::accent()));
     }
     spans
+}
+
+/// The footer's "(shift+tab to cycle)", the first thing to go when it's tight.
+fn cycle_hint() -> String {
+    format!(" {}", t!("(shift+tab to cycle)"))
 }
 
 /// Per-character styles for the composer: an `@name` naming a known agent
@@ -952,13 +983,13 @@ impl ComposerLayout {
 /// What an empty composer says it is for.
 fn composer_hint(v: &ThreadView) -> &'static str {
     if v.awaiting_answer() {
-        "send a message to decline and redirect the agent · Tab to answer"
+        t!("send a message to decline and redirect the agent · Tab to answer")
     } else if v.is_working() {
-        "agent is working · Enter sends into its turn · ^S interrupts"
+        t!("agent is working · Enter sends into its turn · ^S interrupts")
     } else if v.compose_only {
-        "message the thread · @name for someone else"
+        t!("message the thread · @name for someone else")
     } else {
-        "message the thread · @name for someone else · Esc dashboard"
+        t!("message the thread · @name for someone else · Esc dashboard")
     }
 }
 
@@ -999,7 +1030,7 @@ fn render_composer_footer(frame: &mut Frame, v: &ThreadView, footer: Rect) {
         let room = width.saturating_sub(left_width + 2);
         match &v.status {
             Some(st) => {
-                let style = if st.starts_with("error") { theme::danger() } else { theme::accent() };
+                let style = if v.status_is_error { theme::danger() } else { theme::accent() };
                 Line::from(Span::styled(ellipsize(st, room), style))
             }
             // A newer Axel, in place of the key help: the command as a pill.
@@ -1024,8 +1055,9 @@ fn render_composer_footer(frame: &mut Frame, v: &ThreadView, footer: Rect) {
         (None, None) => help_line(&v.help()).width(),
     };
     // Tight: drop the "(shift+tab to cycle)" hint and the host, keep who and the mode.
+    let hint = cycle_hint();
     if right.width() < full
-        && let Some(i) = left.iter().position(|s| s.content.starts_with(" (shift+tab"))
+        && let Some(i) = left.iter().position(|s| s.content == hint.as_str())
     {
         left.truncate(i);
         right = fit(&left);

@@ -7,12 +7,14 @@
 //!   floating pane): one box titled `agents · <tokens> · $cost [· ? n]`, one row per
 //!   agent (glyph, name, sparkline, tokens), a one-line dim footer when there is room.
 
+use axel_i18n::t;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Sparkline};
 
+use super::template_spans;
 use crate::dashboard::{Dashboard, Widget};
 use crate::model::{DashAgentRow, RequestKind, ThreadRow, state_glyph};
 use crate::theme;
@@ -121,7 +123,7 @@ fn render_compact(frame: &mut Frame, d: &Dashboard, area: Rect) {
         Layout::vertical([Constraint::Min(3), Constraint::Length(u16::from(has_footer))]).areas(area);
 
     let t = &d.data.tokens;
-    let mut title = format!("agents · {} · ${:.2}", format_tokens(t.input + t.output), t.cost_usd);
+    let mut title = t!("agents · {tokens} · ${cost}", tokens = format_tokens(t.input + t.output), cost = format!("{:.2}", t.cost_usd));
     if !d.data.requests.is_empty() {
         title.push_str(&format!(" · ? {}", d.data.requests.len()));
     }
@@ -136,7 +138,7 @@ fn render_compact(frame: &mut Frame, d: &Dashboard, area: Rect) {
 
     if inner.height > 0 && inner.width > 0 {
         if d.data.agents.is_empty() {
-            frame.render_widget(Paragraph::new(Line::from(Span::styled("no agents · n to create", theme::dim()))), inner);
+            frame.render_widget(Paragraph::new(Line::from(Span::styled(t!("no agents · n to create"), theme::dim()))), inner);
         } else {
             let rows = inner.height as usize;
             let total = d.data.agents.len();
@@ -152,7 +154,7 @@ fn render_compact(frame: &mut Frame, d: &Dashboard, area: Rect) {
             if total > shown {
                 let hidden = total - shown;
                 let row = Rect::new(inner.x, inner.y + cells(shown), inner.width, 1);
-                frame.render_widget(Paragraph::new(Line::from(Span::styled(format!("+{hidden} more"), theme::dim()))), row);
+                frame.render_widget(Paragraph::new(Line::from(Span::styled(t!("+{n} more", n = hidden), theme::dim()))), row);
             }
         }
     }
@@ -160,7 +162,7 @@ fn render_compact(frame: &mut Frame, d: &Dashboard, area: Rect) {
     if has_footer {
         let line = match &d.flash {
             Some((msg, _)) => Line::from(Span::styled(ellipsize(msg, footer.width as usize), theme::accent())),
-            None => Line::from(Span::styled("n new · i inbox · q", theme::dim())),
+            None => Line::from(Span::styled(t!("n new · i inbox · q"), theme::dim())),
         };
         frame.render_widget(Paragraph::new(line), footer);
     }
@@ -306,7 +308,7 @@ pub(crate) fn plan_thread_cols(width: usize) -> ThreadCols {
 
 fn render_threads(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
     let focused = d.focus == Widget::Threads;
-    let block = panel("threads", Some(d.data.threads.len().to_string()), focused);
+    let block = panel(t!("threads"), Some(d.data.threads.len().to_string()), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -314,7 +316,7 @@ fn render_threads(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
     }
     if d.data.threads.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled("No open threads — press n to start one.", theme::dim()))),
+            Paragraph::new(Line::from(Span::styled(t!("No open threads — press n to start one."), theme::dim()))),
             inner,
         );
         return;
@@ -366,7 +368,7 @@ pub(crate) fn render_thread_row(frame: &mut Frame, t: &ThreadRow, row: Rect, col
         None
     };
     if let Some(w) = cols.projects {
-        let p = if t.projects.is_empty() { "scratch".to_string() } else { t.projects.join(", ") };
+        let p = if t.projects.is_empty() { t!("scratch").to_string() } else { t.projects.join(", ") };
         let style = if t.projects.is_empty() { dim } else { base };
         spans.push(Span::styled(format!(" {}", pad_end(&ellipsize(&p, w), w)), style));
     }
@@ -424,7 +426,7 @@ fn plan_agent_cols(width: usize) -> AgentCols {
 
 fn render_agents(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
     let focused = d.focus == Widget::Agents;
-    let block = panel("agents", Some(d.data.agents.len().to_string()), focused);
+    let block = panel(t!("agents"), Some(d.data.agents.len().to_string()), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -432,7 +434,7 @@ fn render_agents(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
     }
     if d.data.agents.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled("No agents yet — press n to create one.", theme::dim()))),
+            Paragraph::new(Line::from(Span::styled(t!("No agents yet — press n to create one."), theme::dim()))),
             inner,
         );
         return;
@@ -479,7 +481,7 @@ fn render_agent_row(frame: &mut Frame, a: &DashAgentRow, row: Rect, cols: &Agent
 // ---------------------------------------------------------------- tokens
 
 fn render_tokens(frame: &mut Frame, d: &Dashboard, area: Rect) {
-    let block = panel("tokens (1h)", None, false);
+    let block = panel(t!("tokens (1h)"), None, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -493,23 +495,25 @@ fn render_tokens(frame: &mut Frame, d: &Dashboard, area: Rect) {
         let color = if data.iter().all(|v| *v == 0) { theme::DIM } else { theme::ACCENT };
         frame.render_widget(Sparkline::default().data(&data).style(Style::default().fg(color)), spark);
     }
-    let line = Line::from(vec![
-        Span::styled("in ", theme::dim()),
-        Span::styled(format_tokens(t.input), theme::bold()),
-        Span::styled("  out ", theme::dim()),
-        Span::styled(format_tokens(t.output), theme::bold()),
-        Span::styled("  cache ", theme::dim()),
-        Span::styled(format_tokens(t.cache_read + t.cache_write), theme::bold()),
-        Span::styled(format!("  ${:.2} est", t.cost_usd), theme::accent()),
-    ]);
+    let mut spans = template_spans(
+        t!("in {input}  out {output}  cache {cache}"),
+        theme::dim(),
+        &[
+            ("input", Span::styled(format_tokens(t.input), theme::bold())),
+            ("output", Span::styled(format_tokens(t.output), theme::bold())),
+            ("cache", Span::styled(format_tokens(t.cache_read + t.cache_write), theme::bold())),
+        ],
+    );
+    spans.push(Span::styled(format!("  {}", t!("${cost} est", cost = format!("{:.2}", t.cost_usd))), theme::accent()));
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), totals);
 }
 
 // ---------------------------------------------------------------- inbox
 
 fn render_inbox(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
-    let right = if d.data.unread > 0 { Some(format!("{} unread", d.data.unread)) } else { None };
-    let block = panel("inbox", right, false);
+    let right = if d.data.unread > 0 { Some(t!("{n} unread", n = d.data.unread)) } else { None };
+    let block = panel(t!("inbox"), right, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -552,7 +556,7 @@ fn render_inbox(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
         ]));
     }
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled("Inbox zero.", theme::dim())));
+        lines.push(Line::from(Span::styled(t!("Inbox zero."), theme::dim())));
     }
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(lines), inner);

@@ -6,6 +6,7 @@ use std::io::stdout;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use axel_i18n::t;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange,
     EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
@@ -194,7 +195,7 @@ impl<'a> App<'a> {
                 if let Some(t) = self.thread.as_mut() {
                     match glue::load_thread(self.deps.store, self.owner_pk, tid, now) {
                         Ok(d) => t.set_data(d),
-                        Err(e) => t.set_status(format!("error: refresh failed: {e}")),
+                        Err(e) => t.set_error(t!("error: refresh failed: {error}", error = e)),
                     }
                 }
             }
@@ -471,13 +472,12 @@ impl<'a> App<'a> {
                 if let Some(manage) = self.deps.manage_thread {
                     self.picker.notice = Some(match manage(&tid, op) {
                         Ok(()) => {
-                            let done = match op {
-                                crate::ThreadOp::Settle => "Settled",
-                                crate::ThreadOp::Reopen => "Reopened",
-                                crate::ThreadOp::Archive => "Archived",
-                                crate::ThreadOp::Delete => "Deleted",
-                            };
-                            format!("{done} “{title}”")
+                            match op {
+                                crate::ThreadOp::Settle => t!("Settled “{title}”", title = title),
+                                crate::ThreadOp::Reopen => t!("Reopened “{title}”", title = title),
+                                crate::ThreadOp::Archive => t!("Archived “{title}”", title = title),
+                                crate::ThreadOp::Delete => t!("Deleted “{title}”", title = title),
+                            }
                         }
                         Err(e) => format!("{e:#}"),
                     });
@@ -513,19 +513,23 @@ impl<'a> App<'a> {
             InboxAction::Allow(req) | InboxAction::Deny(req) => {
                 match glue::reply_permission(self.deps.store, self.deps.keystore, &req, allow) {
                     Ok(()) => self.inbox.set_flash(
-                        format!("{} {}'s request", if allow { "Allowed" } else { "Denied" }, req.agent_name),
+                        if allow {
+                            t!("Allowed {agent}'s request", agent = req.agent_name)
+                        } else {
+                            t!("Denied {agent}'s request", agent = req.agent_name)
+                        },
                         now,
                     ),
-                    Err(e) => self.inbox.set_flash(format!("reply failed: {e:#}"), now),
+                    Err(e) => self.inbox.set_flash(t!("reply failed: {error}", error = format!("{e:#}")), now),
                 }
                 self.refresh(true);
                 None
             }
             InboxAction::MarkRead => {
                 match glue::mark_all_read(self.deps.store, self.owner_pk, &self.inbox.data) {
-                    Ok(true) => self.inbox.set_flash("Marked all read", now),
-                    Ok(false) => self.inbox.set_flash("Nothing to mark", now),
-                    Err(e) => self.inbox.set_flash(format!("mark read failed: {e:#}"), now),
+                    Ok(true) => self.inbox.set_flash(t!("Marked all read"), now),
+                    Ok(false) => self.inbox.set_flash(t!("Nothing to mark"), now),
+                    Err(e) => self.inbox.set_flash(t!("mark read failed: {error}", error = format!("{e:#}")), now),
                 }
                 self.refresh(true);
                 None

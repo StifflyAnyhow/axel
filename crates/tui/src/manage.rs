@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use axel_i18n::t;
 use axel_store::AgentColor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -103,15 +104,15 @@ impl Action {
 
     pub fn label(self) -> &'static str {
         match self {
-            Action::Reset => "Reset",
-            Action::Move => "Move",
-            Action::Settle => "Settle",
-            Action::Reopen => "Reopen",
-            Action::Archive => "Archive",
-            Action::Stop => "Stop all",
-            Action::StopAgent => "Agents",
-            Action::Rename => "Rename",
-            Action::HardReset => "Hard reset",
+            Action::Reset => t!("Reset"),
+            Action::Move => t!("Move"),
+            Action::Settle => t!("Settle"),
+            Action::Reopen => t!("Reopen"),
+            Action::Archive => t!("Archive"),
+            Action::Stop => t!("Stop all"),
+            Action::StopAgent => t!("Agents"),
+            Action::Rename => t!("Rename"),
+            Action::HardReset => t!("Hard reset"),
         }
     }
 
@@ -191,17 +192,18 @@ impl ManageView {
 
     /// One line on what a row does, for this thread.
     pub fn describe(&self, action: Action) -> String {
-        let agent = self.data.agents.first().cloned().unwrap_or_else(|| "the agent".into());
+        let agent = self.data.agents.first().cloned().unwrap_or_else(|| t!("the agent").into());
         match action {
-            Action::Reset => format!("a fresh context for {agent}: a new session with a recap of the thread, nothing else carried over"),
-            Action::Move => format!("run {agent} on another machine: {}", self.data.hosts.join(", ")),
-            Action::Settle => "mark it done; it stays listed, dimmed".into(),
-            Action::Reopen => "back to open".into(),
-            Action::Archive => "stop its sessions and hide it (axel thread reopen brings it back)".into(),
-            Action::StopAgent => "pause, resume, kill, or remove an agent from this thread".into(),
-            Action::Stop => format!("end {} live session{}", self.live_count(), if self.live_count() == 1 { "" } else { "s" }),
-            Action::Rename => "change the title (the window follows)".into(),
-            Action::HardReset => "end every session and relaunch the panes; no agent, no recap: the next message starts from scratch".into(),
+            Action::Reset => t!("a fresh context for {agent}: a new session with a recap of the thread, nothing else carried over", agent = agent),
+            Action::Move => t!("run {agent} on another machine: {hosts}", agent = agent, hosts = self.data.hosts.join(", ")),
+            Action::Settle => t!("mark it done; it stays listed, dimmed").into(),
+            Action::Reopen => t!("back to open").into(),
+            Action::Archive => t!("stop its sessions and hide it (axel thread reopen brings it back)").into(),
+            Action::StopAgent => t!("pause, resume, kill, or remove an agent from this thread").into(),
+            Action::Stop if self.live_count() == 1 => t!("end 1 live session").into(),
+            Action::Stop => t!("end {n} live sessions", n = self.live_count()),
+            Action::Rename => t!("change the title (the window follows)").into(),
+            Action::HardReset => t!("end every session and relaunch the panes; no agent, no recap: the next message starts from scratch").into(),
         }
     }
 
@@ -213,10 +215,10 @@ impl ManageView {
         let mut actions = Vec::new();
         let live: Vec<_> = self.data.sessions.iter().filter(|s| s.agent == agent && s.live).collect();
         let name = || agent.to_string();
-        if live.iter().any(|s| s.state != "paused") { actions.push(("Pause", 'p', Outcome::PauseAgent { agent: name() })); }
-        if live.iter().any(|s| s.state == "paused") { actions.push(("Resume", 'r', Outcome::ResumeAgent { agent: name() })); }
-        if !live.is_empty() { actions.push(("Kill", 'x', Outcome::StopAgent { agent: name() })); }
-        actions.push(("Remove from thread", 'd', Outcome::RemoveAgent { agent: name() }));
+        if live.iter().any(|s| s.state != "paused") { actions.push((t!("Pause"), 'p', Outcome::PauseAgent { agent: name() })); }
+        if live.iter().any(|s| s.state == "paused") { actions.push((t!("Resume"), 'r', Outcome::ResumeAgent { agent: name() })); }
+        if !live.is_empty() { actions.push((t!("Kill"), 'x', Outcome::StopAgent { agent: name() })); }
+        actions.push((t!("Remove from thread"), 'd', Outcome::RemoveAgent { agent: name() }));
         actions
     }
 
@@ -424,7 +426,8 @@ impl Rows<'_, '_> {
 
 /// The title left, state · age · sessions right; the projects under it.
 fn render_title(rows: &mut Rows, d: &ManageData, width: usize) {
-    let right = format!("{} · {} · {} session{}", d.state, d.age, d.sessions.len(), if d.sessions.len() == 1 { "" } else { "s" });
+    let sessions = if d.sessions.len() == 1 { t!("1 session").to_string() } else { t!("{n} sessions", n = d.sessions.len()) };
+    let right = format!("{} · {} · {sessions}", d.state, d.age);
     let title_width = width.saturating_sub(text_width(&right) + 2);
     rows.push(Line::from(vec![
         Span::styled(pad_end(&ellipsize(&d.title, title_width), title_width), theme::accent_bold()),
@@ -453,13 +456,13 @@ impl SessionColumn {
 
     fn label(self) -> &'static str {
         match self {
-            Self::State => "state",
-            Self::Turns => "turns",
-            Self::Tools => "tools",
-            Self::Tokens => "tokens",
-            Self::Cost => "cost",
-            Self::Context => "ctx",
-            Self::Age => "for",
+            Self::State => t!("state"),
+            Self::Turns => t!("turns"),
+            Self::Tools => t!("tools"),
+            Self::Tokens => t!("tokens"),
+            Self::Cost => t!("cost"),
+            Self::Context => t!("ctx"),
+            Self::Age => t!("for"),
         }
     }
 
@@ -468,7 +471,8 @@ impl SessionColumn {
             Self::State | Self::Cost | Self::Age => 8,
             Self::Turns | Self::Tools => 6,
             Self::Tokens => 7,
-            Self::Context => 5,
+            // "上下文" takes six cells.
+            Self::Context => 6,
         }
     }
 
@@ -534,10 +538,11 @@ fn render_sessions(rows: &mut Rows, d: &ManageData, width: usize) {
 fn render_totals(rows: &mut Rows, d: &ManageData, width: usize) {
     let spark_width = width.saturating_sub(42).clamp(8, 30);
     let peak = crate::view::chart::peak(&d.spark, spark_width);
-    let files = if d.files_changed > 0 { format!(" · {} files changed", d.files_changed) } else { String::new() };
+    let files = if d.files_changed > 0 { format!(" · {}", t!("{n} files changed", n = d.files_changed)) } else { String::new() };
+    let numbers = t!("{turns} turns · {calls} tool calls", turns = d.turns, calls = d.tool_calls);
     let mut spans = vec![
-        Span::styled(format!("{} tokens", format_tokens(d.tokens)), theme::bold()),
-        Span::styled(format!(" ${:.2} · {} turns · {} tool calls{files}  ", d.cost_usd, d.turns, d.tool_calls), theme::dim()),
+        Span::styled(t!("{n} tokens", n = format_tokens(d.tokens)), theme::bold()),
+        Span::styled(format!(" ${:.2} · {numbers}{files}  ", d.cost_usd), theme::dim()),
     ];
     spans.extend(crate::view::chart::braille(&d.spark, spark_width, peak, theme::accent()));
     rows.push(Line::from(spans));
@@ -548,13 +553,13 @@ fn render_step(rows: &mut Rows, v: &ManageView, width: usize) {
     let pick = |sel: bool, text: String| Line::from(Span::styled(format!("{} {text}", if sel { "›" } else { " " }), if sel { theme::accent_bold() } else { Style::default() }));
     match &v.step {
         Step::PickAgent { action, idx } => {
-            rows.push(Line::from(Span::styled(format!("{} which agent?", action.label()), theme::accent_bold())));
+            rows.push(Line::from(Span::styled(t!("{action} which agent?", action = action.label()), theme::accent_bold())));
             for (i, a) in v.data.agents.iter().enumerate() {
                 rows.push(pick(i == *idx, a.clone()));
             }
         }
         Step::AgentActions { agent, idx } => {
-            rows.push(Line::from(Span::styled(format!("{agent} · agent controls"), theme::accent_bold())));
+            rows.push(Line::from(Span::styled(t!("{agent} · agent controls", agent = agent), theme::accent_bold())));
             for (i, (label, key, outcome)) in v.agent_actions(agent).iter().enumerate() {
                 let destructive = matches!(outcome, Outcome::StopAgent { .. } | Outcome::RemoveAgent { .. });
                 let style = if destructive { theme::danger() } else if i == *idx { theme::accent_bold() } else { Style::default() };
@@ -562,7 +567,7 @@ fn render_step(rows: &mut Rows, v: &ManageView, width: usize) {
             }
         }
         Step::PickHost { agent, idx } => {
-            rows.push(Line::from(Span::styled(format!("move {agent} where?"), theme::accent_bold())));
+            rows.push(Line::from(Span::styled(t!("move {agent} where?", agent = agent), theme::accent_bold())));
             for (i, h) in v.data.hosts.iter().enumerate() {
                 rows.push(pick(i == *idx, h.clone()));
             }
@@ -599,29 +604,29 @@ fn footer_line(v: &ManageView) -> Line<'static> {
             let style = if matches!(o, Outcome::HardReset) { theme::danger().add_modifier(ratatui::style::Modifier::BOLD) } else { theme::accent_bold() };
             Line::from(Span::styled(format!("{}  y/n", confirm_question(o)), style))
         }
-        Step::Rename(text) => Line::from(vec![Span::styled("title: ", theme::accent()), Span::raw(text.clone()), Span::styled("▏", theme::accent())]),
-        Step::PickAgent { .. } | Step::PickHost { .. } | Step::AgentActions { .. } => Line::from(Span::styled("↑↓ choose  ⏎ pick  Esc back", theme::dim())),
+        Step::Rename(text) => Line::from(vec![Span::styled(format!("{} ", t!("title:")), theme::accent()), Span::raw(text.clone()), Span::styled("▏", theme::accent())]),
+        Step::PickAgent { .. } | Step::PickHost { .. } | Step::AgentActions { .. } => Line::from(Span::styled(t!("↑↓ choose  ⏎ pick  Esc back"), theme::dim())),
         Step::Menu => match &v.data.note {
             Some(n) => Line::from(Span::styled(n.clone(), theme::accent())),
-            None => Line::from(Span::styled("↑↓ choose  ⏎ go  Esc close", theme::dim())),
+            None => Line::from(Span::styled(t!("↑↓ choose  ⏎ go  Esc close"), theme::dim())),
         },
     }
 }
 
 fn confirm_question(o: &Outcome) -> String {
     match o {
-        Outcome::Reset { agent } => format!("reset: end the thread's sessions and start {agent} fresh with a recap?"),
-        Outcome::Move { agent, host } => format!("move {agent} to {host}?"),
-        Outcome::Settle => "settle this thread?".into(),
-        Outcome::Reopen => "reopen this thread?".into(),
-        Outcome::Archive => "archive this thread: stop its sessions and hide it?".into(),
-        Outcome::Stop => "stop every live session?".into(),
-        Outcome::StopAgent { agent } => format!("kill {agent}'s live sessions on this thread?"),
-        Outcome::PauseAgent { agent } => format!("pause {agent} in place, including its running tools?"),
-        Outcome::ResumeAgent { agent } => format!("resume {agent}'s paused work?"),
-        Outcome::RemoveAgent { agent } => format!("stop {agent} and remove it from this thread? Its history is kept."),
-        Outcome::Rename(t) => format!("rename to {t}?"),
-        Outcome::HardReset => "hard reset: end every session, relaunch the panes, start nobody; the conversation is not carried over?".into(),
+        Outcome::Reset { agent } => t!("reset: end the thread's sessions and start {agent} fresh with a recap?", agent = agent),
+        Outcome::Move { agent, host } => t!("move {agent} to {host}?", agent = agent, host = host),
+        Outcome::Settle => t!("settle this thread?").into(),
+        Outcome::Reopen => t!("reopen this thread?").into(),
+        Outcome::Archive => t!("archive this thread: stop its sessions and hide it?").into(),
+        Outcome::Stop => t!("stop every live session?").into(),
+        Outcome::StopAgent { agent } => t!("kill {agent}'s live sessions on this thread?", agent = agent),
+        Outcome::PauseAgent { agent } => t!("pause {agent} in place, including its running tools?", agent = agent),
+        Outcome::ResumeAgent { agent } => t!("resume {agent}'s paused work?", agent = agent),
+        Outcome::RemoveAgent { agent } => t!("stop {agent} and remove it from this thread? Its history is kept.", agent = agent),
+        Outcome::Rename(title) => t!("rename to {title}?", title = title),
+        Outcome::HardReset => t!("hard reset: end every session, relaunch the panes, start nobody; the conversation is not carried over?").into(),
         Outcome::Close => String::new(),
     }
 }

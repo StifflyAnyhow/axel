@@ -3,6 +3,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use axel_i18n::t;
 use crate::model::{InboxData, RequestKind, RequestRow};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,7 +122,7 @@ impl Inbox {
                 if allow { InboxAction::Allow(req) } else { InboxAction::Deny(req) }
             }
             Some(_) => {
-                self.flash = Some(("Questions need a typed answer; reply from the agent's pane.".into(), i64::MAX));
+                self.flash = Some((t!("Questions need a typed answer; reply from the agent's pane.").into(), i64::MAX));
                 InboxAction::None
             }
             None => InboxAction::None,
@@ -151,14 +152,14 @@ impl Inbox {
     }
 
     pub fn help(&self) -> Vec<(&'static str, &'static str)> {
-        let mut v = vec![("↑↓", "pick"), ("Tab", "section")];
+        let mut v = vec![("↑↓", t!("pick")), ("Tab", t!("section"))];
         if matches!(self.selected_request(), Some(r) if r.kind == RequestKind::Permission) && self.focus == Focus::Requests {
-            v.push(("a", "allow"));
-            v.push(("d", "deny"));
+            v.push(("a", t!("allow")));
+            v.push(("d", t!("deny")));
         }
-        v.push(("r", "mark read"));
-        v.push(("n", "new thread"));
-        v.push(("q", "quit"));
+        v.push(("r", t!("mark read")));
+        v.push(("n", t!("new thread")));
+        v.push(("q", t!("quit")));
         v
     }
 }

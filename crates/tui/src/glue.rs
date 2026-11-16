@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow};
+use axel_i18n::t;
 use axel_identity::{Keypair, Keystore, attest};
 use axel_inbox::{Envelope, EnvelopeBuilder, kind};
 use axel_store::{AgentColor, NewAgent, Session, SessionFilter, SessionRuntime, SessionState, StatusState, Store, ThreadFilter, ThreadState};
@@ -74,7 +75,7 @@ pub fn load_agents(store: &Store) -> Result<Vec<AgentRow>> {
 /// Generate a keypair, store it, attest it with the owner key and insert the agent row.
 pub fn create_agent(store: &Store, keystore: &Keystore, spec: &NewAgentSpec) -> Result<AgentRow> {
     if store.agent_by_name(&spec.name).map_err(se)?.is_some() {
-        return Err(anyhow!("An agent named \"{}\" already exists.", spec.name));
+        return Err(anyhow!(t!("An agent named “{name}” already exists.", name = spec.name)));
     }
     let kp = Keypair::generate();
     keystore.put_agent(&kp).map_err(se).context("storing agent key")?;
@@ -116,7 +117,7 @@ impl<'a> Names<'a> {
 
     fn lookup(&mut self, pk: &str) -> (String, Option<AgentColor>) {
         if pk == self.owner_pk {
-            return ("you".to_string(), None);
+            return (t!("you").to_string(), None);
         }
         if let Some(n) = self.cache.get(pk) {
             return n.clone();
@@ -571,12 +572,12 @@ pub(crate) fn decode_body(kind: ItemKind, content: &Value) -> ItemBody {
                 .map(str::to_string)
                 .or_else(|| content.get("toolCall").and_then(|tc| str_of(tc, &["title"]).map(str::to_string)))
                 .or_else(|| content.get("tool_call").and_then(|tc| str_of(tc, &["title"]).map(str::to_string)))
-                .unwrap_or_else(|| "permission".to_string());
+                .unwrap_or_else(|| t!("permission").to_string());
             let options = options_of(content);
             let multiple = content.get("multi_select").and_then(|v| Some((v.get("min")?.as_u64()? as usize,v.get("max")?.as_u64()? as usize)));
             let chosen = str_of(content, &["chosen", "answer", "selected", "optionId", "option_id"]).map(|c| {
                 let ids = c.strip_prefix("answer:multi:").and_then(|s|serde_json::from_str::<Vec<String>>(s).ok()).unwrap_or_else(||vec![c.to_string()]);
-                if ids.is_empty() {return "No selections".to_string()}
+                if ids.is_empty() {return t!("No selections").to_string()}
                 ids.iter().map(|id|options.iter().find(|o| &o.id == id).map(|o|o.label.clone()).unwrap_or_else(||id.clone())).collect::<Vec<_>>().join(", ")
             });
             ItemBody::Choice { prompt, options, chosen, multiple }
@@ -783,15 +784,9 @@ fn turn_summary_items(t: axel_store::Turn, agent: Option<(String, Option<AgentCo
     };
     let mut text = summary.assistant_text.clone();
     if summary.tool_calls > 0 {
-        text.push_str(&format!(
-            "\n· {} tool call{} · {} file{} edited · {:.1}s · {}",
-            summary.tool_calls,
-            if summary.tool_calls == 1 { "" } else { "s" },
-            summary.files_edited,
-            if summary.files_edited == 1 { "" } else { "s" },
-            summary.duration_ms as f64 / 1000.0,
-            summary.stop_reason
-        ));
+        let calls = if summary.tool_calls == 1 { t!("1 tool call").to_string() } else { t!("{n} tool calls", n = summary.tool_calls) };
+        let files = if summary.files_edited == 1 { t!("1 file edited").to_string() } else { t!("{n} files edited", n = summary.files_edited) };
+        text.push_str(&format!("\n· {calls} · {files} · {:.1}s · {}", summary.duration_ms as f64 / 1000.0, summary.stop_reason));
     }
     let mut out = vec![
         item("u", 0, ItemKind::UserMessage, None, author, ItemBody::Text(summary.user_text.clone())),

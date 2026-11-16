@@ -5,6 +5,7 @@ use std::io::{Write, stdout};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use axel_i18n::t;
 use crossterm::{event::{self, Event, KeyCode, KeyEventKind, KeyModifiers}, terminal};
 use ratatui::{style::Style, text::Line};
 
@@ -36,22 +37,28 @@ fn line(text: &str, width: usize, style: Style) -> Line<'static> {
 }
 
 fn help(v: &DiffView) -> String {
-    let layout = if v.layout() == Layout::Unified { "s split" } else { "s unified" };
-    let notes = if v.drafts.is_empty() { String::new() } else { format!(" · Enter sends {} note(s)", v.drafts.len()) };
-    let undo = if v.data.can_undo { " · u undo" } else { "" };
-    let restore = if v.data.offer_restore { " · R restore" } else { "" };
-    format!("Scroll and select as usual · r review lines · {layout} · [ ] turn{notes}{undo}{restore} · q close")
+    let layout = format!("s {}", if v.layout() == Layout::Unified { t!("split") } else { t!("unified") });
+    let notes = if v.drafts.is_empty() { String::new() } else { format!(" · {}", t!("Enter sends {n} note(s)", n = v.drafts.len())) };
+    let undo = if v.data.can_undo { format!(" · u {}", t!("undo")) } else { String::new() };
+    let restore = if v.data.offer_restore { format!(" · R {}", t!("restore")) } else { String::new() };
+    t!(
+        "Scroll and select as usual · r review lines · {layout} · [ ] turn{notes}{undo}{restore} · q close",
+        layout = layout,
+        notes = notes,
+        undo = undo,
+        restore = restore
+    )
 }
 
 fn print(out: &mut impl Write, v: &DiffView, width: usize) -> Result<()> {
     // Width changes produce a fresh rendering, as in the tools pane. Otherwise
     // the output is immutable and belongs entirely to native scrollback.
     write!(out, "\x1b[H\x1b[2J\x1b[3J\x1b[?25l")?;
-    let heading = format!("{} · turn {} · {}", v.data.agent, v.data.turn, v.data.headline);
+    let heading = t!("{agent} · turn {turn} · {headline}", agent = v.data.agent, turn = v.data.turn, headline = v.data.headline);
     writeln!(out, "{}\r", to_ansi(&line(&heading, width, theme::bold())))?;
     writeln!(out, "{}\r\n", to_ansi(&line(&help(v), width, theme::dim())))?;
     if v.data.files.is_empty() {
-        writeln!(out, "{}\r", to_ansi(&line("No changes in this turn", width, theme::dim())))?;
+        writeln!(out, "{}\r", to_ansi(&line(t!("No changes in this turn"), width, theme::dim())))?;
     }
     for row in render::scrollback_rows(v, width) {
         writeln!(out, "{}\r", to_ansi(&row))?;
@@ -95,7 +102,7 @@ pub(super) fn run(v: &mut DiffView) -> Result<Outcome> {
                 if v.confirm_undo {
                     v.confirm_undo = false;
                     if key.code == KeyCode::Char('y') { return Ok(Outcome::Undo) }
-                    status("Undo cancelled", width.max(1))?;
+                    status(t!("Undo cancelled"), width.max(1))?;
                     continue;
                 }
                 match key.code {

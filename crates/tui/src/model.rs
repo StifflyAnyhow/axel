@@ -46,8 +46,8 @@ pub enum RequestKind {
 impl RequestKind {
     pub fn label(self) -> &'static str {
         match self {
-            RequestKind::Permission => "permission",
-            RequestKind::Question => "question",
+            RequestKind::Permission => axel_i18n::t!("permission"),
+            RequestKind::Question => axel_i18n::t!("question"),
         }
     }
 }

@@ -13,6 +13,7 @@
 //! [`BOX_MIN_WIDTH`] columns, it's one line: the last hour's tokens, today's
 //! cost and the fullest plan window.
 
+use axel_i18n::t;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -55,7 +56,7 @@ impl Col {
             Col::Day => "24h",
             Col::DayCost => "~$ 24h",
             Col::Context => "ctx",
-            Col::Spark => "last hour",
+            Col::Spark => t!("last hour"),
         }
     }
 
@@ -169,7 +170,7 @@ fn lines(data: &UsageData, width: usize, rows: usize, tight: bool) -> Vec<Line<'
         out.push(agent_line(a, &cols, name_w, spark_w, spark_max));
     }
     if shown < n {
-        out.push(Line::styled(format!("+{} more", n - shown), theme::dim()));
+        out.push(Line::styled(t!("+{n} more", n = n - shown), theme::dim()));
         return out;
     }
     let mut left = room - shown;
@@ -199,7 +200,7 @@ fn lines(data: &UsageData, width: usize, rows: usize, tight: bool) -> Vec<Line<'
 
 /// Nobody has spent yet: say so, then the plan limits if there's room.
 fn no_agents_lines(data: &UsageData, width: usize, rows: usize, tight: bool) -> Vec<Line<'static>> {
-    let mut out = vec![Line::styled("no tokens spent yet", theme::dim())];
+    let mut out = vec![Line::styled(t!("no tokens spent yet"), theme::dim())];
     if tight {
         if let Some(limits) = folded_limits(&data.limits, width).filter(|_| rows > 1) {
             out.push(Line::from(limits));
@@ -240,7 +241,7 @@ fn label_line(data: &UsageData, cols: &[Col], name_w: usize, spark_w: usize, wid
 /// Every agent together, dimmed, without a chart.
 fn all_line(data: &UsageData, cols: &[Col], name_w: usize) -> Line<'static> {
     let all = AgentSpend {
-        name: "all".into(),
+        name: t!("all").into(),
         last_hour: data.last_hour.clone(),
         last_day: data.last_day.clone(),
         total: data.total.clone(),
@@ -282,7 +283,7 @@ fn strip_and_all(out: &mut Vec<Line<'static>>, strip: Option<Line<'static>>, all
 fn thread_lines(out: &mut Vec<Line<'static>>, data: &UsageData, width: usize, left: usize) {
     assert!(left >= 3, "the caller leaves room for a gap, a label and a thread");
     out.push(Line::raw(""));
-    out.push(Line::styled("threads · 24h", theme::dim()));
+    out.push(Line::styled(t!("threads · 24h"), theme::dim()));
     let left = left - 2;
     let money = width >= 24;
     let title_w = width.saturating_sub(7 + if money { 8 } else { 0 }).max(4);
@@ -307,7 +308,7 @@ fn plans(out: &mut Vec<Line<'static>>, plans: &[PlanRow], width: usize, left: us
         return 0;
     }
     out.push(Line::raw(""));
-    out.push(Line::styled("plan limits", theme::dim()));
+    out.push(Line::styled(t!("plan limits"), theme::dim()));
     for p in plans {
         out.push(plan_line(p, width, name_w));
     }
@@ -368,7 +369,7 @@ fn folded_limits(plans: &[PlanRow], width: usize) -> Option<Vec<Span<'static>>> 
     let window = |w: &LimitRow| -> Vec<Span<'static>> {
         match w.used_pct {
             Some(pct) => vec![Span::styled(format!("{} ", w.window.short()), theme::dim()), Span::styled(format!("{pct:.0}%"), pct_style(pct))],
-            None => vec![Span::styled(format!("{} new", w.window.short()), theme::dim())],
+            None => vec![Span::styled(format!("{} {}", w.window.short(), t!("new")), theme::dim())],
         }
     };
     let mut all = Vec::new();
@@ -423,7 +424,7 @@ fn window_spans(w: &LimitRow, detail: Detail) -> Vec<Span<'static>> {
     let mut spans = vec![Span::styled(format!("  {} ", w.window.short()), theme::dim())];
     let Some(pct) = w.used_pct else {
         // Started over since it was reported: unknown until the next report.
-        spans.push(Span::styled(" new", theme::dim()));
+        spans.push(Span::styled(format!(" {}", t!("new")), theme::dim()));
         return spans;
     };
     if detail == Detail::Bar {

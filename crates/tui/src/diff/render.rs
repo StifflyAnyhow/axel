@@ -1,3 +1,4 @@
+use axel_i18n::t;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -47,7 +48,7 @@ fn sidebar(frame: &mut Frame, v: &mut DiffView, area: Rect) {
     for i in v.file_order() {
         let file = &v.data.files[i];
         if grouped && !file.authored && !others {
-            rows.push((None, Line::from(plain("also changed", width, Style::default().fg(v.palette.muted)))));
+            rows.push((None, Line::from(plain(t!("also changed"), width, Style::default().fg(v.palette.muted)))));
             others = true;
             parent.clear();
         }
@@ -103,9 +104,9 @@ fn cell(v: &DiffView, file: usize, idx: Option<usize>, side: Side, width: usize,
 
 fn note_lines(draft: &Draft, width: usize) -> Vec<Line<'static>> {
     if width < 4 { return vec![Line::from(plain("✎", width, theme::accent()))] }
-    let side = if draft.side == Side::Old { "old" } else { "new" };
+    let side = if draft.side == Side::Old { t!("old") } else { t!("new") };
     let range = if draft.start == draft.end { draft.start.to_string() } else { format!("{}–{}", draft.start, draft.end) };
-    let mut lines = vec![Line::from(plain(&format!("╭ ✎ note · {side} L{range}"), width, theme::accent()))];
+    let mut lines = vec![Line::from(plain(&t!("╭ ✎ note · {side} L{range}", side = side, range = range), width, theme::accent()))];
     let room = width.saturating_sub(3).max(1);
     for paragraph in draft.note.lines() {
         let (mut text, mut used) = (String::new(), 0);
@@ -214,7 +215,7 @@ fn stream(v: &DiffView, width: usize) -> Vec<Row> {
         out.push(Row { file, header: true, line: Some(file_header(v, file, width)), code: None, sources: Vec::new() });
         let body = rows(v, file, width);
         if body.is_empty() {
-            out.push(Row { file, header: false, line: Some(Line::styled("  No text changes", Style::default().fg(v.palette.muted))), code: None, sources: Vec::new() });
+            out.push(Row { file, header: false, line: Some(Line::styled(format!("  {}", t!("No text changes")), Style::default().fg(v.palette.muted))), code: None, sources: Vec::new() });
         } else { out.extend(body); }
     }
     out
@@ -231,7 +232,7 @@ pub(super) fn render(frame: &mut Frame, v: &mut DiffView) {
     let area = frame.area();
     v.hits.clear();
     if area.width == 0 || area.height == 0 { return }
-    let title = format!("{} · turn {} · {}", v.data.agent, v.data.turn, v.data.headline);
+    let title = t!("{agent} · turn {turn} · {headline}", agent = v.data.agent, turn = v.data.turn, headline = v.data.headline);
     draw(frame, area.x, area.y, area.width, Line::from(plain(&title, area.width as usize, theme::bold())));
     if area.height < 4 { return }
     let nav_width = if area.width >= 146 && area.height >= 8 { (area.width / 5).clamp(28, 38) } else { 0 };
@@ -256,7 +257,7 @@ pub(super) fn render(frame: &mut Frame, v: &mut DiffView) {
         draw(frame, x, y, width, line);
     }
     if v.data.files.is_empty() {
-        draw(frame, x, area.y + 2, width, Line::from(plain("No changes in this turn", width as usize, theme::dim())));
+        draw(frame, x, area.y + 2, width, Line::from(plain(t!("No changes in this turn"), width as usize, theme::dim())));
     }
     let footer = footer_text(v, area.width);
     draw(frame, area.x, area.bottom() - 1, area.width, Line::from(plain(&footer, area.width as usize, if v.input.is_some() || v.confirm_undo { theme::accent() } else { theme::dim() })));
@@ -308,23 +309,27 @@ fn push_hits(v: &mut DiffView, row: &Row, rect: Rect) {
 /// many keys as the width takes.
 fn footer_text(v: &DiffView, area_width: u16) -> String {
     if let Some(buf) = &v.input {
-        return format!("note: {buf}▏  Enter saves · Esc cancels");
+        return t!("note: {text}▏  Enter saves · Esc cancels", text = buf);
     }
     if v.confirm_undo {
-        return format!("undo turn {} of {}: {}? y/n", v.data.turn, v.data.agent, v.data.headline);
+        return t!("undo turn {turn} of {agent}: {headline}? y/n", turn = v.data.turn, agent = v.data.agent, headline = v.data.headline);
     }
     if let Some(note) = &v.data.note {
         return note.clone();
     }
-    let layout = if v.layout() == Layout::Unified { "s side by side" } else { "s unified" };
-    let notes = if v.drafts.is_empty() { String::new() } else { format!("  ⏎ send {} note{}", v.drafts.len(), if v.drafts.len() == 1 { "" } else { "s" }) };
-    let undo = if v.data.can_undo { "  u undo" } else { "" };
+    let layout = format!("s {}", if v.layout() == Layout::Unified { t!("side by side") } else { t!("unified") });
+    let notes = match v.drafts.len() {
+        0 => String::new(),
+        1 => format!("  {}", t!("⏎ send 1 note")),
+        n => format!("  {}", t!("⏎ send {n} notes", n = n)),
+    };
+    let undo = if v.data.can_undo { format!("  u {}", t!("undo")) } else { String::new() };
     if area_width < 90 {
-        format!("↑↓ file  j/k line  v mark  c note  s split  q back{notes}")
+        t!("↑↓ file  j/k line  v mark  c note  s split  q back{notes}", notes = notes)
     } else if area_width < 140 {
-        format!("↑↓ files  j/k lines  ←→ pan  c note{notes}  {layout}  q back")
+        t!("↑↓ files  j/k lines  ←→ pan  c note{notes}  {layout}  q back", notes = notes, layout = layout)
     } else {
-        format!("↑↓ file  j/k line  ←→ pan  n/p hunk  v mark  c note{notes}{undo}  {layout}  [ ] turn  q back")
+        t!("↑↓ file  j/k line  ←→ pan  n/p hunk  v mark  c note{notes}{undo}  {layout}  [ ] turn  q back", notes = notes, undo = undo, layout = layout)
     }
 }
 

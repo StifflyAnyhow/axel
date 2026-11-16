@@ -8,6 +8,7 @@ use std::io::stdout;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use axel_i18n::t;
 use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
 use crossterm::execute;
 use ratatui::Frame;
@@ -91,7 +92,7 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
                         ask_new(&v);
                     }
                     // As the thread screen does: the next refresh tries again.
-                    Err(e) => v.set_status(format!("error: refresh failed: {e}")),
+                    Err(e) => v.set_error(t!("error: refresh failed: {error}", error = e)),
                 }
                 // Settled (or archived, deleted) elsewhere, e.g. from the
                 // dashboard: the thread's window goes, as when you leave it.
@@ -276,8 +277,10 @@ fn render_answer(frame: &mut Frame, v: &ThreadView) {
     lines.pop();
     lines.push(Line::from(""));
     let hint=if let crate::model::ItemBody::Choice {multiple:Some((min,max)),..}=v.data.items[i].body {
-        format!("↑↓ move · Space toggle · Enter confirm · {min}–{max} picks · Esc later")
-    } else {"↑↓ pick · Enter or 1–9 answer · Esc answer later in the composer".into()};
+        t!("↑↓ move · Space toggle · Enter confirm · {min}–{max} picks · Esc later", min = min, max = max)
+    } else {
+        t!("↑↓ pick · Enter or 1–9 answer · Esc answer later in the composer").into()
+    };
     lines.push(Line::styled(hint, crate::theme::dim()));
     if let Some(st) = &v.status {
         lines.push(Line::styled(st.clone(), crate::theme::dim()));

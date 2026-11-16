@@ -46,24 +46,24 @@ pub fn slugify(title: &str) -> String {
 /// Both arguments are Unix seconds. Timestamps in the future (clock skew) are
 /// reported as `"just now"`.
 pub fn relative_time(ts_secs: i64, now_secs: i64) -> String {
+    use axel_i18n::t;
     let delta = now_secs.saturating_sub(ts_secs);
     if delta < 60 {
-        return "just now".to_string();
+        return t!("just now").to_string();
     }
-    let (n, unit) = if delta < 3600 {
-        (delta / 60, "m")
+    if delta < 3600 {
+        t!("{n}m ago", n = delta / 60)
     } else if delta < 86_400 {
-        (delta / 3600, "h")
+        t!("{n}h ago", n = delta / 3600)
     } else if delta < 7 * 86_400 {
-        (delta / 86_400, "d")
+        t!("{n}d ago", n = delta / 86_400)
     } else if delta < 30 * 86_400 {
-        (delta / (7 * 86_400), "w")
+        t!("{n}w ago", n = delta / (7 * 86_400))
     } else if delta < 365 * 86_400 {
-        (delta / (30 * 86_400), "mo")
+        t!("{n}mo ago", n = delta / (30 * 86_400))
     } else {
-        (delta / (365 * 86_400), "y")
-    };
-    format!("{n}{unit} ago")
+        t!("{n}y ago", n = delta / (365 * 86_400))
+    }
 }
 
 /// Current Unix time in seconds.
