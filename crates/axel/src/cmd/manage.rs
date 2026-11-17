@@ -78,14 +78,7 @@ fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> 
             let n = super::thread::stop_thread(ctx, thread_id)?;
             if n == 1 { t!("stopped 1 session").to_string() } else { t!("stopped {n} sessions", n = n) }
         }
-        Outcome::SetInspected(on) => {
-            ctx.store.set_thread_inspected(thread_id, *on)?;
-            if *on {
-                t!("inspector on: this thread's new managed sessions are recorded (running ones are unchanged)").to_string()
-            } else {
-                t!("inspector off: this thread's new managed sessions talk to their provider directly").to_string()
-            }
-        }
+        Outcome::SetInspected { on, restart } => return set_inspected(ctx, thread_id, *on, *restart),
         Outcome::OpenInspector => {
             super::ui::toggle_inspect(Some(thread_id.to_string()))?;
             t!("opened the token inspector").to_string()
@@ -108,6 +101,42 @@ fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> 
             }
         }
     }))
+}
+
+/// What ends a session so it picks up the inspector's switch; the next
+/// message resumes its conversation (unlike a hard reset).
+const INSPECTOR_RESTART: &str = "restarted for the inspector";
+
+/// Flip the thread's inspector, and with `restart` end its idle managed
+/// sessions so they come back through (or around) the proxy on the next
+/// message, their conversation kept.  Busy ones are left to finish.
+fn set_inspected(ctx: &Ctx, thread_id: &str, on: bool, restart: bool) -> Result<Option<String>> {
+    ctx.store.set_thread_inspected(thread_id, on)?;
+    let restarted = if restart { restart_idle_managed(ctx, thread_id)? } else { 0 };
+    if restarted > 0 && super::ui::relaunch_thread_panes(ctx, thread_id)? {
+        // Docking the thread again closes this pane: nothing left to report in it.
+        return Ok(None);
+    }
+    Ok(Some(match (on, restarted) {
+        (true, 0) => t!("inspector on: this thread's new managed sessions are recorded").to_string(),
+        (false, 0) => t!("inspector off: this thread's new managed sessions talk to their provider directly").to_string(),
+        (true, n) => t!("inspector on: {n} session(s) restarted; they're recorded from your next message", n = n),
+        (false, n) => t!("inspector off: {n} session(s) restarted; they talk to their provider directly from your next message", n = n),
+    }))
+}
+
+/// End the thread's live managed sessions on this machine that are between
+/// turns; how many ended.
+fn restart_idle_managed(ctx: &Ctx, thread_id: &str) -> Result<usize> {
+    let statuses: HashMap<String, axel_store::Status> = ctx.store.statuses()?.into_iter().map(|s| (s.session_id.clone(), s)).collect();
+    let local_env = ctx.store.local_environment()?.id;
+    let sessions = ctx.store.list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), ..Default::default() })?;
+    let idle: Vec<axel_store::Session> = sessions
+        .into_iter()
+        .filter(|s| s.ended_at.is_none() && s.runtime == axel_store::SessionRuntime::Managed && s.environment_id == local_env)
+        .filter(|s| matches!(session_state_label(s, statuses.get(&s.id)), "idle" | "done"))
+        .collect();
+    super::thread::end_sessions(ctx, &idle, INSPECTOR_RESTART)
 }
 
 /// Characters of a session id the footer shows.
@@ -257,6 +286,7 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
             state: session_state_label(s, statuses.get(&s.id)).into(),
             live,
             host,
+            managed: s.runtime == axel_store::SessionRuntime::Managed,
             turns: count(mine.len()),
             tool_calls: calls,
             tokens: toks,

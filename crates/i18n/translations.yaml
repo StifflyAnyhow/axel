@@ -1858,8 +1858,6 @@
   zh-Hans: "请求"
 "inspector off: this thread's new managed sessions talk to their provider directly":
   zh-Hans: "检查器已关闭：这个话题的新托管会话将直接连接服务商"
-"inspector on: this thread's new managed sessions are recorded (running ones are unchanged)":
-  zh-Hans: "检查器已开启：这个话题的新托管会话会被记录（已在运行的会话不受影响）"
 "inspector":
   zh-Hans: "检查器"
 "latest":
@@ -1882,3 +1880,13 @@
   zh-Hans: "已关闭：开启后记录每个模型请求的费用及原因"
 "each request: its cost and what filled its context":
   zh-Hans: "每个请求：它的费用，以及上下文里装了什么"
+"inspector on: this thread's new managed sessions are recorded":
+  zh-Hans: "检查器已开启：这个话题的新托管会话会被记录"
+"inspector on: {n} session(s) restarted; they're recorded from your next message":
+  zh-Hans: "检查器已开启：已重启 {n} 个会话；从你的下一条消息起会被记录"
+"inspector off: {n} session(s) restarted; they talk to their provider directly from your next message":
+  zh-Hans: "检查器已关闭：已重启 {n} 个会话；从你的下一条消息起直接连接服务商"
+"record this thread: restart {agents} now so it's recorded too? Its conversation continues on your next message (n: only new sessions)":
+  zh-Hans: "记录这个话题：现在重启 {agents}，让它也被记录？它的对话会在你的下一条消息时继续（n：仅新会话）"
+"stop recording: restart {agents} now so it stops too? Its conversation continues on your next message (n: only new sessions)":
+  zh-Hans: "停止记录：现在重启 {agents}，让它也停止记录？它的对话会在你的下一条消息时继续（n：仅新会话）"

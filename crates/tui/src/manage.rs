@@ -128,6 +128,8 @@ pub struct SessionRow {
     pub live: bool,
     /// Where it runs when not here.
     pub host: Option<String>,
+    /// Axel drives it over ACP (the inspector can reach it), rather than a harness in a pane.
+    pub managed: bool,
     pub turns: i64,
     pub tool_calls: i64,
     pub tokens: i64,
@@ -214,8 +216,11 @@ pub enum Outcome {
     ResumeAgent { agent: String },
     RemoveAgent { agent: String },
     Rename(String),
-    /// Record this thread's new managed sessions through the inspector (`true`), or stop.
-    SetInspected(bool),
+    /// Record this thread's new managed sessions through the inspector
+    /// (`on`), or stop; with `restart`, its idle managed sessions end too, so
+    /// they come back (their conversation kept) on the next message, with the
+    /// switch applied.
+    SetInspected { on: bool, restart: bool },
     /// Open the token inspector on this thread.
     OpenInspector,
     /// End every session and relaunch the panes; no agent, no recap.
@@ -292,6 +297,19 @@ impl ManageView {
         }
     }
 
+    /// Agents whose session here could restart now to pick up the
+    /// inspector's switch: live, managed, on this machine, between turns.
+    pub fn restartable(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in &self.data.sessions {
+            let between_turns = matches!(s.state.as_str(), "idle" | "done");
+            if s.live && s.managed && s.host.is_none() && between_turns && !out.contains(&s.agent) {
+                out.push(s.agent.clone());
+            }
+        }
+        out
+    }
+
     fn live_count(&self) -> usize {
         self.data.sessions.iter().filter(|s| s.live).count()
     }
@@ -333,6 +351,12 @@ impl ManageView {
                 KeyCode::Char('y') | KeyCode::Enter => {
                     self.step = Step::Menu;
                     Some(outcome)
+                }
+                // "No" to the restart still flips the switch, for new sessions.
+                KeyCode::Char('n') if matches!(outcome, Outcome::SetInspected { .. }) => {
+                    self.step = Step::Menu;
+                    let Outcome::SetInspected { on, .. } = outcome else { unreachable!("matched above") };
+                    Some(Outcome::SetInspected { on, restart: false })
                 }
                 KeyCode::Esc | KeyCode::Char('n') => {
                     self.step = Step::Menu;
@@ -427,8 +451,15 @@ impl ManageView {
     /// Begin `action`: a step to go through, or (for the switches) an outcome at once.
     fn start(&mut self, action: Action) -> Option<Outcome> {
         match action {
-            // Nothing to confirm: either way it changes only what new sessions do.
-            Action::Inspect => return Some(Outcome::SetInspected(!self.data.inspect.on)),
+            // Sessions already running keep how they started: offer to restart
+            // the idle ones; with none, nothing to confirm.
+            Action::Inspect => {
+                let on = !self.data.inspect.on;
+                if self.restartable().is_empty() {
+                    return Some(Outcome::SetInspected { on, restart: false });
+                }
+                self.step = Step::Confirm(Outcome::SetInspected { on, restart: true });
+            }
             Action::Requests => return Some(Outcome::OpenInspector),
             Action::Reset | Action::Move | Action::StopAgent => {
                 let candidates = self.data.agents.clone();
@@ -736,7 +767,7 @@ fn footer_line(v: &ManageView) -> Line<'static> {
     match &v.step {
         Step::Confirm(o) => {
             let style = if matches!(o, Outcome::HardReset) { theme::danger().add_modifier(ratatui::style::Modifier::BOLD) } else { theme::accent_bold() };
-            Line::from(Span::styled(format!("{}  y/n", confirm_question(o)), style))
+            Line::from(Span::styled(format!("{}  y/n", confirm_question(o, &v.restartable().join(", "))), style))
         }
         Step::Rename(text) => Line::from(vec![Span::styled(format!("{} ", t!("title:")), theme::accent()), Span::raw(text.clone()), Span::styled("▏", theme::accent())]),
         Step::PickAgent { .. } | Step::PickHost { .. } | Step::AgentActions { .. } => Line::from(Span::styled(t!("↑↓ choose  ⏎ pick  Esc back"), theme::dim())),
@@ -747,7 +778,8 @@ fn footer_line(v: &ManageView) -> Line<'static> {
     }
 }
 
-fn confirm_question(o: &Outcome) -> String {
+/// The question for `o`; `agents` are the ones a restart would restart.
+fn confirm_question(o: &Outcome, agents: &str) -> String {
     match o {
         Outcome::Reset { agent } => t!("reset: end the thread's sessions and start {agent} fresh with a recap?", agent = agent),
         Outcome::Move { agent, host } => t!("move {agent} to {host}?", agent = agent, host = host),
@@ -761,7 +793,9 @@ fn confirm_question(o: &Outcome) -> String {
         Outcome::RemoveAgent { agent } => t!("stop {agent} and remove it from this thread? Its history is kept.", agent = agent),
         Outcome::Rename(title) => t!("rename to {title}?", title = title),
         Outcome::HardReset => t!("hard reset: end every session, relaunch the panes, start nobody; the conversation is not carried over?").into(),
-        Outcome::Close | Outcome::SetInspected(_) | Outcome::OpenInspector => String::new(),
+        Outcome::SetInspected { on: true, .. } => t!("record this thread: restart {agents} now so it's recorded too? Its conversation continues on your next message (n: only new sessions)", agents = agents),
+        Outcome::SetInspected { on: false, .. } => t!("stop recording: restart {agents} now so it stops too? Its conversation continues on your next message (n: only new sessions)", agents = agents),
+        Outcome::Close | Outcome::OpenInspector => String::new(),
     }
 }
 
@@ -921,12 +955,22 @@ mod tests {
     }
 
     #[test]
-    fn i_turns_the_inspector_on_and_v_opens_its_requests() {
-        let mut v = ManageView::new(data());
+    fn i_turns_the_inspector_on_offering_to_restart_idle_sessions_and_v_opens_its_requests() {
+        let mut d = data();
+        d.sessions[0].managed = true;
+        let mut v = ManageView::new(d);
         assert!(!v.actions().contains(&Action::Requests), "nothing to look at while it's off and empty");
-        assert_eq!(v.handle_key(key(KeyCode::Char('i'))), Some(Outcome::SetInspected(true)), "no confirmation: it only changes new sessions");
+        assert_eq!(v.restartable(), ["opus"], "live, managed, here and idle; fable has ended");
+        assert_eq!(v.handle_key(key(KeyCode::Char('i'))), None, "asks first: opus runs as it started");
+        assert_eq!(v.step, Step::Confirm(Outcome::SetInspected { on: true, restart: true }));
+        assert_eq!(v.handle_key(key(KeyCode::Char('n'))), Some(Outcome::SetInspected { on: true, restart: false }), "no restart, still on");
         v.data.inspect.on = true;
-        assert_eq!(v.handle_key(key(KeyCode::Char('i'))), Some(Outcome::SetInspected(false)));
+        v.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(v.handle_key(key(KeyCode::Char('y'))), Some(Outcome::SetInspected { on: false, restart: true }));
+        // Working, remote or in a pane: nothing to restart, nothing to ask.
+        v.data.sessions[0].state = "working".into();
+        assert!(v.restartable().is_empty());
+        assert_eq!(v.handle_key(key(KeyCode::Char('i'))), Some(Outcome::SetInspected { on: false, restart: false }));
         assert!(v.actions().contains(&Action::Requests));
         assert_eq!(v.handle_key(key(KeyCode::Char('v'))), Some(Outcome::OpenInspector));
     }
